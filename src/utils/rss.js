@@ -63,6 +63,7 @@ export async function fetchChannelFeed(channelId) {
 }
 
 // Get channel profile picture URL from YouTube page
+// og:image returns the banner, not the avatar. We need to scrape ytInitialData for the actual pfp.
 export async function fetchChannelAvatar(handle) {
   try {
     const url = `https://www.youtube.com/@${handle}`;
@@ -71,8 +72,21 @@ export async function fetchChannelAvatar(handle) {
     });
     const html = await resp.text();
 
-    const ogMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/);
-    if (ogMatch) return ogMatch[1];
+    // Look for avatar in ytInitialData — it's under "avatar" > "thumbnails"
+    const avatarMatch = html.match(/"avatar"\s*:\s*\{\s*"decoratedAvatarViewModel"[^}]*"avatar"\s*:\s*\{\s*"avatarViewModel"[^}]*"image"\s*:\s*\{\s*"sources"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"/);
+    if (avatarMatch) return avatarMatch[1];
+
+    // Fallback: look for thumbnail pattern in avatar context
+    const thumbMatch = html.match(/"avatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{[^}]*"url"\s*:\s*"([^"]+)"/);
+    if (thumbMatch) return thumbMatch[1];
+
+    // Fallback: find any 88x88 yt image URL (typical avatar size)
+    const smallAvatarMatch = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"]+?=s88[^"]*)/);
+    if (smallAvatarMatch) return smallAvatarMatch[1].replace('=s88', '=s176');
+
+    // Last resort: any yt3.googleusercontent avatar-sized URL
+    const anyAvatarMatch = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[a-zA-Z0-9_-]{20,}[^"]*)/);
+    if (anyAvatarMatch) return anyAvatarMatch[1];
 
     return null;
   } catch {
