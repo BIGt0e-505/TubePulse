@@ -1,4 +1,9 @@
-import { parseString } from 'react-native-xml2js';
+import { XMLParser } from 'fast-xml-parser';
+
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+});
 
 // Resolve @handle to channel ID by scraping the channel page
 export async function resolveChannelId(handle) {
@@ -8,7 +13,6 @@ export async function resolveChannelId(handle) {
   });
   const html = await resp.text();
 
-  // Look for channel ID in meta tags or page data
   const match = html.match(/channel_id=([a-zA-Z0-9_-]{24})/);
   if (match) return match[1];
 
@@ -23,36 +27,39 @@ export async function fetchChannelFeed(channelId) {
   const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
   const resp = await fetch(feedUrl);
   const xml = await resp.text();
+  const result = parser.parse(xml);
 
-  return new Promise((resolve, reject) => {
-    parseString(xml, { explicitArray: false }, (err, result) => {
-      if (err) return reject(err);
+  const feed = result.feed;
+  if (!feed || !feed.entry) return { channel: null, videos: [] };
 
-      const feed = result.feed;
-      if (!feed || !feed.entry) return resolve({ channel: null, videos: [] });
+  const entries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
 
-      const entries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+  const channel = {
+    name: feed.author?.name || feed.title || '',
+    uri: feed.author?.uri || '',
+  };
 
-      const channel = {
-        name: feed.author?.name || feed.title || '',
-        uri: feed.author?.uri || '',
-        profileUrl: null, // RSS doesn't include pfp, we'll get it separately
-      };
+  const videos = entries.map((entry) => {
+    const videoId = entry['yt:videoId'];
+    const link = entry.link?.['@_href'] || `https://www.youtube.com/watch?v=${videoId}`;
+    const mediaGroup = entry['media:group'] || {};
+    const thumbnail = mediaGroup['media:thumbnail']?.['@_url'] || null;
+    const description = mediaGroup['media:description'] || '';
+    const views = mediaGroup['media:community']?.['media:statistics']?.['@_views'] || '0';
 
-      const videos = entries.map((entry) => ({
-        videoId: entry['yt:videoId'],
-        title: entry.title,
-        published: entry.published,
-        updated: entry.updated,
-        link: entry.link?.$?.href || `https://www.youtube.com/watch?v=${entry['yt:videoId']}`,
-        thumbnail: entry['media:group']?.['media:thumbnail']?.$?.url || null,
-        description: entry['media:group']?.['media:description'] || '',
-        views: entry['media:group']?.['media:community']?.['media:statistics']?.$?.views || '0',
-      }));
-
-      resolve({ channel, videos });
-    });
+    return {
+      videoId,
+      title: entry.title,
+      published: entry.published,
+      updated: entry.updated,
+      link,
+      thumbnail,
+      description,
+      views,
+    };
   });
+
+  return { channel, videos };
 }
 
 // Get channel profile picture URL from YouTube page
@@ -64,7 +71,6 @@ export async function fetchChannelAvatar(handle) {
     });
     const html = await resp.text();
 
-    // YouTube embeds avatar in og:image or in yt initial data
     const ogMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/);
     if (ogMatch) return ogMatch[1];
 
