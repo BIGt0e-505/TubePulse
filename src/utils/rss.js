@@ -5,11 +5,18 @@ const parser = new XMLParser({
   attributeNamePrefix: '@_',
 });
 
+// Common headers to bypass YouTube's consent wall (EU/UK cookie consent redirect)
+const YT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0',
+  'Cookie': 'CONSENT=YES+1',
+};
+
 // Resolve @handle to channel ID by scraping the channel page
 export async function resolveChannelId(handle) {
   const url = `https://www.youtube.com/@${handle}`;
   const resp = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0' },
+    headers: YT_HEADERS,
+    redirect: 'follow',
   });
   const html = await resp.text();
 
@@ -68,7 +75,8 @@ export async function fetchChannelAvatar(handle) {
   try {
     const url = `https://www.youtube.com/@${handle}`;
     const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
+      headers: YT_HEADERS,
+      redirect: 'follow',
     });
     const html = await resp.text();
 
