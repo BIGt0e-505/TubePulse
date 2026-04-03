@@ -5,25 +5,47 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#121212"
     },
     "ios": {
       "supportsTablet": true
     },
     "android": {
+      "package": "com.tubepulse.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#121212"
       },
       "edgeToEdgeEnabled": true
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-notifications",
+      [
+        "react-native-android-widget",
+        {
+          "widgets": [
+            {
+              "name": "TubePulseWidget",
+              "label": "TubePulse",
+              "minWidth": "250dp",
+              "minHeight": "110dp",
+              "resizeMode": "horizontal|vertical",
+              "targetCellWidth": 4,
+              "targetCellHeight": 2,
+              "description": "YouTube channel update tracker",
+              "updatePeriodMillis": 1800000
+            }
+          ]
+        }
+      ]
+    ]
   }
 }
