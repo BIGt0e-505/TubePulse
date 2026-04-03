@@ -1,8 +1,13 @@
 import { registerRootComponent } from 'expo';
-import { registerWidgetTaskHandler } from 'react-native-android-widget';
-
 import App from './App';
-import { widgetTaskHandler } from './src/components/widgetTaskHandler';
 
 registerRootComponent(App);
-registerWidgetTaskHandler(widgetTaskHandler);
+
+// Register widget handler safely — native module may not be available
+try {
+  const { registerWidgetTaskHandler } = require('react-native-android-widget');
+  const { widgetTaskHandler } = require('./src/components/widgetTaskHandler');
+  registerWidgetTaskHandler(widgetTaskHandler);
+} catch (e) {
+  console.warn('Widget handler registration failed:', e);
+}
