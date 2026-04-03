@@ -35,7 +35,49 @@ export default function HomeScreen({ navigation }) {
     setLastSeen(ls);
     setCache(ca);
     setLoading(false);
+
+    // Auto-fetch on first open if cache is empty
+    if (Object.keys(ca).length === 0 && ch.length > 0) {
+      autoFetch(ch, ls);
+    }
   }, []);
+
+  const autoFetch = async (ch, ls) => {
+    setRefreshing(true);
+    try {
+      const results = await checkAllChannels(ch);
+      const newCache = {};
+      const updatedLastSeen = { ...ls };
+
+      for (const r of results) {
+        if (r.error || !r.latestVideo) continue;
+        newCache[r.handle] = {
+          name: r.name,
+          avatar: r.avatar,
+          latestVideo: r.latestVideo,
+          channelId: r.channelId,
+          lastChecked: new Date().toISOString(),
+        };
+        if (!updatedLastSeen[r.handle]) {
+          updatedLastSeen[r.handle] = { videoId: r.latestVideo.videoId, seen: false };
+        }
+      }
+
+      await saveChannelCache(newCache);
+      await saveLastSeen(updatedLastSeen);
+      setCache(newCache);
+      setLastSeen(updatedLastSeen);
+
+      // Request widget update
+      try {
+        const { requestWidgetUpdate } = require('react-native-android-widget');
+        await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+      } catch {}
+    } catch (e) {
+      console.warn('Auto-fetch failed:', e);
+    }
+    setRefreshing(false);
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -75,6 +117,12 @@ export default function HomeScreen({ navigation }) {
     setLastSeen(updatedLastSeen);
     setChannels(ch);
     setRefreshing(false);
+
+    // Update widget
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
   };
 
   const handleTap = async (channel) => {

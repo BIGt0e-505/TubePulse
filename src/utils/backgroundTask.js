@@ -47,6 +47,12 @@ try {
       await saveChannelCache(cache);
       await saveLastSeen(updatedLastSeen);
 
+      // Update widget with new data
+      try {
+        const { requestWidgetUpdate } = require('react-native-android-widget');
+        await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+      } catch {}
+
       return newContentFound
         ? BackgroundFetch.BackgroundFetchResult.NewData
         : BackgroundFetch.BackgroundFetchResult.NoData;
