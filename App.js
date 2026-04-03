@@ -1,13 +1,11 @@
 import React, { useEffect } from 'react';
-import { StatusBar, Text, TouchableOpacity } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { StatusBar, Text, TouchableOpacity, Platform } from 'react-native';
+import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import HomeScreen from './src/screens/HomeScreen';
 import ChannelsScreen from './src/screens/ChannelsScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
-import { registerBackgroundFetch } from './src/utils/backgroundTask';
-import { requestPermissions, setupNotificationChannel } from './src/utils/notifications';
 import { getSettings } from './src/utils/storage';
 
 const Stack = createNativeStackNavigator();
@@ -32,10 +30,16 @@ function HeaderButton({ title, onPress, style }) {
 export default function App() {
   useEffect(() => {
     (async () => {
-      await requestPermissions();
-      await setupNotificationChannel();
-      const settings = await getSettings();
-      await registerBackgroundFetch(settings.pollIntervalMinutes);
+      try {
+        const { requestPermissions, setupNotificationChannel } = require('./src/utils/notifications');
+        await requestPermissions();
+        await setupNotificationChannel();
+        const settings = await getSettings();
+        const { registerBackgroundFetch } = require('./src/utils/backgroundTask');
+        await registerBackgroundFetch(settings.pollIntervalMinutes);
+      } catch (e) {
+        console.warn('Init error:', e);
+      }
     })();
   }, []);
 
@@ -44,8 +48,10 @@ export default function App() {
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
       <NavigationContainer
         theme={{
+          ...DefaultTheme,
           dark: true,
           colors: {
+            ...DefaultTheme.colors,
             primary: COLORS.accent,
             background: COLORS.bg,
             card: COLORS.bg,
