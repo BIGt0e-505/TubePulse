@@ -3,7 +3,23 @@ import { STORAGE_KEYS, DEFAULT_CHANNELS, DEFAULT_SETTINGS } from './constants';
 
 export async function getChannels() {
   const data = await AsyncStorage.getItem(STORAGE_KEYS.CHANNELS);
-  if (data) return JSON.parse(data);
+  if (data) {
+    // Backfill channelIds from defaults for any channels that are missing them
+    const channels = JSON.parse(data);
+    const defaultMap = {};
+    for (const d of DEFAULT_CHANNELS) {
+      defaultMap[d.handle] = d.channelId;
+    }
+    let updated = false;
+    for (const ch of channels) {
+      if (!ch.channelId && defaultMap[ch.handle]) {
+        ch.channelId = defaultMap[ch.handle];
+        updated = true;
+      }
+    }
+    if (updated) await saveChannels(channels);
+    return channels;
+  }
   // First run — seed defaults
   await saveChannels(DEFAULT_CHANNELS);
   return DEFAULT_CHANNELS;

@@ -3,12 +3,12 @@ export const DEFAULT_CHANNELS = [
   {
     handle: 'mattdoesartandstuff',
     name: 'MattO',
-    channelId: null, // resolved on first fetch
+    channelId: 'UCDZThIzxlU2VzqO4ChHz_xg',
   },
   {
     handle: 'DNDrebeccaAFTG',
-    name: 'DNDrebeccaAFTG',
-    channelId: null,
+    name: 'DND Rebecca AFTG',
+    channelId: 'UCZzoiefHjq3WTDorjSUqLfg',
   },
 ];
 
