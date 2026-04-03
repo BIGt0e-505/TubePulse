@@ -18,30 +18,34 @@ function timeAgo(dateStr) {
 }
 
 async function buildWidgetData() {
-  const [channels, settings, lastSeen, cache] = await Promise.all([
-    getChannels(),
-    getSettings(),
-    getLastSeen(),
-    getChannelCache(),
-  ]);
+  try {
+    const [channels, settings, lastSeen, cache] = await Promise.all([
+      getChannels(),
+      getSettings(),
+      getLastSeen(),
+      getChannelCache(),
+    ]);
 
-  const widgetChannels = channels.map((ch) => {
-    const cached = cache[ch.handle];
-    const ls = lastSeen[ch.handle];
-    const isNew = ls && !ls.seen;
+    const widgetChannels = channels.map((ch) => {
+      const cached = cache[ch.handle];
+      const ls = lastSeen[ch.handle];
+      const isNew = ls && !ls.seen;
 
-    return {
-      handle: ch.handle,
-      name: cached?.name || ch.name || ch.handle,
-      avatar: cached?.avatar || null,
-      videoTitle: cached?.latestVideo?.title || null,
-      videoLink: cached?.latestVideo?.link || null,
-      timeAgo: cached?.latestVideo?.published ? timeAgo(cached.latestVideo.published) : '',
-      isNew: !!isNew,
-    };
-  });
+      return {
+        handle: ch.handle,
+        name: cached?.name || ch.name || ch.handle,
+        avatar: cached?.avatar || null,
+        videoTitle: cached?.latestVideo?.title || null,
+        videoLink: cached?.latestVideo?.link || null,
+        timeAgo: cached?.latestVideo?.published ? timeAgo(cached.latestVideo.published) : '',
+        isNew: !!isNew,
+      };
+    });
 
-  return { channels: widgetChannels, settings };
+    return { channels: widgetChannels, settings };
+  } catch {
+    return { channels: [], settings: {} };
+  }
 }
 
 export async function widgetTaskHandler(props) {
@@ -49,9 +53,7 @@ export async function widgetTaskHandler(props) {
   const Widget = nameToWidget[widgetInfo.widgetName];
 
   if (!Widget) {
-    return (
-      <TubePulseWidget channels={[]} settings={{}} />
-    );
+    return <TubePulseWidget channels={[]} settings={{}} />;
   }
 
   switch (props.widgetAction) {
@@ -62,7 +64,6 @@ export async function widgetTaskHandler(props) {
       return <Widget {...data} />;
     }
     case 'WIDGET_CLICK': {
-      // Handle click actions — OPEN_URL and OPEN_APP are handled by the library
       const data = await buildWidgetData();
       return <Widget {...data} />;
     }

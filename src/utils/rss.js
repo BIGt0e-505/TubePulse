@@ -7,32 +7,48 @@ const parser = new XMLParser({
 
 // Common headers to bypass YouTube's consent wall (EU/UK cookie consent redirect)
 const YT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0',
-  'Cookie': 'CONSENT=YES+1',
+  'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+  'Cookie': 'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2MTcxNTcyNjAaAmVuIAEaBgiA_LyaBg',
+  'Accept-Language': 'en-US,en;q=0.9',
 };
+
+// Fetch with a timeout so the app never hangs
+function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timer));
+}
 
 // Resolve @handle to channel ID by scraping the channel page
 export async function resolveChannelId(handle) {
-  const url = `https://www.youtube.com/@${handle}`;
-  const resp = await fetch(url, {
-    headers: YT_HEADERS,
-    redirect: 'follow',
-  });
-  const html = await resp.text();
+  try {
+    const url = `https://www.youtube.com/@${handle}`;
+    const resp = await fetchWithTimeout(url, {
+      headers: YT_HEADERS,
+      redirect: 'follow',
+    });
+    const html = await resp.text();
 
-  const match = html.match(/channel_id=([a-zA-Z0-9_-]{24})/);
-  if (match) return match[1];
+    const match = html.match(/channel_id=([a-zA-Z0-9_-]{24})/);
+    if (match) return match[1];
 
-  const match2 = html.match(/"channelId"\s*:\s*"([a-zA-Z0-9_-]{24})"/);
-  if (match2) return match2[1];
+    const match2 = html.match(/"channelId"\s*:\s*"([a-zA-Z0-9_-]{24})"/);
+    if (match2) return match2[1];
 
-  return null;
+    const match3 = html.match(/"externalId"\s*:\s*"([a-zA-Z0-9_-]{24})"/);
+    if (match3) return match3[1];
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // Fetch and parse YouTube RSS feed for a channel
 export async function fetchChannelFeed(channelId) {
   const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
-  const resp = await fetch(feedUrl);
+  const resp = await fetchWithTimeout(feedUrl);
   const xml = await resp.text();
   const result = parser.parse(xml);
 
@@ -70,31 +86,26 @@ export async function fetchChannelFeed(channelId) {
 }
 
 // Get channel profile picture URL from YouTube page
-// og:image returns the banner, not the avatar. We need to scrape ytInitialData for the actual pfp.
 export async function fetchChannelAvatar(handle) {
   try {
     const url = `https://www.youtube.com/@${handle}`;
-    const resp = await fetch(url, {
+    const resp = await fetchWithTimeout(url, {
       headers: YT_HEADERS,
       redirect: 'follow',
     });
     const html = await resp.text();
 
-    // Look for avatar in ytInitialData — it's under "avatar" > "thumbnails"
-    const avatarMatch = html.match(/"avatar"\s*:\s*\{\s*"decoratedAvatarViewModel"[^}]*"avatar"\s*:\s*\{\s*"avatarViewModel"[^}]*"image"\s*:\s*\{\s*"sources"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"/);
-    if (avatarMatch) return avatarMatch[1];
+    // Pattern 1: yt3.ggpht.com URLs (most common avatar host)
+    const ggphtMatch = html.match(/(https:\/\/yt3\.ggpht\.com\/[^"\\]+)/);
+    if (ggphtMatch) return ggphtMatch[1];
 
-    // Fallback: look for thumbnail pattern in avatar context
-    const thumbMatch = html.match(/"avatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{[^}]*"url"\s*:\s*"([^"]+)"/);
-    if (thumbMatch) return thumbMatch[1];
+    // Pattern 2: yt3.googleusercontent.com URLs
+    const guMatch = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"\\]+)/);
+    if (guMatch) return guMatch[1];
 
-    // Fallback: find any 88x88 yt image URL (typical avatar size)
-    const smallAvatarMatch = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"]+?=s88[^"]*)/);
-    if (smallAvatarMatch) return smallAvatarMatch[1].replace('=s88', '=s176');
-
-    // Last resort: any yt3.googleusercontent avatar-sized URL
-    const anyAvatarMatch = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[a-zA-Z0-9_-]{20,}[^"]*)/);
-    if (anyAvatarMatch) return anyAvatarMatch[1];
+    // Pattern 3: look in avatar context for any image URL
+    const avatarSection = html.match(/"avatar"[^{]*\{[^}]*"url"\s*:\s*"([^"]+)"/);
+    if (avatarSection) return avatarSection[1];
 
     return null;
   } catch {
@@ -118,7 +129,14 @@ export async function checkAllChannels(channels) {
       }
 
       const { channel, videos } = await fetchChannelFeed(channelId);
-      const avatar = await fetchChannelAvatar(ch.handle);
+
+      // Fetch avatar — don't block on failure
+      let avatar = null;
+      try {
+        avatar = await fetchChannelAvatar(ch.handle);
+      } catch {
+        // Avatar is non-critical
+      }
 
       results.push({
         ...ch,
