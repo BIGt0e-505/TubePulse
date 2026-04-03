@@ -2,7 +2,7 @@
   "expo": {
     "name": "TubePulse",
     "slug": "TubePulse",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -28,6 +28,7 @@
     },
     "plugins": [
       "expo-notifications",
+      "./plugins/withForegroundService",
       [
         "react-native-android-widget",
         {
