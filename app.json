@@ -2,7 +2,7 @@
   "expo": {
     "name": "TubePulse",
     "slug": "TubePulse",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
