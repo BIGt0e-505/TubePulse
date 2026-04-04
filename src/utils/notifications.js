@@ -15,12 +15,12 @@ export async function requestPermissions() {
   return status === 'granted';
 }
 
-export async function sendNewVideoNotification(channelName, videoTitle, videoId) {
+export async function sendNewVideoNotification(channelName, videoTitle, videoId, handle, videoLink) {
   await Notifications.scheduleNotificationAsync({
     content: {
       title: `${channelName} uploaded`,
       body: videoTitle,
-      data: { videoId, channelName },
+      data: { videoId, channelName, handle, videoLink },
     },
     trigger: null, // immediate
   });

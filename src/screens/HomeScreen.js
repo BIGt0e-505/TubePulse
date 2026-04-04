@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,9 @@ import {
   RefreshControl,
   Linking,
   ActivityIndicator,
+  AppState,
 } from 'react-native';
+import * as Notifications from 'expo-notifications';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
@@ -54,12 +56,14 @@ export default function HomeScreen({ navigation }) {
         newCache[r.handle] = {
           name: r.name,
           avatar: r.avatar,
+          videos: r.videos,
           latestVideo: r.latestVideo,
           channelId: r.channelId,
           lastChecked: new Date().toISOString(),
         };
+        // Seed new channels with latest video already "seen" (lowlighted)
         if (!updatedLastSeen[r.handle]) {
-          updatedLastSeen[r.handle] = { videoId: r.latestVideo.videoId, seen: false };
+          updatedLastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
         }
       }
 
@@ -85,13 +89,51 @@ export default function HomeScreen({ navigation }) {
     }, [loadData])
   );
 
+  // Auto-refresh at the user's configured poll interval while in foreground
+  const refreshRef = useRef(null);
+  useEffect(() => {
+    const startInterval = async () => {
+      if (refreshRef.current) clearInterval(refreshRef.current);
+      const s = await getSettings();
+      const intervalMs = (s.pollIntervalMinutes || 30) * 60 * 1000;
+      refreshRef.current = setInterval(() => {
+        refresh();
+      }, intervalMs);
+    };
+
+    startInterval();
+
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        loadData();
+        startInterval();
+      } else {
+        if (refreshRef.current) clearInterval(refreshRef.current);
+      }
+    });
+
+    // Reload data when a notification is tapped (App.js handler updates storage first,
+    // then this fires to refresh the UI so tapped channels go from highlight to lowlight)
+    const notifSub = Notifications.addNotificationResponseReceivedListener(() => {
+      // Small delay to ensure App.js handler finishes writing to storage first
+      setTimeout(() => loadData(), 300);
+    });
+
+    return () => {
+      if (refreshRef.current) clearInterval(refreshRef.current);
+      sub.remove();
+      notifSub.remove();
+    };
+  }, []);
+
   const refresh = async () => {
     setRefreshing(true);
     const ch = await getChannels();
     const results = await checkAllChannels(ch);
     const ls = await getLastSeen();
+    const existingCache = await getChannelCache();
 
-    const newCache = {};
+    const newCache = { ...existingCache };
     const updatedLastSeen = { ...ls };
 
     for (const r of results) {
@@ -99,15 +141,19 @@ export default function HomeScreen({ navigation }) {
       newCache[r.handle] = {
         name: r.name,
         avatar: r.avatar,
+        videos: r.videos,
         latestVideo: r.latestVideo,
         channelId: r.channelId,
         lastChecked: new Date().toISOString(),
       };
-      // If we haven't seen this channel before, mark as unseen
+      // Migrate old format or seed new channels
       if (!updatedLastSeen[r.handle]) {
-        updatedLastSeen[r.handle] = { videoId: r.latestVideo.videoId, seen: false };
-      } else if (updatedLastSeen[r.handle].videoId !== r.latestVideo.videoId) {
-        updatedLastSeen[r.handle] = { videoId: r.latestVideo.videoId, seen: false };
+        updatedLastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
+      } else if (!updatedLastSeen[r.handle].seenIds) {
+        // Migrate from old { videoId, seen } format
+        const oldId = updatedLastSeen[r.handle].videoId;
+        const wasSeen = updatedLastSeen[r.handle].seen;
+        updatedLastSeen[r.handle] = { seenIds: wasSeen && oldId ? [oldId] : [] };
       }
     }
 
@@ -129,10 +175,13 @@ export default function HomeScreen({ navigation }) {
     const key = channel.handle;
     const cached = cache[key];
 
-    // Mark as seen
+    // Mark latest video as seen
     const updatedLastSeen = { ...lastSeen };
-    if (updatedLastSeen[key]) {
-      updatedLastSeen[key].seen = true;
+    if (updatedLastSeen[key] && cached?.latestVideo) {
+      const seenIds = updatedLastSeen[key].seenIds || [];
+      if (!seenIds.includes(cached.latestVideo.videoId)) {
+        updatedLastSeen[key] = { seenIds: [...seenIds, cached.latestVideo.videoId] };
+      }
     }
     await saveLastSeen(updatedLastSeen);
     setLastSeen(updatedLastSeen);
@@ -143,11 +192,20 @@ export default function HomeScreen({ navigation }) {
     } else {
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     }
+
+    // Update widget
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
   };
 
   const isNew = (handle) => {
     const ls = lastSeen[handle];
-    return ls && !ls.seen;
+    const cached = cache[handle];
+    if (!ls || !cached?.latestVideo) return false;
+    const seenIds = ls.seenIds || [];
+    return !seenIds.includes(cached.latestVideo.videoId);
   };
 
   const timeAgo = (dateStr) => {
@@ -290,13 +348,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   channelName: {
-    color: COLORS.textDim,
+    color: COLORS.text,
     fontSize: 14,
     fontWeight: '600',
     flex: 1,
   },
   channelNameNew: {
-    color: COLORS.text,
+    color: '#FFFFFF',
   },
   timeAgo: {
     color: COLORS.textDim,

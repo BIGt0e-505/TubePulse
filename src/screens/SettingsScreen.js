@@ -5,7 +5,7 @@ import { COLORS } from '../utils/constants';
 import { getSettings, saveSettings } from '../utils/storage';
 import { registerBackgroundFetch } from '../utils/backgroundTask';
 
-const POLL_OPTIONS = [15, 30, 60, 120];
+const POLL_OPTIONS = [5, 15, 30, 60, 120];
 
 export default function SettingsScreen() {
   const [settings, setSettings] = useState({ tapAction: 'video', pollIntervalMinutes: 30 });
