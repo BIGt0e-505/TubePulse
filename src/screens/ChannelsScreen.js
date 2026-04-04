@@ -9,14 +9,17 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
-import { getChannels, saveChannels } from '../utils/storage';
+import { getChannels, saveChannels, getChannelCache, saveChannelCache, getLastSeen, saveLastSeen } from '../utils/storage';
+import { checkAllChannels } from '../utils/rss';
 
 export default function ChannelsScreen() {
   const [channels, setChannels] = useState([]);
   const [newHandle, setNewHandle] = useState('');
+  const [adding, setAdding] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -33,13 +36,52 @@ export default function ChannelsScreen() {
       return;
     }
 
-    const updated = [
-      ...channels,
-      { handle, name: handle, channelId: null },
-    ];
+    const newChannel = { handle, name: handle, channelId: null };
+    const updated = [...channels, newChannel];
     await saveChannels(updated);
     setChannels(updated);
     setNewHandle('');
+    setAdding(true);
+
+    // Fetch data for the new channel in the background
+    try {
+      const results = await checkAllChannels([newChannel]);
+      if (results.length > 0 && !results[0].error && results[0].latestVideo) {
+        const r = results[0];
+        const cache = await getChannelCache();
+        cache[r.handle] = {
+          name: r.name,
+          avatar: r.avatar,
+          videos: r.videos,
+          latestVideo: r.latestVideo,
+          channelId: r.channelId,
+          lastChecked: new Date().toISOString(),
+        };
+        await saveChannelCache(cache);
+
+        // Seed as already seen (lowlighted)
+        const lastSeen = await getLastSeen();
+        if (!lastSeen[r.handle]) {
+          lastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
+          await saveLastSeen(lastSeen);
+        }
+
+        // Update the channel with resolved channelId
+        if (r.channelId) {
+          const ch = updated.find((c) => c.handle === handle);
+          if (ch) ch.channelId = r.channelId;
+          await saveChannels(updated);
+          setChannels([...updated]);
+        }
+
+        // Update widget
+        try {
+          const { requestWidgetUpdate } = require('react-native-android-widget');
+          await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+        } catch {}
+      }
+    } catch {}
+    setAdding(false);
   };
 
   const removeChannel = (handle) => {
@@ -77,8 +119,12 @@ export default function ChannelsScreen() {
           autoCapitalize="none"
           autoCorrect={false}
         />
-        <TouchableOpacity style={styles.addButton} onPress={addChannel}>
-          <Text style={styles.addButtonText}>Add</Text>
+        <TouchableOpacity style={styles.addButton} onPress={addChannel} disabled={adding}>
+          {adding ? (
+            <ActivityIndicator color={COLORS.bg} size="small" />
+          ) : (
+            <Text style={styles.addButtonText}>Add</Text>
+          )}
         </TouchableOpacity>
       </View>
 

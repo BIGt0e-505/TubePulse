@@ -1,12 +1,13 @@
 import React, { useEffect } from 'react';
-import { StatusBar, Text, TouchableOpacity, Platform } from 'react-native';
+import { StatusBar, Text, TouchableOpacity, Platform, Linking } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import * as Notifications from 'expo-notifications';
 import HomeScreen from './src/screens/HomeScreen';
 import ChannelsScreen from './src/screens/ChannelsScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
-import { getSettings } from './src/utils/storage';
+import { getSettings, getLastSeen, saveLastSeen } from './src/utils/storage';
 
 const Stack = createNativeStackNavigator();
 
@@ -37,10 +38,44 @@ export default function App() {
         const settings = await getSettings();
         const { registerBackgroundFetch } = require('./src/utils/backgroundTask');
         await registerBackgroundFetch(settings.pollIntervalMinutes);
+        // Start foreground service for reliable polling
+        const { startForegroundService } = require('./src/utils/foregroundService');
+        await startForegroundService();
       } catch (e) {
         console.warn('Init error:', e);
       }
     })();
+
+    // Handle notification taps — mark video as seen, open URL, update widget
+    const subscription = Notifications.addNotificationResponseReceivedListener(async (response) => {
+      const data = response.notification.request.content.data;
+      if (data?.videoId && data?.handle) {
+        try {
+          const lastSeen = await getLastSeen();
+          const ls = lastSeen[data.handle] || { seenIds: [] };
+          const seenIds = ls.seenIds || [];
+          if (!seenIds.includes(data.videoId)) {
+            lastSeen[data.handle] = { seenIds: [...seenIds, data.videoId] };
+            await saveLastSeen(lastSeen);
+          }
+          // Update widget
+          try {
+            const { requestWidgetUpdate } = require('react-native-android-widget');
+            await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+          } catch {}
+        } catch {}
+      }
+      // Open the video or channel based on settings
+      try {
+        const settings = await getSettings();
+        const url = settings.tapAction === 'channel'
+          ? `https://www.youtube.com/@${data.handle}`
+          : data.videoLink;
+        if (url) Linking.openURL(url);
+      } catch {}
+    });
+
+    return () => subscription.remove();
   }, []);
 
   return (

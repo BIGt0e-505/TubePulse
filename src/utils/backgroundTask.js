@@ -1,7 +1,7 @@
 import * as BackgroundFetch from 'expo-background-fetch';
 import * as TaskManager from 'expo-task-manager';
 import { BACKGROUND_FETCH_TASK } from './constants';
-import { getChannels, getLastSeen, saveLastSeen, saveChannelCache } from './storage';
+import { getChannels, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from './storage';
 import { checkAllChannels } from './rss';
 import { sendNewVideoNotification } from './notifications';
 
@@ -11,10 +11,11 @@ try {
     try {
       const channels = await getChannels();
       const lastSeen = await getLastSeen();
+      const existingCache = await getChannelCache();
       const results = await checkAllChannels(channels);
 
       let newContentFound = false;
-      const cache = {};
+      const cache = { ...existingCache };
       const updatedLastSeen = { ...lastSeen };
 
       for (const result of results) {
@@ -24,23 +25,33 @@ try {
         cache[key] = {
           name: result.name,
           avatar: result.avatar,
+          videos: result.videos,
           latestVideo: result.latestVideo,
           channelId: result.channelId,
           lastChecked: new Date().toISOString(),
         };
 
-        const lastSeenId = lastSeen[key]?.videoId;
-        if (lastSeenId !== result.latestVideo.videoId) {
+        // Migrate old format if needed
+        if (updatedLastSeen[key] && !updatedLastSeen[key].seenIds) {
+          const oldId = updatedLastSeen[key].videoId;
+          const wasSeen = updatedLastSeen[key].seen;
+          updatedLastSeen[key] = { seenIds: wasSeen && oldId ? [oldId] : [] };
+        }
+
+        const seenIds = updatedLastSeen[key]?.seenIds || [];
+        if (!seenIds.includes(result.latestVideo.videoId)) {
           newContentFound = true;
           await sendNewVideoNotification(
             result.name,
             result.latestVideo.title,
-            result.latestVideo.videoId
+            result.latestVideo.videoId,
+            result.handle,
+            result.latestVideo.link
           );
-          updatedLastSeen[key] = {
-            videoId: result.latestVideo.videoId,
-            seen: false,
-          };
+          // Seed new channels with seen, don't touch existing seenIds
+          if (!updatedLastSeen[key]) {
+            updatedLastSeen[key] = { seenIds: [] };
+          }
         }
       }
 

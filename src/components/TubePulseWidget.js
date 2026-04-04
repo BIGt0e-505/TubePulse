@@ -11,80 +11,69 @@ const COLORS = {
   text: '#E0E0E0',
   textDim: '#666666',
   accent: '#4FC3F7',
+  white: '#FFFFFF',
 };
 
-function ChannelRow({ channel, isNew, tapUrl }) {
-  const nameColor = isNew ? COLORS.text : COLORS.textDim;
-  const titleColor = isNew ? COLORS.text : COLORS.textDim;
+function VideoRow({ video, seen, tapAction }) {
+  const textColor = seen ? COLORS.textDim : COLORS.text;
+  const titleWeight = seen ? 'normal' : 'bold';
 
   return (
     <FlexWidget
-      clickAction="OPEN_URI"
-      clickActionData={{ uri: tapUrl }}
+      clickAction="WIDGET_CLICK"
+      clickActionData={{ videoId: video.videoId, link: video.link, handle: video.handle }}
       style={{
         flexDirection: 'row',
         alignItems: 'center',
         paddingHorizontal: 12,
-        paddingVertical: 8,
+        paddingVertical: 6,
       }}
     >
-      {/* Avatar */}
-      {channel.avatar ? (
+      {/* Thumbnail */}
+      {video.thumbnail ? (
         <ImageWidget
-          image={channel.avatar}
-          imageWidth={32}
-          imageHeight={32}
-          radius={16}
+          image={video.thumbnail}
+          imageWidth={64}
+          imageHeight={36}
+          radius={4}
         />
       ) : (
         <FlexWidget
           style={{
-            width: 32,
-            height: 32,
-            borderRadius: 16,
+            width: 64,
+            height: 36,
+            borderRadius: 4,
             backgroundColor: COLORS.surface,
-            justifyContent: 'center',
-            alignItems: 'center',
           }}
-        >
-          <TextWidget
-            text={(channel.name || '?').charAt(0).toUpperCase()}
-            style={{ fontSize: 14, color: COLORS.textDim }}
-          />
-        </FlexWidget>
+        />
       )}
 
-      {/* Channel info */}
-      <FlexWidget style={{ flex: 1, marginLeft: 10 }}>
-        <FlexWidget style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-          <TextWidget
-            text={channel.name || channel.handle || '?'}
-            style={{ fontSize: 13, color: nameColor, fontWeight: isNew ? 'bold' : 'normal' }}
-            maxLines={1}
-          />
-          {channel.timeAgo ? (
-            <TextWidget
-              text={channel.timeAgo}
-              style={{ fontSize: 11, color: COLORS.textDim }}
-            />
-          ) : null}
-        </FlexWidget>
+      {/* Title */}
+      <FlexWidget style={{ flex: 1, marginLeft: 8 }}>
         <TextWidget
-          text={channel.videoTitle || 'No new videos'}
-          style={{ fontSize: 12, color: titleColor, marginTop: 1 }}
-          maxLines={1}
+          text={video.title || 'Untitled'}
+          style={{ fontSize: 12, color: textColor, fontWeight: titleWeight }}
+          maxLines={2}
         />
       </FlexWidget>
 
+      {/* Age */}
+      {video.timeAgo ? (
+        <TextWidget
+          text={video.timeAgo}
+          style={{ fontSize: 10, color: COLORS.textDim, marginLeft: 6 }}
+        />
+      ) : null}
+
       {/* New dot */}
-      {isNew ? (
+      {!seen ? (
         <FlexWidget
           style={{
-            width: 8,
-            height: 8,
-            borderRadius: 4,
+            width: 6,
+            height: 6,
+            borderRadius: 3,
             backgroundColor: COLORS.accent,
-            marginLeft: 8,
+            marginLeft: 6,
           }}
         />
       ) : null}
@@ -92,22 +81,54 @@ function ChannelRow({ channel, isNew, tapUrl }) {
   );
 }
 
-export function TubePulseWidget({ channels = [], settings = {} }) {
+function ChannelSection({ channel }) {
+  return (
+    <FlexWidget style={{ marginTop: 2 }}>
+      {/* Channel header */}
+      <FlexWidget style={{ paddingHorizontal: 12, paddingVertical: 4 }}>
+        <TextWidget
+          text={`@${channel.handle}`}
+          style={{
+            fontSize: 12,
+            color: channel.hasNew ? COLORS.accent : COLORS.textDim,
+            fontWeight: channel.hasNew ? 'bold' : 'normal',
+          }}
+          maxLines={1}
+        />
+      </FlexWidget>
+
+      {/* Video rows */}
+      {channel.videos.map((v) => (
+        <VideoRow
+          key={v.videoId}
+          video={v}
+          seen={v.seen}
+          tapAction={channel.tapAction}
+        />
+      ))}
+    </FlexWidget>
+  );
+}
+
+export function TubePulseWidget({ channels = [] }) {
   return (
     <FlexWidget
       style={{
         flex: 1,
+        width: 'match_parent',
         backgroundColor: COLORS.bg,
         borderRadius: 16,
-        paddingVertical: 6,
+        paddingVertical: 4,
       }}
     >
       {/* Header */}
       <FlexWidget
         clickAction="OPEN_APP"
         style={{
+          flexDirection: 'row',
           paddingHorizontal: 14,
           paddingVertical: 6,
+          width: 'match_parent',
         }}
       >
         <TextWidget
@@ -120,7 +141,7 @@ export function TubePulseWidget({ channels = [], settings = {} }) {
         />
       </FlexWidget>
 
-      {/* Channel list */}
+      {/* Channel sections */}
       {channels.length === 0 ? (
         <FlexWidget style={{ padding: 14 }}>
           <TextWidget
@@ -129,17 +150,8 @@ export function TubePulseWidget({ channels = [], settings = {} }) {
           />
         </FlexWidget>
       ) : (
-        channels.map((ch, i) => (
-          <ChannelRow
-            key={ch.handle || String(i)}
-            channel={ch}
-            isNew={ch.isNew}
-            tapUrl={
-              settings.tapAction === 'channel'
-                ? `https://www.youtube.com/@${ch.handle}`
-                : (ch.videoLink || `https://www.youtube.com/@${ch.handle}`)
-            }
-          />
+        channels.map((ch) => (
+          <ChannelSection key={ch.handle} channel={ch} />
         ))
       )}
     </FlexWidget>
