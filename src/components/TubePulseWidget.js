@@ -61,7 +61,7 @@ function VideoRow({ video, seen, avatar, handle }) {
           >
             <TextWidget
               text={handle ? handle.charAt(0).toUpperCase() : '?'}
-              style={{ fontSize: 22, color: COLORS.textDim, fontWeight: 'bold' }}
+              style={{ fontSize: 32, color: COLORS.textDim, fontWeight: 'bold' }}
             />
           </FlexWidget>
         )}
