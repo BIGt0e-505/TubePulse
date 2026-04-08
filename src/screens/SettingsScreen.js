@@ -234,7 +234,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
   },
   content: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 4,
     paddingBottom: 40,
   },
   sectionTitle: {
@@ -243,7 +244,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-    marginTop: 24,
+    marginTop: 20,
     marginBottom: 10,
   },
   optionGroup: {
