@@ -55,8 +55,15 @@ function VideoRow({ video, seen, avatar, handle }) {
               height: AVATAR_SIZE,
               borderRadius: AVATAR_SIZE / 2,
               backgroundColor: COLORS.surface,
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
-          />
+          >
+            <TextWidget
+              text={handle ? handle.charAt(0).toUpperCase() : '?'}
+              style={{ fontSize: 22, color: COLORS.textDim, fontWeight: 'bold' }}
+            />
+          </FlexWidget>
         )}
       </FlexWidget>
 

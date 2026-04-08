@@ -112,57 +112,48 @@ export async function fetchChannelFeed(channelId) {
 
 // Get channel profile picture URL by parsing ytInitialData from the channel page
 export async function fetchChannelAvatar(channelId, handle = null) {
+  // Method 1: YouTube innertube API — no auth, no cookies, very reliable
   try {
-    // Prefer @handle URL — returns full HTML reliably; fall back to /channel/<id>
+    const body = JSON.stringify({
+      context: { client: { clientName: 'WEB', clientVersion: '2.20240101' } },
+      browseId: channelId,
+    });
+    const resp = await fetchWithTimeout('https://www.youtube.com/youtubei/v1/browse', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0',
+      },
+      body,
+    });
+    if (resp.ok) {
+      const text = await resp.text();
+      // Pull the largest yt3 avatar URL (=s240 or similar suffix = higher res)
+      const matches = [...text.matchAll(/yt3\.googleusercontent\.com\/([^"\\,}{]{20,})/g)];
+      if (matches.length) {
+        // Prefer larger sizes — strip size suffix and request 240px
+        const base = matches[0][1].replace(/=[^=]*$/, '');
+        return `https://yt3.googleusercontent.com/${base}=s240-c-k-c0x00ffffff-no-rj`;
+      }
+    }
+  } catch {}
+
+  // Method 2: HTML scrape fallback using @handle URL
+  try {
     const url = handle
       ? `https://www.youtube.com/@${handle}`
       : `https://www.youtube.com/channel/${channelId}`;
-    const resp = await fetchWithTimeout(url, {
-      headers: YT_HEADERS,
-      redirect: 'follow',
-    });
+    const resp = await fetchWithTimeout(url, { headers: YT_HEADERS, redirect: 'follow' });
     const html = await resp.text();
-
-    // Extract ytInitialData JSON blob — contains structured channel metadata
-    const dataMatch = html.match(/var\s+ytInitialData\s*=\s*(\{.+?\});\s*<\/script>/s);
-    if (dataMatch) {
-      try {
-        const data = JSON.parse(dataMatch[1]);
-        // Navigate to avatar thumbnails in the channel header
-        const header = data?.header?.c4TabbedHeaderRenderer
-          || data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel;
-
-        if (header) {
-          // c4TabbedHeaderRenderer path (most common)
-          const thumbs = header.avatar?.thumbnails;
-          if (thumbs?.length) {
-            return thumbs[thumbs.length - 1].url;
-          }
-          // pageHeaderRenderer path (newer layout)
-          const imgSources = header.image?.decoratedAvatarViewModel?.avatar?.avatarViewModel?.image?.sources;
-          if (imgSources?.length) {
-            return imgSources[imgSources.length - 1].url;
-          }
-        }
-      } catch {
-        // JSON parse failed, fall through to regex
-      }
-    }
-
-    // Fallback: regex match for yt3 avatar URLs (prefer googleusercontent, fallback to ggpht)
-    const guMatch = html.match(/"avatar":\{"thumbnails":\[.*?"url":"(https:\/\/yt3\.googleusercontent\.com\/[^"\\]+)"/s);
-    if (guMatch) return guMatch[1];
 
     const guFallback = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"\\]{20,})/);
     if (guFallback) return guFallback[1];
 
     const ggphtMatch = html.match(/(https:\/\/yt3\.ggpht\.com\/[^"\\]{20,})/);
     if (ggphtMatch) return ggphtMatch[1];
+  } catch {}
 
-    return null;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 // Check all channels for new content
