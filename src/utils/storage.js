@@ -1,6 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { STORAGE_KEYS, DEFAULT_CHANNELS, DEFAULT_SETTINGS } from './constants';
 
+// gentleState shape: { [handle]: { videoId, firstNotifiedAt, lastRemindedAt } }
+export async function getGentleNotifState() {
+  const data = await AsyncStorage.getItem(STORAGE_KEYS.GENTLE_NOTIF_STATE);
+  return data ? JSON.parse(data) : {};
+}
+
+export async function saveGentleNotifState(state) {
+  await AsyncStorage.setItem(STORAGE_KEYS.GENTLE_NOTIF_STATE, JSON.stringify(state));
+}
+
 export async function getChannels() {
   const data = await AsyncStorage.getItem(STORAGE_KEYS.CHANNELS);
   if (data) {
