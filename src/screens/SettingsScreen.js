@@ -29,7 +29,7 @@ export default function SettingsScreen() {
     }
   };
 
-  const isGentle = settings.notificationMode === 'gentle';
+  const mode = settings.notificationMode || 'relentless';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -75,26 +75,26 @@ export default function SettingsScreen() {
       <Text style={styles.sectionTitle}>Notification mode</Text>
       <View style={styles.toggleRow}>
         <TouchableOpacity
-          style={[styles.toggleOption, !isGentle && styles.toggleOptionActive]}
-          onPress={() => updateSetting('notificationMode', 'persistent')}
+          style={[styles.toggleOption, mode === 'chill' && styles.toggleOptionActive]}
+          onPress={() => updateSetting('notificationMode', 'chill')}
         >
-          <Text style={[styles.toggleOptionText, !isGentle && styles.toggleOptionTextActive]}>
-            Persistent
+          <Text style={[styles.toggleOptionText, mode === 'chill' && styles.toggleOptionTextActive]}>
+            Chill
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.toggleOption, isGentle && styles.toggleOptionActive]}
-          onPress={() => updateSetting('notificationMode', 'gentle')}
+          style={[styles.toggleOption, mode === 'relentless' && styles.toggleOptionActive]}
+          onPress={() => updateSetting('notificationMode', 'relentless')}
         >
-          <Text style={[styles.toggleOptionText, isGentle && styles.toggleOptionTextActive]}>
-            Gentle
+          <Text style={[styles.toggleOptionText, mode === 'relentless' && styles.toggleOptionTextActive]}>
+            Relentless
           </Text>
         </TouchableOpacity>
       </View>
       <Text style={styles.guidance}>
-        {isGentle
-          ? 'Gentle: notifies you once when a video drops, then reminds you every 4 hours until you watch it.'
-          : 'Persistent: notifies you on every check cycle until you open the video.'}
+        {mode === 'chill'
+          ? 'Chill: one notification when a video drops, then a nudge every 4 hours until you watch it.'
+          : "Relentless: hammers you every check cycle until you've watched it. You asked for this."}
       </Text>
 
       {/* Do Not Disturb */}
@@ -118,9 +118,9 @@ export default function SettingsScreen() {
               <Text style={styles.timeLabel}>From</Text>
               <TextInput
                 style={styles.timeInput}
-                value={settings.dndStart || '23:00'}
+                value={settings.dndStart || '22:00'}
                 onChangeText={(v) => updateSetting('dndStart', v)}
-                placeholder="23:00"
+                placeholder="22:00"
                 placeholderTextColor={COLORS.textDim}
                 keyboardType="numbers-and-punctuation"
                 maxLength={5}
@@ -131,9 +131,9 @@ export default function SettingsScreen() {
               <Text style={styles.timeLabel}>Until</Text>
               <TextInput
                 style={styles.timeInput}
-                value={settings.dndEnd || '08:00'}
+                value={settings.dndEnd || '07:00'}
                 onChangeText={(v) => updateSetting('dndEnd', v)}
-                placeholder="08:00"
+                placeholder="07:00"
                 placeholderTextColor={COLORS.textDim}
                 keyboardType="numbers-and-punctuation"
                 maxLength={5}

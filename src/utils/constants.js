@@ -23,10 +23,10 @@ export const STORAGE_KEYS = {
 export const DEFAULT_SETTINGS = {
   tapAction: 'video', // 'video' or 'channel'
   pollIntervalMinutes: 30,
-  notificationMode: 'persistent', // 'persistent' | 'gentle'
+  notificationMode: 'relentless', // 'relentless' | 'chill'
   dndEnabled: false,
-  dndStart: '23:00',
-  dndEnd: '08:00',
+  dndStart: '22:00',
+  dndEnd: '07:00',
 };
 
 export const COLORS = {
