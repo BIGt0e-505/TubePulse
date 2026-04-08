@@ -91,6 +91,8 @@ async function buildWidgetData(fetchFresh = false) {
       return {
         handle: ch.handle,
         name: cached?.name || ch.name || ch.handle,
+        avatar: cached?.avatar || null,
+        channelId: cached?.channelId || ch.channelId || null,
         hasNew,
         tapAction: settings.tapAction || 'video',
         videos: videoRows,
@@ -120,6 +122,18 @@ export async function widgetTaskHandler(props) {
     }
     case 'WIDGET_UPDATE':
     case 'WIDGET_RESIZED': {
+      const data = await buildWidgetData();
+      props.renderWidget(<Widget {...data} />);
+      return;
+    }
+    case 'CHANNEL_CLICK': {
+      // Always open channel page regardless of tap settings
+      const { handle } = props.clickActionData || {};
+      if (handle) {
+        try {
+          await Linking.openURL(`https://www.youtube.com/@${handle}`);
+        } catch {}
+      }
       const data = await buildWidgetData();
       props.renderWidget(<Widget {...data} />);
       return;

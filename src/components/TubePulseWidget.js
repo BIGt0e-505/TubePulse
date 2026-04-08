@@ -14,69 +14,105 @@ const COLORS = {
   white: '#FFFFFF',
 };
 
-function VideoRow({ video, seen, tapAction }) {
+const AVATAR_SIZE = 48;
+const THUMB_HEIGHT = 48;
+const THUMB_WIDTH = Math.round(THUMB_HEIGHT * (16 / 9));
+
+function VideoRow({ video, seen, avatar, handle }) {
   const textColor = seen ? COLORS.textDim : COLORS.text;
   const titleWeight = seen ? 'normal' : 'bold';
 
   return (
     <FlexWidget
-      clickAction="WIDGET_CLICK"
-      clickActionData={{ videoId: video.videoId, link: video.link, handle: video.handle }}
       style={{
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 12,
-        paddingVertical: 6,
+        paddingRight: 12,
+        paddingVertical: 5,
       }}
     >
-      {/* Thumbnail */}
-      {video.thumbnail ? (
-        <ImageWidget
-          image={video.thumbnail}
-          imageWidth={64}
-          imageHeight={36}
-          radius={4}
-        />
-      ) : (
-        <FlexWidget
-          style={{
-            width: 64,
-            height: 36,
-            borderRadius: 4,
-            backgroundColor: COLORS.surface,
-          }}
-        />
-      )}
-
-      {/* Title */}
-      <FlexWidget style={{ flex: 1, marginLeft: 8 }}>
-        <TextWidget
-          text={video.title || 'Untitled'}
-          style={{ fontSize: 12, color: textColor, fontWeight: titleWeight }}
-          maxLines={2}
-        />
+      {/* Avatar stub — tapping always opens channel */}
+      <FlexWidget
+        clickAction="CHANNEL_CLICK"
+        clickActionData={{ handle }}
+        style={{
+          width: AVATAR_SIZE + 12, // 6px padding each side
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {avatar ? (
+          <ImageWidget
+            image={avatar}
+            imageWidth={AVATAR_SIZE}
+            imageHeight={AVATAR_SIZE}
+            radius={AVATAR_SIZE / 2}
+          />
+        ) : (
+          <FlexWidget
+            style={{
+              width: AVATAR_SIZE,
+              height: AVATAR_SIZE,
+              borderRadius: AVATAR_SIZE / 2,
+              backgroundColor: COLORS.surface,
+            }}
+          />
+        )}
       </FlexWidget>
 
-      {/* Age */}
-      {video.timeAgo ? (
-        <TextWidget
-          text={video.timeAgo}
-          style={{ fontSize: 10, color: COLORS.textDim, marginLeft: 6 }}
-        />
-      ) : null}
+      {/* Video content — tapping opens video (or channel per settings) */}
+      <FlexWidget
+        clickAction="WIDGET_CLICK"
+        clickActionData={{ videoId: video.videoId, link: video.link, handle }}
+        style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}
+      >
+        {/* Thumbnail */}
+        {video.thumbnail ? (
+          <ImageWidget
+            image={video.thumbnail}
+            imageWidth={THUMB_WIDTH}
+            imageHeight={THUMB_HEIGHT}
+            radius={4}
+          />
+        ) : (
+          <FlexWidget
+            style={{
+              width: THUMB_WIDTH,
+              height: THUMB_HEIGHT,
+              borderRadius: 4,
+              backgroundColor: COLORS.surface,
+            }}
+          />
+        )}
 
-      {/* New dot */}
-      {!seen ? (
-        <FlexWidget
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: 3,
-            backgroundColor: COLORS.accent,
-            marginLeft: 6,
-          }}
-        />
-      ) : null}
+        {/* Title + meta */}
+        <FlexWidget style={{ flex: 1, marginLeft: 8 }}>
+          <TextWidget
+            text={video.title || 'Untitled'}
+            style={{ fontSize: 12, color: textColor, fontWeight: titleWeight }}
+            maxLines={2}
+          />
+          {video.timeAgo ? (
+            <TextWidget
+              text={video.timeAgo}
+              style={{ fontSize: 10, color: COLORS.textDim, marginTop: 2 }}
+            />
+          ) : null}
+        </FlexWidget>
+
+        {/* New dot */}
+        {!seen ? (
+          <FlexWidget
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: COLORS.accent,
+              marginLeft: 6,
+            }}
+          />
+        ) : null}
+      </FlexWidget>
     </FlexWidget>
   );
 }
@@ -84,26 +120,13 @@ function VideoRow({ video, seen, tapAction }) {
 function ChannelSection({ channel }) {
   return (
     <FlexWidget style={{ marginTop: 2 }}>
-      {/* Channel header */}
-      <FlexWidget style={{ paddingHorizontal: 12, paddingVertical: 4 }}>
-        <TextWidget
-          text={`@${channel.handle}`}
-          style={{
-            fontSize: 12,
-            color: channel.hasNew ? COLORS.accent : COLORS.textDim,
-            fontWeight: channel.hasNew ? 'bold' : 'normal',
-          }}
-          maxLines={1}
-        />
-      </FlexWidget>
-
-      {/* Video rows */}
       {channel.videos.map((v) => (
         <VideoRow
           key={v.videoId}
           video={v}
           seen={v.seen}
-          tapAction={channel.tapAction}
+          avatar={channel.avatar}
+          handle={channel.handle}
         />
       ))}
     </FlexWidget>
