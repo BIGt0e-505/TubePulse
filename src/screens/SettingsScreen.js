@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Linking, Platform } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import { getSettings, saveSettings } from '../utils/storage';
@@ -64,6 +64,20 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         ))}
       </View>
+
+      {/* Battery Optimization */}
+      <Text style={styles.sectionTitle}>Background polling</Text>
+      <Text style={styles.guidance}>
+        For reliable notifications and widget updates, disable battery optimization for TubePulse. Otherwise Android may pause polling when the app is in the background.
+      </Text>
+      {Platform.OS === 'android' && (
+        <TouchableOpacity
+          style={styles.batteryButton}
+          onPress={() => Linking.openSettings()}
+        >
+          <Text style={styles.batteryButtonText}>Open App Settings</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -107,5 +121,25 @@ const styles = StyleSheet.create({
   optionTextActive: {
     color: COLORS.bg,
     fontWeight: '700',
+  },
+  guidance: {
+    color: COLORS.textDim,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  batteryButton: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignSelf: 'flex-start',
+  },
+  batteryButtonText: {
+    color: COLORS.accent,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
