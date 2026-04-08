@@ -5,95 +5,11 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS, DEFAULT_SETTINGS } from '../utils/constants';
+import TimeSpinner from '../components/TimeSpinner';
 import { getSettings, saveSettings } from '../utils/storage';
 import { registerBackgroundFetch } from '../utils/backgroundTask';
 
 const POLL_OPTIONS = [5, 15, 30, 60, 120];
-
-// ── Time Spinner ─────────────────────────────────────────────────────────────
-function TimeSpinner({ value, onChange }) {
-  const [h, m] = value.split(':').map(Number);
-
-  const pad = (n) => String(n).padStart(2, '0');
-
-  const adjustHour = (delta) => {
-    const newH = (h + delta + 24) % 24;
-    onChange(`${pad(newH)}:${pad(m)}`);
-  };
-
-  const adjustMinute = (delta) => {
-    const total = h * 60 + m + delta;
-    const newH = ((Math.floor(total / 60)) % 24 + 24) % 24;
-    const newM = ((total % 60) + 60) % 60;
-    onChange(`${pad(newH)}:${pad(newM)}`);
-  };
-
-  return (
-    <View style={spinner.container}>
-      {/* Hour column */}
-      <View style={spinner.col}>
-        <TouchableOpacity style={spinner.arrow} onPress={() => adjustHour(1)}>
-          <Text style={spinner.arrowText}>▲</Text>
-        </TouchableOpacity>
-        <Text style={spinner.digit}>{pad(h)}</Text>
-        <TouchableOpacity style={spinner.arrow} onPress={() => adjustHour(-1)}>
-          <Text style={spinner.arrowText}>▼</Text>
-        </TouchableOpacity>
-      </View>
-
-      <Text style={spinner.colon}>:</Text>
-
-      {/* Minute column */}
-      <View style={spinner.col}>
-        <TouchableOpacity style={spinner.arrow} onPress={() => adjustMinute(15)}>
-          <Text style={spinner.arrowText}>▲</Text>
-        </TouchableOpacity>
-        <Text style={spinner.digit}>{pad(m)}</Text>
-        <TouchableOpacity style={spinner.arrow} onPress={() => adjustMinute(-15)}>
-          <Text style={spinner.arrowText}>▼</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-const spinner = StyleSheet.create({
-  container: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  col: {
-    alignItems: 'center',
-    width: 48,
-  },
-  arrow: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-  },
-  arrowText: {
-    color: COLORS.accent,
-    fontSize: 18,
-  },
-  digit: {
-    color: COLORS.text,
-    fontSize: 28,
-    fontWeight: '700',
-    lineHeight: 34,
-  },
-  colon: {
-    color: COLORS.text,
-    fontSize: 28,
-    fontWeight: '700',
-    marginHorizontal: 4,
-    marginBottom: 4,
-  },
-});
 
 // ── Main Screen ───────────────────────────────────────────────────────────────
 export default function SettingsScreen() {
