@@ -7,9 +7,10 @@ const parser = new XMLParser({
 
 // Common headers to bypass YouTube's consent wall (EU/UK cookie consent redirect)
 const YT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-  'Cookie': 'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2MTcxNTcyNjAaAmVuIAEaBgiA_LyaBg',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Cookie': 'SOCS=CAESEwgDEgk2MTcxNTcyNjAaAmVuIAEaBgiA_LyaBg; CONSENT=YES+cb',
   'Accept-Language': 'en-US,en;q=0.9',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 };
 
 // Fetch with a timeout so the app never hangs
@@ -110,9 +111,12 @@ export async function fetchChannelFeed(channelId) {
 }
 
 // Get channel profile picture URL by parsing ytInitialData from the channel page
-export async function fetchChannelAvatar(channelId) {
+export async function fetchChannelAvatar(channelId, handle = null) {
   try {
-    const url = `https://www.youtube.com/channel/${channelId}`;
+    // Prefer @handle URL — returns full HTML reliably; fall back to /channel/<id>
+    const url = handle
+      ? `https://www.youtube.com/@${handle}`
+      : `https://www.youtube.com/channel/${channelId}`;
     const resp = await fetchWithTimeout(url, {
       headers: YT_HEADERS,
       redirect: 'follow',
@@ -145,12 +149,15 @@ export async function fetchChannelAvatar(channelId) {
       }
     }
 
-    // Fallback: regex match for yt3 avatar URLs
-    const ggphtMatch = html.match(/(https:\/\/yt3\.ggpht\.com\/[^"\\]+)/);
-    if (ggphtMatch) return ggphtMatch[1];
-
-    const guMatch = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"\\]+)/);
+    // Fallback: regex match for yt3 avatar URLs (prefer googleusercontent, fallback to ggpht)
+    const guMatch = html.match(/"avatar":\{"thumbnails":\[.*?"url":"(https:\/\/yt3\.googleusercontent\.com\/[^"\\]+)"/s);
     if (guMatch) return guMatch[1];
+
+    const guFallback = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"\\]{20,})/);
+    if (guFallback) return guFallback[1];
+
+    const ggphtMatch = html.match(/(https:\/\/yt3\.ggpht\.com\/[^"\\]{20,})/);
+    if (ggphtMatch) return ggphtMatch[1];
 
     return null;
   } catch {
@@ -175,10 +182,10 @@ export async function checkAllChannels(channels) {
 
       const { channel, videos } = await fetchChannelFeed(channelId);
 
-      // Fetch avatar using channelId URL (bypasses consent wall)
+      // Fetch avatar — try @handle URL first (most reliable), fall back to channelId URL
       let avatar = null;
       try {
-        avatar = await fetchChannelAvatar(channelId);
+        avatar = await fetchChannelAvatar(channelId, ch.handle);
       } catch {
         // Avatar is non-critical
       }
