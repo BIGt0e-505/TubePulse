@@ -17,11 +17,16 @@ export const STORAGE_KEYS = {
   SETTINGS: 'tubepulse_settings',
   LAST_SEEN: 'tubepulse_last_seen',
   CHANNEL_CACHE: 'tubepulse_channel_cache',
+  GENTLE_NOTIF_STATE: 'tubepulse_gentle_notif_state',
 };
 
 export const DEFAULT_SETTINGS = {
   tapAction: 'video', // 'video' or 'channel'
   pollIntervalMinutes: 30,
+  notificationMode: 'persistent', // 'persistent' | 'gentle'
+  dndEnabled: false,
+  dndStart: '23:00',
+  dndEnd: '08:00',
 };
 
 export const COLORS = {

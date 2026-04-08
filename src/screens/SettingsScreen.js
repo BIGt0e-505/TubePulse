@@ -1,14 +1,17 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Linking, Platform } from 'react-native';
+import {
+  View, Text, TouchableOpacity, StyleSheet,
+  Linking, Platform, Switch, TextInput, ScrollView,
+} from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { COLORS } from '../utils/constants';
+import { COLORS, DEFAULT_SETTINGS } from '../utils/constants';
 import { getSettings, saveSettings } from '../utils/storage';
 import { registerBackgroundFetch } from '../utils/backgroundTask';
 
 const POLL_OPTIONS = [5, 15, 30, 60, 120];
 
 export default function SettingsScreen() {
-  const [settings, setSettings] = useState({ tapAction: 'video', pollIntervalMinutes: 30 });
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
   useFocusEffect(
     useCallback(() => {
@@ -26,8 +29,11 @@ export default function SettingsScreen() {
     }
   };
 
+  const isGentle = settings.notificationMode === 'gentle';
+
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+
       {/* Tap Action */}
       <Text style={styles.sectionTitle}>On tap, open:</Text>
       <View style={styles.optionGroup}>
@@ -65,10 +71,83 @@ export default function SettingsScreen() {
         ))}
       </View>
 
+      {/* Notification Mode */}
+      <Text style={styles.sectionTitle}>Notification mode</Text>
+      <View style={styles.toggleRow}>
+        <TouchableOpacity
+          style={[styles.toggleOption, !isGentle && styles.toggleOptionActive]}
+          onPress={() => updateSetting('notificationMode', 'persistent')}
+        >
+          <Text style={[styles.toggleOptionText, !isGentle && styles.toggleOptionTextActive]}>
+            Persistent
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.toggleOption, isGentle && styles.toggleOptionActive]}
+          onPress={() => updateSetting('notificationMode', 'gentle')}
+        >
+          <Text style={[styles.toggleOptionText, isGentle && styles.toggleOptionTextActive]}>
+            Gentle
+          </Text>
+        </TouchableOpacity>
+      </View>
+      <Text style={styles.guidance}>
+        {isGentle
+          ? 'Gentle: notifies you once when a video drops, then reminds you every 4 hours until you watch it.'
+          : 'Persistent: notifies you on every check cycle until you open the video.'}
+      </Text>
+
+      {/* Do Not Disturb */}
+      <Text style={styles.sectionTitle}>Do not disturb</Text>
+      <View style={styles.dndRow}>
+        <Text style={styles.dndLabel}>Enable DND</Text>
+        <Switch
+          value={settings.dndEnabled || false}
+          onValueChange={(v) => updateSetting('dndEnabled', v)}
+          trackColor={{ false: COLORS.border, true: COLORS.accent }}
+          thumbColor={settings.dndEnabled ? COLORS.bg : COLORS.textDim}
+        />
+      </View>
+      {settings.dndEnabled && (
+        <>
+          <Text style={styles.guidance}>
+            During DND, notifications appear silently — no sound or vibration.
+          </Text>
+          <View style={styles.timeRow}>
+            <View style={styles.timeField}>
+              <Text style={styles.timeLabel}>From</Text>
+              <TextInput
+                style={styles.timeInput}
+                value={settings.dndStart || '23:00'}
+                onChangeText={(v) => updateSetting('dndStart', v)}
+                placeholder="23:00"
+                placeholderTextColor={COLORS.textDim}
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+              />
+            </View>
+            <Text style={styles.timeSep}>→</Text>
+            <View style={styles.timeField}>
+              <Text style={styles.timeLabel}>Until</Text>
+              <TextInput
+                style={styles.timeInput}
+                value={settings.dndEnd || '08:00'}
+                onChangeText={(v) => updateSetting('dndEnd', v)}
+                placeholder="08:00"
+                placeholderTextColor={COLORS.textDim}
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+              />
+            </View>
+          </View>
+        </>
+      )}
+
       {/* Battery Optimization */}
       <Text style={styles.sectionTitle}>Background polling</Text>
       <Text style={styles.guidance}>
-        For reliable notifications and widget updates, disable battery optimization for TubePulse. Otherwise Android may pause polling when the app is in the background.
+        For reliable notifications and widget updates, disable battery optimization for TubePulse.
+        Otherwise Android may pause polling when the app is in the background.
       </Text>
       {Platform.OS === 'android' && (
         <TouchableOpacity
@@ -78,7 +157,8 @@ export default function SettingsScreen() {
           <Text style={styles.batteryButtonText}>Open App Settings</Text>
         </TouchableOpacity>
       )}
-    </View>
+
+    </ScrollView>
   );
 }
 
@@ -86,7 +166,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.bg,
+  },
+  content: {
     padding: 16,
+    paddingBottom: 40,
   },
   sectionTitle: {
     color: COLORS.textDim,
@@ -99,6 +182,7 @@ const styles = StyleSheet.create({
   },
   optionGroup: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
   option: {
@@ -122,11 +206,79 @@ const styles = StyleSheet.create({
     color: COLORS.bg,
     fontWeight: '700',
   },
+  toggleRow: {
+    flexDirection: 'row',
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignSelf: 'flex-start',
+  },
+  toggleOption: {
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    backgroundColor: COLORS.surface,
+  },
+  toggleOptionActive: {
+    backgroundColor: COLORS.accent,
+  },
+  toggleOptionText: {
+    color: COLORS.textDim,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  toggleOptionTextActive: {
+    color: COLORS.bg,
+    fontWeight: '700',
+  },
   guidance: {
     color: COLORS.textDim,
     fontSize: 13,
     lineHeight: 18,
-    marginBottom: 12,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  dndRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+  },
+  dndLabel: {
+    color: COLORS.text,
+    fontSize: 15,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 10,
+  },
+  timeField: {
+    alignItems: 'center',
+  },
+  timeLabel: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  timeInput: {
+    backgroundColor: COLORS.surface,
+    color: COLORS.text,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    fontSize: 18,
+    fontWeight: '600',
+    textAlign: 'center',
+    width: 90,
+  },
+  timeSep: {
+    color: COLORS.textDim,
+    fontSize: 18,
+    marginTop: 16,
   },
   batteryButton: {
     backgroundColor: COLORS.surface,
@@ -136,6 +288,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     alignSelf: 'flex-start',
+    marginTop: 8,
   },
   batteryButtonText: {
     color: COLORS.accent,
