@@ -120,6 +120,24 @@ function VideoRow({ video, seen, avatar, handle }) {
 function ChannelSection({ channel }) {
   return (
     <FlexWidget style={{ marginTop: 2 }}>
+      {/* Channel header — tapping opens channel */}
+      <FlexWidget
+        clickAction="CHANNEL_CLICK"
+        clickActionData={{ handle: channel.handle }}
+        style={{ paddingHorizontal: 12, paddingVertical: 4 }}
+      >
+        <TextWidget
+          text={`@${channel.handle}`}
+          style={{
+            fontSize: 12,
+            color: channel.hasNew ? COLORS.accent : COLORS.textDim,
+            fontWeight: channel.hasNew ? 'bold' : 'normal',
+          }}
+          maxLines={1}
+        />
+      </FlexWidget>
+
+      {/* Video rows */}
       {channel.videos.map((v) => (
         <VideoRow
           key={v.videoId}
