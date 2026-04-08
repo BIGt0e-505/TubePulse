@@ -74,7 +74,7 @@ try {
           updatedLastSeen[key] = { seenIds: [] };
         }
 
-        if (notificationMode === 'persistent') {
+        if (notificationMode === 'relentless' || notificationMode === 'persistent') {
           // Fire every poll cycle until the user opens/marks seen
           newContentFound = true;
           await sendNewVideoNotification(
