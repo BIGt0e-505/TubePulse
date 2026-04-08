@@ -336,7 +336,7 @@ const styles = StyleSheet.create({
   },
   avatarLetter: {
     color: COLORS.textDim,
-    fontSize: 22,
+    fontSize: 32,
     fontWeight: '700',
   },
   channelInfo: {
