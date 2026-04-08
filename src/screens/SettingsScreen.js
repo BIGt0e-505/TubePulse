@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  Linking, Platform, Switch, TextInput, ScrollView,
+  Linking, Platform, Switch, ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS, DEFAULT_SETTINGS } from '../utils/constants';
@@ -10,6 +10,92 @@ import { registerBackgroundFetch } from '../utils/backgroundTask';
 
 const POLL_OPTIONS = [5, 15, 30, 60, 120];
 
+// ── Time Spinner ─────────────────────────────────────────────────────────────
+function TimeSpinner({ value, onChange }) {
+  const [h, m] = value.split(':').map(Number);
+
+  const pad = (n) => String(n).padStart(2, '0');
+
+  const adjustHour = (delta) => {
+    const newH = (h + delta + 24) % 24;
+    onChange(`${pad(newH)}:${pad(m)}`);
+  };
+
+  const adjustMinute = (delta) => {
+    const total = h * 60 + m + delta;
+    const newH = ((Math.floor(total / 60)) % 24 + 24) % 24;
+    const newM = ((total % 60) + 60) % 60;
+    onChange(`${pad(newH)}:${pad(newM)}`);
+  };
+
+  return (
+    <View style={spinner.container}>
+      {/* Hour column */}
+      <View style={spinner.col}>
+        <TouchableOpacity style={spinner.arrow} onPress={() => adjustHour(1)}>
+          <Text style={spinner.arrowText}>▲</Text>
+        </TouchableOpacity>
+        <Text style={spinner.digit}>{pad(h)}</Text>
+        <TouchableOpacity style={spinner.arrow} onPress={() => adjustHour(-1)}>
+          <Text style={spinner.arrowText}>▼</Text>
+        </TouchableOpacity>
+      </View>
+
+      <Text style={spinner.colon}>:</Text>
+
+      {/* Minute column */}
+      <View style={spinner.col}>
+        <TouchableOpacity style={spinner.arrow} onPress={() => adjustMinute(15)}>
+          <Text style={spinner.arrowText}>▲</Text>
+        </TouchableOpacity>
+        <Text style={spinner.digit}>{pad(m)}</Text>
+        <TouchableOpacity style={spinner.arrow} onPress={() => adjustMinute(-15)}>
+          <Text style={spinner.arrowText}>▼</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+const spinner = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  col: {
+    alignItems: 'center',
+    width: 48,
+  },
+  arrow: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  arrowText: {
+    color: COLORS.accent,
+    fontSize: 18,
+  },
+  digit: {
+    color: COLORS.text,
+    fontSize: 28,
+    fontWeight: '700',
+    lineHeight: 34,
+  },
+  colon: {
+    color: COLORS.text,
+    fontSize: 28,
+    fontWeight: '700',
+    marginHorizontal: 4,
+    marginBottom: 4,
+  },
+});
+
+// ── Main Screen ───────────────────────────────────────────────────────────────
 export default function SettingsScreen() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
@@ -23,7 +109,6 @@ export default function SettingsScreen() {
     const updated = { ...settings, [key]: value };
     setSettings(updated);
     await saveSettings(updated);
-
     if (key === 'pollIntervalMinutes') {
       await registerBackgroundFetch(value);
     }
@@ -37,22 +122,17 @@ export default function SettingsScreen() {
       {/* Tap Action */}
       <Text style={styles.sectionTitle}>On tap, open:</Text>
       <View style={styles.optionGroup}>
-        <TouchableOpacity
-          style={[styles.option, settings.tapAction === 'video' && styles.optionActive]}
-          onPress={() => updateSetting('tapAction', 'video')}
-        >
-          <Text style={[styles.optionText, settings.tapAction === 'video' && styles.optionTextActive]}>
-            Video
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.option, settings.tapAction === 'channel' && styles.optionActive]}
-          onPress={() => updateSetting('tapAction', 'channel')}
-        >
-          <Text style={[styles.optionText, settings.tapAction === 'channel' && styles.optionTextActive]}>
-            Channel page
-          </Text>
-        </TouchableOpacity>
+        {['video', 'channel'].map((val) => (
+          <TouchableOpacity
+            key={val}
+            style={[styles.option, settings.tapAction === val && styles.optionActive]}
+            onPress={() => updateSetting('tapAction', val)}
+          >
+            <Text style={[styles.optionText, settings.tapAction === val && styles.optionTextActive]}>
+              {val === 'video' ? 'Video' : 'Channel page'}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
       {/* Poll Interval */}
@@ -73,23 +153,18 @@ export default function SettingsScreen() {
 
       {/* Notification Mode */}
       <Text style={styles.sectionTitle}>Notification mode</Text>
-      <View style={styles.toggleRow}>
-        <TouchableOpacity
-          style={[styles.toggleOption, mode === 'chill' && styles.toggleOptionActive]}
-          onPress={() => updateSetting('notificationMode', 'chill')}
-        >
-          <Text style={[styles.toggleOptionText, mode === 'chill' && styles.toggleOptionTextActive]}>
-            Chill
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.toggleOption, mode === 'relentless' && styles.toggleOptionActive]}
-          onPress={() => updateSetting('notificationMode', 'relentless')}
-        >
-          <Text style={[styles.toggleOptionText, mode === 'relentless' && styles.toggleOptionTextActive]}>
-            Relentless
-          </Text>
-        </TouchableOpacity>
+      <View style={styles.optionGroup}>
+        {['chill', 'relentless'].map((val) => (
+          <TouchableOpacity
+            key={val}
+            style={[styles.option, mode === val && styles.optionActive]}
+            onPress={() => updateSetting('notificationMode', val)}
+          >
+            <Text style={[styles.optionText, mode === val && styles.optionTextActive]}>
+              {val.charAt(0).toUpperCase() + val.slice(1)}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
       <Text style={styles.guidance}>
         {mode === 'chill'
@@ -108,6 +183,7 @@ export default function SettingsScreen() {
           thumbColor={settings.dndEnabled ? COLORS.bg : COLORS.textDim}
         />
       </View>
+
       {settings.dndEnabled && (
         <>
           <Text style={styles.guidance}>
@@ -116,27 +192,17 @@ export default function SettingsScreen() {
           <View style={styles.timeRow}>
             <View style={styles.timeField}>
               <Text style={styles.timeLabel}>From</Text>
-              <TextInput
-                style={styles.timeInput}
+              <TimeSpinner
                 value={settings.dndStart || '22:00'}
-                onChangeText={(v) => updateSetting('dndStart', v)}
-                placeholder="22:00"
-                placeholderTextColor={COLORS.textDim}
-                keyboardType="numbers-and-punctuation"
-                maxLength={5}
+                onChange={(v) => updateSetting('dndStart', v)}
               />
             </View>
             <Text style={styles.timeSep}>→</Text>
             <View style={styles.timeField}>
               <Text style={styles.timeLabel}>Until</Text>
-              <TextInput
-                style={styles.timeInput}
+              <TimeSpinner
                 value={settings.dndEnd || '07:00'}
-                onChangeText={(v) => updateSetting('dndEnd', v)}
-                placeholder="07:00"
-                placeholderTextColor={COLORS.textDim}
-                keyboardType="numbers-and-punctuation"
-                maxLength={5}
+                onChange={(v) => updateSetting('dndEnd', v)}
               />
             </View>
           </View>
@@ -186,12 +252,15 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   option: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    flex: 1,
+    minWidth: 60,
+    paddingVertical: 12,
     borderRadius: 8,
     backgroundColor: COLORS.surface,
     borderWidth: 1,
     borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   optionActive: {
     backgroundColor: COLORS.accent,
@@ -201,33 +270,9 @@ const styles = StyleSheet.create({
     color: COLORS.textDim,
     fontSize: 14,
     fontWeight: '500',
+    textAlign: 'center',
   },
   optionTextActive: {
-    color: COLORS.bg,
-    fontWeight: '700',
-  },
-  toggleRow: {
-    flexDirection: 'row',
-    borderRadius: 8,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    alignSelf: 'flex-start',
-  },
-  toggleOption: {
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    backgroundColor: COLORS.surface,
-  },
-  toggleOptionActive: {
-    backgroundColor: COLORS.accent,
-  },
-  toggleOptionText: {
-    color: COLORS.textDim,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  toggleOptionTextActive: {
     color: COLORS.bg,
     fontWeight: '700',
   },
@@ -251,7 +296,7 @@ const styles = StyleSheet.create({
   timeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 16,
     marginTop: 10,
   },
   timeField: {
@@ -260,25 +305,12 @@ const styles = StyleSheet.create({
   timeLabel: {
     color: COLORS.textDim,
     fontSize: 12,
-    marginBottom: 4,
-  },
-  timeInput: {
-    backgroundColor: COLORS.surface,
-    color: COLORS.text,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    fontSize: 18,
-    fontWeight: '600',
-    textAlign: 'center',
-    width: 90,
+    marginBottom: 6,
   },
   timeSep: {
     color: COLORS.textDim,
-    fontSize: 18,
-    marginTop: 16,
+    fontSize: 20,
+    marginTop: 20,
   },
   batteryButton: {
     backgroundColor: COLORS.surface,
