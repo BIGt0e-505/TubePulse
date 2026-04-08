@@ -120,7 +120,7 @@ export default function SettingsScreen() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
 
       {/* Tap Action */}
-      <Text style={styles.sectionTitle}>On tap, open:</Text>
+      <Text style={[styles.sectionTitle, styles.sectionTitleFirst]}>On tap, open:</Text>
       <View style={styles.optionGroup}>
         {['video', 'channel'].map((val) => (
           <TouchableOpacity
@@ -235,7 +235,7 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: 16,
-    paddingTop: 4,
+    paddingTop: 0,
     paddingBottom: 40,
   },
   sectionTitle: {
@@ -246,6 +246,9 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginTop: 20,
     marginBottom: 10,
+  },
+  sectionTitleFirst: {
+    marginTop: 8,
   },
   optionGroup: {
     flexDirection: 'row',
