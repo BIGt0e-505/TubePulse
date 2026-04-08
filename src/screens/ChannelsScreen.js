@@ -2,7 +2,6 @@ import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
-  FlatList,
   TextInput,
   TouchableOpacity,
   StyleSheet,
@@ -12,6 +11,7 @@ import {
   ActivityIndicator,
   Image,
 } from 'react-native';
+import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import {
@@ -27,7 +27,7 @@ export default function ChannelsScreen() {
   const [newHandle, setNewHandle] = useState('');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState('');
-  const [reorderMode, setReorderMode] = useState(false);
+
 
   useFocusEffect(
     useCallback(() => {
@@ -114,71 +114,57 @@ export default function ChannelsScreen() {
             const updated = channels.filter((c) => c.handle !== handle);
             await saveChannels(updated);
             setChannels(updated);
-            if (updated.length === 0) setReorderMode(false);
           },
         },
       ]
     );
   };
 
-  const moveChannel = async (index, direction) => {
-    const newList = [...channels];
-    const swapIndex = index + direction;
-    if (swapIndex < 0 || swapIndex >= newList.length) return;
-    [newList[index], newList[swapIndex]] = [newList[swapIndex], newList[index]];
-    await saveChannels(newList);
-    setChannels(newList);
+  const onDragEnd = async ({ data }) => {
+    setChannels(data);
+    await saveChannels(data);
   };
 
-  const renderItem = ({ item, index }) => {
+  const renderItem = ({ item, drag, isActive }) => {
     const cached = cache[item.handle];
     const displayName = cached?.name || item.name || item.handle;
 
     return (
-      <View style={styles.channelRow}>
-        {/* Avatar */}
-        <View style={styles.avatarWrap}>
-          {cached?.avatar ? (
-            <Image source={{ uri: cached.avatar }} style={styles.avatar} />
-          ) : (
-            <View style={[styles.avatar, styles.avatarPlaceholder]}>
-              <Text style={styles.avatarLetter}>
-                {displayName.charAt(0).toUpperCase()}
-              </Text>
-            </View>
-          )}
-        </View>
+      <ScaleDecorator>
+        <TouchableOpacity
+          onLongPress={drag}
+          delayLongPress={150}
+          style={[styles.channelRow, isActive && styles.channelRowActive]}
+          activeOpacity={1}
+        >
+          {/* Drag handle */}
+          <Text style={styles.dragHandle}>☰</Text>
 
-        {/* Name + handle */}
-        <View style={styles.channelInfo}>
-          <Text style={styles.channelName} numberOfLines={1}>{displayName}</Text>
-          <Text style={styles.channelHandle}>@{item.handle}</Text>
-        </View>
-
-        {/* Reorder controls or remove */}
-        {reorderMode ? (
-          <View style={styles.reorderControls}>
-            <TouchableOpacity
-              style={[styles.reorderBtn, index === 0 && styles.reorderBtnDisabled]}
-              onPress={() => moveChannel(index, -1)}
-              disabled={index === 0}
-            >
-              <Text style={styles.reorderBtnText}>▲</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.reorderBtn, index === channels.length - 1 && styles.reorderBtnDisabled]}
-              onPress={() => moveChannel(index, 1)}
-              disabled={index === channels.length - 1}
-            >
-              <Text style={styles.reorderBtnText}>▼</Text>
-            </TouchableOpacity>
+          {/* Avatar */}
+          <View style={styles.avatarWrap}>
+            {cached?.avatar ? (
+              <Image source={{ uri: cached.avatar }} style={styles.avatar} />
+            ) : (
+              <View style={[styles.avatar, styles.avatarPlaceholder]}>
+                <Text style={styles.avatarLetter}>
+                  {displayName.charAt(0).toUpperCase()}
+                </Text>
+              </View>
+            )}
           </View>
-        ) : (
+
+          {/* Name + handle */}
+          <View style={styles.channelInfo}>
+            <Text style={styles.channelName} numberOfLines={1}>{displayName}</Text>
+            <Text style={styles.channelHandle}>@{item.handle}</Text>
+          </View>
+
+          {/* Remove */}
           <TouchableOpacity onPress={() => removeChannel(item.handle)} style={styles.removeBtn}>
             <Text style={styles.removeText}>Remove</Text>
           </TouchableOpacity>
-        )}
-      </View>
+        </TouchableOpacity>
+      </ScaleDecorator>
     );
   };
 
@@ -211,25 +197,15 @@ export default function ChannelsScreen() {
         {addError ? <Text style={styles.errorText}>{addError}</Text> : null}
       </View>
 
-      {/* Reorder toggle */}
-      {channels.length > 1 && (
-        <TouchableOpacity
-          style={styles.reorderToggle}
-          onPress={() => setReorderMode((v) => !v)}
-        >
-          <Text style={[styles.reorderToggleText, reorderMode && styles.reorderToggleActive]}>
-            {reorderMode ? 'Done' : 'Reorder'}
-          </Text>
-        </TouchableOpacity>
+      {channels.length === 0 && (
+        <Text style={styles.emptyText}>No channels yet. Add one above.</Text>
       )}
 
-      <FlatList
+      <DraggableFlatList
         data={channels}
         keyExtractor={(item) => item.handle}
         renderItem={renderItem}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>No channels yet. Add one above.</Text>
-        }
+        onDragEnd={onDragEnd}
       />
     </KeyboardAvoidingView>
   );
@@ -277,20 +253,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginTop: 8,
   },
-  reorderToggle: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    marginBottom: 4,
-  },
-  reorderToggleText: {
-    color: COLORS.textDim,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  reorderToggleActive: {
-    color: COLORS.accent,
-  },
+
   channelRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -298,6 +261,17 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
+    backgroundColor: COLORS.bg,
+  },
+  channelRowActive: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 10,
+  },
+  dragHandle: {
+    color: COLORS.textDim,
+    fontSize: 18,
+    marginRight: 12,
+    opacity: 0.5,
   },
   avatarWrap: {
     marginRight: 12,
@@ -338,27 +312,7 @@ const styles = StyleSheet.create({
     color: COLORS.danger,
     fontSize: 13,
   },
-  reorderControls: {
-    flexDirection: 'row',
-    gap: 4,
-  },
-  reorderBtn: {
-    width: 36,
-    height: 36,
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  reorderBtnDisabled: {
-    opacity: 0.3,
-  },
-  reorderBtnText: {
-    color: COLORS.accent,
-    fontSize: 16,
-  },
+
   emptyText: {
     color: COLORS.textDim,
     textAlign: 'center',
