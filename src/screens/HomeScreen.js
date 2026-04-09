@@ -171,26 +171,55 @@ export default function HomeScreen({ navigation }) {
     } catch {}
   };
 
+  // Returns videos sorted newest-first
+  const getVideos = (handle) => {
+    const cached = cache[handle];
+    if (!cached) return [];
+    const vids = cached.videos?.length ? cached.videos : (cached.latestVideo ? [cached.latestVideo] : []);
+    return [...vids].sort((a, b) => new Date(b.published) - new Date(a.published));
+  };
+
+  // Unseen videos = in the list but not in seenIds
+  const getUnseenVideos = (handle) => {
+    const seenIds = lastSeen[handle]?.seenIds || [];
+    return getVideos(handle).filter(v => !seenIds.includes(v.videoId));
+  };
+
+  const unseenCount = (handle) => getUnseenVideos(handle).length;
+
+  // The "current" video to show = oldest unseen, or latest if all seen
+  const getCurrentVideo = (handle) => {
+    const unseen = getUnseenVideos(handle);
+    if (unseen.length > 0) return unseen[unseen.length - 1]; // oldest unseen
+    const vids = getVideos(handle);
+    return vids[0] || null;
+  };
+
   const handleTap = async (channel) => {
     const key = channel.handle;
-    const cached = cache[key];
-
-    // Mark latest video as seen
     const updatedLastSeen = { ...lastSeen };
-    if (updatedLastSeen[key] && cached?.latestVideo) {
-      const seenIds = updatedLastSeen[key].seenIds || [];
-      if (!seenIds.includes(cached.latestVideo.videoId)) {
-        updatedLastSeen[key] = { seenIds: [...seenIds, cached.latestVideo.videoId] };
-      }
-    }
-    await saveLastSeen(updatedLastSeen);
-    setLastSeen(updatedLastSeen);
+    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
 
-    // Open URL
-    if (settings.tapAction === 'video' && cached?.latestVideo) {
-      Linking.openURL(cached.latestVideo.link);
-    } else {
+    if (settings.tapAction === 'channel') {
+      // Channel tap — mark ALL seen, reset count
+      const allIds = getVideos(key).map(v => v.videoId);
+      const existing = updatedLastSeen[key].seenIds || [];
+      updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
+      await saveLastSeen(updatedLastSeen);
+      setLastSeen(updatedLastSeen);
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
+    } else {
+      // Video tap — open oldest unseen, mark it seen, decrement
+      const video = getCurrentVideo(key);
+      if (video) {
+        const seenIds = updatedLastSeen[key].seenIds || [];
+        if (!seenIds.includes(video.videoId)) {
+          updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
+        }
+        await saveLastSeen(updatedLastSeen);
+        setLastSeen(updatedLastSeen);
+        Linking.openURL(video.link);
+      }
     }
 
     // Update widget
@@ -200,13 +229,7 @@ export default function HomeScreen({ navigation }) {
     } catch {}
   };
 
-  const isNew = (handle) => {
-    const ls = lastSeen[handle];
-    const cached = cache[handle];
-    if (!ls || !cached?.latestVideo) return false;
-    const seenIds = ls.seenIds || [];
-    return !seenIds.includes(cached.latestVideo.videoId);
-  };
+  const isNew = (handle) => unseenCount(handle) > 0;
 
   const timeAgo = (dateStr) => {
     if (!dateStr) return '';
@@ -222,6 +245,8 @@ export default function HomeScreen({ navigation }) {
   const renderChannel = ({ item }) => {
     const cached = cache[item.handle];
     const hasNew = isNew(item.handle);
+    const count = unseenCount(item.handle);
+    const currentVideo = getCurrentVideo(item.handle);
 
     return (
       <TouchableOpacity
@@ -242,18 +267,22 @@ export default function HomeScreen({ navigation }) {
         </View>
         <View style={styles.channelInfo}>
           <View style={styles.channelHeader}>
-            <Text style={[styles.channelName, hasNew && styles.channelNameNew]} numberOfLines={1}>
+            <Text style={[styles.channelName, hasNew && styles.channelNameNew]} numberOfLines={1} style={styles.channelNameFlex}>
               {cached?.name || item.name || item.handle}
             </Text>
-            {cached?.latestVideo && (
-              <Text style={styles.timeAgo}>{timeAgo(cached.latestVideo.published)}</Text>
+            <Text style={[styles.unseenBadge, hasNew ? styles.unseenBadgeNew : styles.unseenBadgeZero]}>
+              {count === 0 ? '0 New' : `${count} New`}
+            </Text>
+          </View>
+          <View style={styles.channelHeader}>
+            <Text style={[styles.videoTitle, hasNew && styles.videoTitleNew]} numberOfLines={1}>
+              {currentVideo?.title || 'No videos yet'}
+            </Text>
+            {currentVideo?.published && (
+              <Text style={styles.timeAgo}>{timeAgo(currentVideo.published)}</Text>
             )}
           </View>
-          <Text style={[styles.videoTitle, hasNew && styles.videoTitleNew]} numberOfLines={1}>
-            {cached?.latestVideo?.title || 'No videos yet'}
-          </Text>
         </View>
-        {hasNew && <View style={styles.newDot} />}
       </TouchableOpacity>
     );
   };
@@ -352,6 +381,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     flex: 1,
+  },
+  channelNameFlex: {
+    flex: 1,
+  },
+  unseenBadge: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginLeft: 8,
+  },
+  unseenBadgeNew: {
+    color: COLORS.accent,
+  },
+  unseenBadgeZero: {
+    color: COLORS.textDim,
+    opacity: 0.5,
   },
   channelNameNew: {
     color: '#FFFFFF',

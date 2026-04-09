@@ -65,28 +65,32 @@ async function buildWidgetData(fetchFresh = false) {
     // Build widget channel data with videos
     const widgetChannels = channels.map((ch) => {
       const cached = activeCache[ch.handle];
-      const ls = lastSeen[ch.handle];
-      const seenIds = ls?.seenIds || [];
+      const seenIds = lastSeen[ch.handle]?.seenIds || [];
 
-      // Get videos from cache (up to 3 for widget space), fall back to latestVideo
-      let videos = cached?.videos || [];
-      if (videos.length === 0 && cached?.latestVideo) {
-        videos = [cached.latestVideo];
-      }
-      // Show latest video only (1 per channel in widget to save space)
-      videos = videos.slice(0, 1);
+      // All videos sorted newest-first
+      let allVideos = cached?.videos?.length ? cached.videos : (cached?.latestVideo ? [cached.latestVideo] : []);
+      allVideos = [...allVideos].sort((a, b) => new Date(b.published) - new Date(a.published));
 
-      const videoRows = videos.map((v) => ({
-        videoId: v.videoId,
-        title: v.title,
-        thumbnail: v.thumbnail,
-        link: v.link,
-        timeAgo: v.published ? timeAgo(v.published) : '',
-        seen: seenIds.includes(v.videoId),
+      // Unseen count
+      const unseenVideos = allVideos.filter(v => !seenIds.includes(v.videoId));
+      const unseenCount = unseenVideos.length;
+
+      // Current video = oldest unseen, or latest if all seen
+      const currentVideo = unseenVideos.length > 0
+        ? unseenVideos[unseenVideos.length - 1]
+        : allVideos[0] || null;
+
+      const hasNew = unseenCount > 0;
+
+      const videoRows = currentVideo ? [{
+        videoId: currentVideo.videoId,
+        title: currentVideo.title,
+        thumbnail: currentVideo.thumbnail,
+        link: currentVideo.link,
+        timeAgo: currentVideo.published ? timeAgo(currentVideo.published) : '',
+        seen: !hasNew,
         handle: ch.handle,
-      }));
-
-      const hasNew = videoRows.some((v) => !v.seen);
+      }] : [];
 
       return {
         handle: ch.handle,
@@ -94,6 +98,7 @@ async function buildWidgetData(fetchFresh = false) {
         avatar: cached?.avatar || null,
         channelId: cached?.channelId || ch.channelId || null,
         hasNew,
+        unseenCount,
         tapAction: settings.tapAction || 'video',
         videos: videoRows,
       };
@@ -127,10 +132,17 @@ export async function widgetTaskHandler(props) {
       return;
     }
     case 'CHANNEL_CLICK': {
-      // Always open channel page regardless of tap settings
+      // Mark ALL videos seen, then open channel
       const { handle } = props.clickActionData || {};
       if (handle) {
         try {
+          const cache = await getChannelCache();
+          const lastSeen = await getLastSeen();
+          const allVideos = cache[handle]?.videos || (cache[handle]?.latestVideo ? [cache[handle].latestVideo] : []);
+          const allIds = allVideos.map(v => v.videoId);
+          const existing = lastSeen[handle]?.seenIds || [];
+          lastSeen[handle] = { seenIds: [...new Set([...existing, ...allIds])] };
+          await saveLastSeen(lastSeen);
           await Linking.openURL(`https://www.youtube.com/@${handle}`);
         } catch {}
       }
@@ -139,30 +151,34 @@ export async function widgetTaskHandler(props) {
       return;
     }
     case 'WIDGET_CLICK': {
-      // Mark video as seen and open the URL
       const clickData = props.clickActionData;
-      if (clickData?.videoId && clickData?.handle) {
+      const settings = await getSettings();
+
+      if (settings.tapAction === 'channel' && clickData?.handle) {
+        // Mark all seen, open channel
+        try {
+          const cache = await getChannelCache();
+          const lastSeen = await getLastSeen();
+          const allVideos = cache[clickData.handle]?.videos || (cache[clickData.handle]?.latestVideo ? [cache[clickData.handle].latestVideo] : []);
+          const allIds = allVideos.map(v => v.videoId);
+          const existing = lastSeen[clickData.handle]?.seenIds || [];
+          lastSeen[clickData.handle] = { seenIds: [...new Set([...existing, ...allIds])] };
+          await saveLastSeen(lastSeen);
+          await Linking.openURL(`https://www.youtube.com/@${clickData.handle}`);
+        } catch {}
+      } else if (clickData?.videoId && clickData?.handle) {
+        // Mark this video seen, open it
         try {
           const lastSeen = await getLastSeen();
-          const ls = lastSeen[clickData.handle] || { seenIds: [] };
-          const seenIds = ls.seenIds || [];
+          const seenIds = lastSeen[clickData.handle]?.seenIds || [];
           if (!seenIds.includes(clickData.videoId)) {
             lastSeen[clickData.handle] = { seenIds: [...seenIds, clickData.videoId] };
             await saveLastSeen(lastSeen);
           }
+          if (clickData.link) await Linking.openURL(clickData.link);
         } catch {}
       }
 
-      // Open the video or channel URL based on user's tap action setting
-      try {
-        const settings = await getSettings();
-        const url = settings.tapAction === 'channel'
-          ? `https://www.youtube.com/@${clickData.handle}`
-          : clickData?.link;
-        if (url) await Linking.openURL(url);
-      } catch {}
-
-      // Re-render widget with updated seen state
       const data = await buildWidgetData();
       props.renderWidget(<Widget {...data} />);
       return;
