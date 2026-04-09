@@ -61,7 +61,8 @@ export async function setupNotificationChannel() {
       name: 'New Videos',
       importance: Notifications.AndroidImportance.DEFAULT,
       vibrationPattern: [0, 250],
-      lightColor: '#4FC3F7',
+      // No custom lightColor — use system default so badge appears white/alpha
+      // like all other apps. Custom colour was making badge stand out.
     });
 
     // Silent channel for DND — shows notification, no sound or vibration
