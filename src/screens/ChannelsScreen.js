@@ -72,6 +72,14 @@ export default function ChannelsScreen() {
     setEditingChannel(null);
   };
 
+  const resetChannelNotif = async () => {
+    const updated = { ...channelNotifSettings };
+    delete updated[editingChannel];
+    setChannelNotifSettings(updated);
+    await saveChannelNotifSettings(updated);
+    setEditingChannel(null);
+  };
+
   const addChannel = async () => {
     const handle = newHandle.trim().replace(/^@/, '');
     if (!handle) return;
@@ -170,16 +178,22 @@ export default function ChannelsScreen() {
           onLongPress={() => {
             if (perChannelEnabled) {
               openChannelNotifSettings(item.handle);
-            } else {
-              drag();
             }
+            // Long press on row body = open settings (if enabled) or do nothing
           }}
-          delayLongPress={150}
+          delayLongPress={200}
           style={[styles.channelRow, isActive && styles.channelRowActive]}
           activeOpacity={1}
         >
-          {/* Drag handle */}
-          <Text style={styles.dragHandle}>☰</Text>
+          {/* Drag handle — always triggers drag on long press */}
+          <TouchableOpacity
+            onLongPress={drag}
+            delayLongPress={150}
+            style={styles.dragHandleWrap}
+            activeOpacity={1}
+          >
+            <Text style={styles.dragHandle}>☰</Text>
+          </TouchableOpacity>
 
           {/* Avatar */}
           <View style={styles.avatarWrap}>
@@ -280,6 +294,12 @@ export default function ChannelsScreen() {
                   />
                 </View>
               </View>
+            )}
+
+            {channelNotifSettings[editingChannel] && (
+              <TouchableOpacity style={styles.modalReset} onPress={resetChannelNotif}>
+                <Text style={styles.modalResetText}>Reset to global defaults</Text>
+              </TouchableOpacity>
             )}
 
             <View style={styles.modalButtons}>
@@ -387,10 +407,14 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     borderRadius: 10,
   },
+  dragHandleWrap: {
+    paddingRight: 12,
+    paddingVertical: 8,
+    justifyContent: 'center',
+  },
   dragHandle: {
     color: COLORS.textDim,
     fontSize: 18,
-    marginRight: 12,
     opacity: 0.5,
   },
   avatarWrap: {
@@ -538,10 +562,20 @@ const styles = StyleSheet.create({
     fontSize: 20,
     marginTop: 20,
   },
+  modalReset: {
+    marginTop: 20,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  modalResetText: {
+    color: COLORS.danger,
+    fontSize: 14,
+    fontWeight: '500',
+  },
   modalButtons: {
     flexDirection: 'row',
     gap: 12,
-    marginTop: 24,
+    marginTop: 12,
   },
   modalCancel: {
     flex: 1,
