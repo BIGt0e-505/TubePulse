@@ -53,6 +53,11 @@
         "projectId": "c90a6a0b-2f16-4a95-aa75-51a7f5c9313b"
       }
     },
-    "owner": "bigt0e"
+    "owner": "bigt0e",
+    "notification": {
+      "icon": "./assets/notification-icon.png",
+      "color": "#ffffff",
+      "androidMode": "default"
+    }
   }
 }
