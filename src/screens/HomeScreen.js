@@ -61,9 +61,10 @@ export default function HomeScreen({ navigation }) {
           channelId: r.channelId,
           lastChecked: new Date().toISOString(),
         };
-        // Seed new channels with latest video already "seen" (lowlighted)
+        // First open — mark ALL cached videos seen so user starts with a clean slate
         if (!updatedLastSeen[r.handle]) {
-          updatedLastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
+          const allIds = (r.videos?.length ? r.videos : [r.latestVideo]).map(v => v.videoId);
+          updatedLastSeen[r.handle] = { seenIds: allIds };
         }
       }
 
@@ -146,9 +147,10 @@ export default function HomeScreen({ navigation }) {
         channelId: r.channelId,
         lastChecked: new Date().toISOString(),
       };
-      // Migrate old format or seed new channels
+      // Migrate old format or seed new channels (first refresh — mark all seen)
       if (!updatedLastSeen[r.handle]) {
-        updatedLastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
+        const allIds = (r.videos?.length ? r.videos : [r.latestVideo]).map(v => v.videoId);
+        updatedLastSeen[r.handle] = { seenIds: allIds };
       } else if (!updatedLastSeen[r.handle].seenIds) {
         // Migrate from old { videoId, seen } format
         const oldId = updatedLastSeen[r.handle].videoId;

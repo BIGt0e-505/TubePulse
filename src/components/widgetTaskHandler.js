@@ -47,9 +47,10 @@ async function buildWidgetData(fetchFresh = false) {
             channelId: r.channelId,
             lastChecked: new Date().toISOString(),
           };
-          // Seed new channels with latest video already seen (lowlighted)
+          // First time seeing channel in widget — mark all seen (clean slate)
           if (!updatedLastSeen[r.handle]) {
-            updatedLastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
+            const allIds = (r.videos?.length ? r.videos : [r.latestVideo]).map(v => v.videoId);
+            updatedLastSeen[r.handle] = { seenIds: allIds };
           }
         }
         if (Object.keys(newCache).length > 0) {
