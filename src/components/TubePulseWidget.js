@@ -29,6 +29,7 @@ function VideoRow({ video, seen, avatar, handle }) {
         alignItems: 'center',
         paddingRight: 12,
         paddingVertical: 5,
+        width: 'match_parent',
       }}
     >
       {/* Avatar stub — tapping always opens channel */}
@@ -36,7 +37,7 @@ function VideoRow({ video, seen, avatar, handle }) {
         clickAction="CHANNEL_CLICK"
         clickActionData={{ handle }}
         style={{
-          width: AVATAR_SIZE + 12, // 6px padding each side
+          width: AVATAR_SIZE + 12,
           alignItems: 'center',
           justifyContent: 'center',
         }}
@@ -67,13 +68,12 @@ function VideoRow({ video, seen, avatar, handle }) {
         )}
       </FlexWidget>
 
-      {/* Video content — tapping opens video (or channel per settings) */}
+      {/* Thumbnail */}
       <FlexWidget
         clickAction="WIDGET_CLICK"
         clickActionData={{ videoId: video.videoId, link: video.link, handle }}
-        style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}
+        style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}
       >
-        {/* Thumbnail */}
         {video.thumbnail ? (
           <ImageWidget
             image={video.thumbnail}
@@ -92,8 +92,8 @@ function VideoRow({ video, seen, avatar, handle }) {
           />
         )}
 
-        {/* Title + meta */}
-        <FlexWidget style={{ flex: 1, marginLeft: 8 }}>
+        {/* Title then age below — fills remaining width */}
+        <FlexWidget style={{ flex: 1, marginLeft: 8, flexDirection: 'column' }}>
           <TextWidget
             text={video.title || 'Untitled'}
             style={{ fontSize: 12, color: textColor, fontWeight: titleWeight }}
@@ -106,19 +106,6 @@ function VideoRow({ video, seen, avatar, handle }) {
             />
           ) : null}
         </FlexWidget>
-
-        {/* New dot */}
-        {!seen ? (
-          <FlexWidget
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: COLORS.accent,
-              marginLeft: 6,
-            }}
-          />
-        ) : null}
       </FlexWidget>
     </FlexWidget>
   );
@@ -126,22 +113,30 @@ function VideoRow({ video, seen, avatar, handle }) {
 
 function ChannelSection({ channel }) {
   return (
-    <FlexWidget style={{ marginTop: 2 }}>
-      {/* Channel header — tapping opens channel */}
+    <FlexWidget style={{ marginTop: 2, width: 'match_parent' }}>
+      {/* Channel header — full width, @handle left, X New right */}
       <FlexWidget
         clickAction="CHANNEL_CLICK"
         clickActionData={{ handle: channel.handle }}
-        style={{ paddingHorizontal: 12, paddingVertical: 4, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: 'match_parent' }}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: 12,
+          paddingVertical: 4,
+          width: 'match_parent',
+        }}
       >
-        <TextWidget
-          text={`@${channel.handle}`}
-          style={{
-            fontSize: 12,
-            color: channel.hasNew ? COLORS.accent : COLORS.textDim,
-            fontWeight: channel.hasNew ? 'bold' : 'normal',
-          }}
-          maxLines={1}
-        />
+        <FlexWidget style={{ flex: 1 }}>
+          <TextWidget
+            text={`@${channel.handle}`}
+            style={{
+              fontSize: 12,
+              color: channel.hasNew ? COLORS.accent : COLORS.textDim,
+              fontWeight: channel.hasNew ? 'bold' : 'normal',
+            }}
+            maxLines={1}
+          />
+        </FlexWidget>
         <TextWidget
           text={channel.unseenCount > 0 ? `${channel.unseenCount} New` : '0 New'}
           style={{
