@@ -125,6 +125,41 @@ export default function SettingsScreen() {
         </>
       )}
 
+      {/* Community Posts */}
+      <Text style={styles.sectionTitle}>Content types</Text>
+      <View style={styles.dndRow}>
+        <View style={styles.switchLabelWrap}>
+          <Text style={styles.dndLabel}>Include community posts</Text>
+          <Text style={styles.switchSubtitle}>Notify on community tab posts as well as videos</Text>
+        </View>
+        <Switch
+          value={settings.includeCommunityPosts || false}
+          onValueChange={(v) => updateSetting('includeCommunityPosts', v)}
+          trackColor={{ false: COLORS.border, true: COLORS.accent }}
+          thumbColor={settings.includeCommunityPosts ? COLORS.bg : COLORS.textDim}
+        />
+      </View>
+
+      {/* Per-channel notification settings */}
+      <Text style={styles.sectionTitle}>Per-channel notifications</Text>
+      <View style={styles.dndRow}>
+        <View style={styles.switchLabelWrap}>
+          <Text style={styles.dndLabel}>Per-channel settings</Text>
+          <Text style={styles.switchSubtitle}>Override notification mode and DND per channel</Text>
+        </View>
+        <Switch
+          value={settings.perChannelNotifications || false}
+          onValueChange={(v) => updateSetting('perChannelNotifications', v)}
+          trackColor={{ false: COLORS.border, true: COLORS.accent }}
+          thumbColor={settings.perChannelNotifications ? COLORS.bg : COLORS.textDim}
+        />
+      </View>
+      {settings.perChannelNotifications && (
+        <Text style={styles.guidance}>
+          When enabled, each channel in your list has its own notification settings. Long-press a channel to configure it.
+        </Text>
+      )}
+
       {/* Battery Optimization */}
       <Text style={styles.sectionTitle}>Background polling</Text>
       <Text style={styles.guidance}>
@@ -212,6 +247,15 @@ const styles = StyleSheet.create({
   dndLabel: {
     color: COLORS.text,
     fontSize: 15,
+  },
+  switchLabelWrap: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  switchSubtitle: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    marginTop: 2,
   },
   timeRow: {
     flexDirection: 'row',

@@ -67,3 +67,25 @@ export async function getChannelCache() {
 export async function saveChannelCache(cache) {
   await AsyncStorage.setItem(STORAGE_KEYS.CHANNEL_CACHE, JSON.stringify(cache));
 }
+
+// Per-channel notification settings
+// Shape: { [handle]: { notificationMode, dndEnabled, dndStart, dndEnd } }
+export async function getChannelNotifSettings() {
+  const data = await AsyncStorage.getItem(STORAGE_KEYS.CHANNEL_NOTIF_SETTINGS);
+  return data ? JSON.parse(data) : {};
+}
+
+export async function saveChannelNotifSettings(settings) {
+  await AsyncStorage.setItem(STORAGE_KEYS.CHANNEL_NOTIF_SETTINGS, JSON.stringify(settings));
+}
+
+export async function getChannelNotifSetting(handle) {
+  const all = await getChannelNotifSettings();
+  return all[handle] || null;
+}
+
+export async function saveChannelNotifSetting(handle, setting) {
+  const all = await getChannelNotifSettings();
+  all[handle] = setting;
+  await saveChannelNotifSettings(all);
+}

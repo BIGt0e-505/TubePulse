@@ -10,6 +10,7 @@ import {
   getSettings,
   getGentleNotifState,
   saveGentleNotifState,
+  getChannelNotifSettings,
 } from './storage';
 import { checkAllChannels } from './rss';
 import { sendNewVideoNotification } from './notifications';
@@ -20,16 +21,18 @@ const GENTLE_REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 try {
   TaskManager.defineTask(BACKGROUND_FETCH_TASK, async () => {
     try {
-      const [channels, lastSeen, existingCache, settings, gentleState] = await Promise.all([
+      const [channels, lastSeen, existingCache, settings, gentleState, channelNotifSettings] = await Promise.all([
         getChannels(),
         getLastSeen(),
         getChannelCache(),
         getSettings(),
         getGentleNotifState(),
+        getChannelNotifSettings(),
       ]);
 
-      const results = await checkAllChannels(channels);
-      const notificationMode = settings.notificationMode || 'persistent';
+      const results = await checkAllChannels(channels, settings.includeCommunityPosts);
+      const notificationMode = settings.notificationMode || 'relentless';
+      const perChannelEnabled = settings.perChannelNotifications || false;
 
       let newContentFound = false;
       const cache = { ...existingCache };
@@ -58,12 +61,14 @@ try {
         }
 
         const seenIds = updatedLastSeen[key]?.seenIds || [];
-        const videoId = result.latestVideo.videoId;
-        const isUnseen = !seenIds.includes(videoId);
+        const latestContent = result.latestPost || result.latestVideo;
+        if (!latestContent) continue;
+        const contentId = latestContent.videoId || latestContent.postId;
+        const isUnseen = !seenIds.includes(contentId);
 
         if (!isUnseen) {
-          // Video already seen — clean up gentle state if present
-          if (updatedGentleState[key]?.videoId === videoId) {
+          // Content already seen — clean up gentle state if present
+          if (updatedGentleState[key]?.videoId === contentId) {
             delete updatedGentleState[key];
           }
           continue;
@@ -74,34 +79,41 @@ try {
           updatedLastSeen[key] = { seenIds: [] };
         }
 
-        if (notificationMode === 'relentless' || notificationMode === 'persistent') {
+        // Resolve effective settings — per-channel overrides global if enabled
+        const channelOverride = perChannelEnabled ? channelNotifSettings[key] : null;
+        const effectiveSettings = channelOverride
+          ? { ...settings, ...channelOverride }
+          : settings;
+        const effectiveMode = effectiveSettings.notificationMode || 'relentless';
+
+        if (effectiveMode === 'relentless' || effectiveMode === 'persistent') {
           // Fire every poll cycle until the user opens/marks seen
           newContentFound = true;
           await sendNewVideoNotification(
             result.name,
-            result.latestVideo.title,
-            videoId,
+            latestContent.title,
+            contentId,
             key,
-            result.latestVideo.link,
-            settings
+            latestContent.link,
+            effectiveSettings
           );
         } else {
-          // Gentle mode: notify once, then remind every 4h if still unseen
+          // Chill mode: notify once, then remind every 4h if still unseen
           const gentle = updatedGentleState[key];
 
-          if (!gentle || gentle.videoId !== videoId) {
-            // First time we've seen this video — send the initial notification
+          if (!gentle || gentle.videoId !== contentId) {
+            // First time we've seen this content — send the initial notification
             newContentFound = true;
             await sendNewVideoNotification(
               result.name,
-              result.latestVideo.title,
-              videoId,
+              latestContent.title,
+              contentId,
               key,
-              result.latestVideo.link,
-              settings
+              latestContent.link,
+              effectiveSettings
             );
             updatedGentleState[key] = {
-              videoId,
+              videoId: contentId,
               firstNotifiedAt: now,
               lastRemindedAt: now,
             };
@@ -110,11 +122,11 @@ try {
             newContentFound = true;
             await sendNewVideoNotification(
               result.name,
-              result.latestVideo.title,
-              videoId,
+              latestContent.title,
+              contentId,
               key,
-              result.latestVideo.link,
-              settings
+              latestContent.link,
+              effectiveSettings
             );
             updatedGentleState[key] = { ...gentle, lastRemindedAt: now };
           }

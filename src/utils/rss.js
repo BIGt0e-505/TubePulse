@@ -156,8 +156,41 @@ export async function fetchChannelAvatar(channelId, handle = null) {
   return null;
 }
 
+// Fetch latest community posts for a channel via innertube API
+export async function fetchCommunityPosts(channelId) {
+  try {
+    const body = JSON.stringify({
+      context: { client: { clientName: 'WEB', clientVersion: '2.20240101' } },
+      browseId: channelId,
+      params: 'Egljb21tdW5pdHnyBgQKAkoA', // community tab param
+    });
+    const resp = await fetchWithTimeout('https://www.youtube.com/youtubei/v1/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body,
+    });
+    if (!resp.ok) return [];
+
+    const data = await resp.json();
+    const str = JSON.stringify(data);
+
+    // Extract post IDs and snippets
+    const postMatches = [...str.matchAll(/"postId"\s*:\s*"([^"]+)"/g)];
+    const posts = postMatches.slice(0, 5).map((m, i) => ({
+      postId: m[1],
+      title: `Community post`,
+      link: `https://www.youtube.com/post/${m[1]}`,
+      published: new Date().toISOString(),
+    }));
+
+    return posts;
+  } catch {
+    return [];
+  }
+}
+
 // Check all channels for new content
-export async function checkAllChannels(channels) {
+export async function checkAllChannels(channels, includeCommunityPosts = false) {
   const results = [];
 
   for (const ch of channels) {
@@ -181,6 +214,17 @@ export async function checkAllChannels(channels) {
         // Avatar is non-critical
       }
 
+      // Optionally fetch community posts
+      let latestPost = null;
+      if (includeCommunityPosts) {
+        try {
+          const posts = await fetchCommunityPosts(channelId);
+          latestPost = posts[0] || null;
+        } catch {
+          // Non-critical
+        }
+      }
+
       results.push({
         ...ch,
         channelId,
@@ -188,6 +232,7 @@ export async function checkAllChannels(channels) {
         avatar,
         videos: videos.slice(0, 5),
         latestVideo: videos[0] || null,
+        latestPost,
         error: null,
       });
     } catch (err) {

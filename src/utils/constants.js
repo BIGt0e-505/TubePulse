@@ -18,6 +18,7 @@ export const STORAGE_KEYS = {
   LAST_SEEN: 'tubepulse_last_seen',
   CHANNEL_CACHE: 'tubepulse_channel_cache',
   GENTLE_NOTIF_STATE: 'tubepulse_gentle_notif_state',
+  CHANNEL_NOTIF_SETTINGS: 'tubepulse_channel_notif_settings', // per-channel notif overrides
 };
 
 export const DEFAULT_SETTINGS = {
@@ -27,6 +28,8 @@ export const DEFAULT_SETTINGS = {
   dndEnabled: false,
   dndStart: '22:00',
   dndEnd: '07:00',
+  perChannelNotifications: false, // enable per-channel notification overrides
+  includeCommunityPosts: false,   // notify on community posts as well as videos
 };
 
 export const COLORS = {
