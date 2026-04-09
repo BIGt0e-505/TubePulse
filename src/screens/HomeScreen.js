@@ -195,6 +195,23 @@ export default function HomeScreen({ navigation }) {
     return vids[0] || null;
   };
 
+  const handleChannelOpen = async (channel) => {
+    // Always marks ALL seen and opens channel page — used by pfp tap
+    const key = channel.handle;
+    const updatedLastSeen = { ...lastSeen };
+    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
+    const allIds = getVideos(key).map(v => v.videoId);
+    const existing = updatedLastSeen[key].seenIds || [];
+    updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
+    await saveLastSeen(updatedLastSeen);
+    setLastSeen(updatedLastSeen);
+    Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
+  };
+
   const handleTap = async (channel) => {
     const key = channel.handle;
     const updatedLastSeen = { ...lastSeen };
@@ -254,7 +271,11 @@ export default function HomeScreen({ navigation }) {
         onPress={() => handleTap(item)}
         activeOpacity={0.7}
       >
-        <View style={[styles.avatarContainer, hasNew && styles.avatarGlow]}>
+        <TouchableOpacity
+          onPress={() => handleChannelOpen(item)}
+          style={[styles.avatarContainer, hasNew && styles.avatarGlow]}
+          activeOpacity={0.7}
+        >
           {cached?.avatar ? (
             <Image source={{ uri: cached.avatar }} style={styles.avatar} />
           ) : (
@@ -264,7 +285,7 @@ export default function HomeScreen({ navigation }) {
               </Text>
             </View>
           )}
-        </View>
+        </TouchableOpacity>
         <View style={styles.channelInfo}>
           <View style={styles.channelHeader}>
             <Text style={[styles.channelName, hasNew && styles.channelNameNew]} numberOfLines={1} style={styles.channelNameFlex}>
