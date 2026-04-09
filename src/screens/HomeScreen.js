@@ -261,52 +261,82 @@ export default function HomeScreen({ navigation }) {
     return `${days}d`;
   };
 
+  const handleVideoTap = async (channel, video) => {
+    const key = channel.handle;
+    const updatedLastSeen = { ...lastSeen };
+    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
+    const seenIds = updatedLastSeen[key].seenIds || [];
+    if (!seenIds.includes(video.videoId)) {
+      updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
+      await saveLastSeen(updatedLastSeen);
+      setLastSeen(updatedLastSeen);
+    }
+    Linking.openURL(video.link);
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
+  };
+
   const renderChannel = ({ item }) => {
     const cached = cache[item.handle];
     const hasNew = isNew(item.handle);
-    const count = unseenCount(item.handle);
-    const currentVideo = getCurrentVideo(item.handle);
+    const displayName = cached?.name || item.name || item.handle;
+    // All unseen videos for this channel (oldest first so tapping goes chronologically)
+    const unseenVids = getUnseenVideos(item.handle);
+    // If nothing unseen, show the latest video as a greyed fallback
+    const latestVideo = getVideos(item.handle)[0] || null;
+    const videosToShow = unseenVids.length > 0 ? [...unseenVids].reverse() : (latestVideo ? [latestVideo] : []);
 
     return (
-      <TouchableOpacity
-        style={[styles.channelRow, hasNew && styles.channelRowNew]}
-        onPress={() => handleTap(item)}
-        activeOpacity={0.7}
-      >
-        <TouchableOpacity
-          onPress={() => handleChannelOpen(item)}
-          style={[styles.avatarContainer, hasNew && styles.avatarGlow]}
-          activeOpacity={0.7}
-        >
-          {cached?.avatar ? (
-            <Image source={{ uri: cached.avatar }} style={styles.avatar} />
-          ) : (
-            <View style={[styles.avatar, styles.avatarPlaceholder]}>
-              <Text style={styles.avatarLetter}>
-                {(item.name || item.handle).charAt(0).toUpperCase()}
-              </Text>
-            </View>
-          )}
-        </TouchableOpacity>
-        <View style={styles.channelInfo}>
-          <View style={styles.channelHeader}>
-            <Text style={[styles.channelName, hasNew && styles.channelNameNew]} numberOfLines={1} style={styles.channelNameFlex}>
-              {cached?.name || item.name || item.handle}
-            </Text>
-            <Text style={[styles.unseenBadge, hasNew ? styles.unseenBadgeNew : styles.unseenBadgeZero]}>
-              {count === 0 ? '0 New' : `${count} New`}
-            </Text>
-          </View>
-          <View style={styles.channelHeader}>
-            <Text style={[styles.videoTitle, hasNew && styles.videoTitleNew]} numberOfLines={1}>
-              {currentVideo?.title || 'No videos yet'}
-            </Text>
-            {currentVideo?.published && (
-              <Text style={styles.timeAgo}>{timeAgo(currentVideo.published)}</Text>
+      <View style={[styles.channelSection, hasNew && styles.channelSectionNew]}>
+        {/* Channel header row — tap pfp to open channel */}
+        <View style={styles.channelHeaderRow}>
+          <TouchableOpacity
+            onPress={() => handleChannelOpen(item)}
+            style={[styles.avatarContainer, hasNew && styles.avatarGlow]}
+            activeOpacity={0.7}
+          >
+            {cached?.avatar ? (
+              <Image source={{ uri: cached.avatar }} style={styles.avatar} />
+            ) : (
+              <View style={[styles.avatar, styles.avatarPlaceholder]}>
+                <Text style={styles.avatarLetter}>
+                  {displayName.charAt(0).toUpperCase()}
+                </Text>
+              </View>
             )}
-          </View>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.channelNameBtn} onPress={() => handleChannelOpen(item)} activeOpacity={0.7}>
+            <Text style={[styles.channelName, hasNew && styles.channelNameNew]} numberOfLines={1}>
+              {displayName}
+            </Text>
+          </TouchableOpacity>
         </View>
-      </TouchableOpacity>
+
+        {/* Video rows — each tappable individually */}
+        {videosToShow.map((video) => {
+          const isSeen = !getUnseenVideos(item.handle).find(v => v.videoId === video.videoId);
+          return (
+            <TouchableOpacity
+              key={video.videoId}
+              style={styles.videoRow}
+              onPress={() => handleVideoTap(item, video)}
+              activeOpacity={0.7}
+            >
+              <View style={styles.videoInfo}>
+                <Text style={[styles.videoTitle, !isSeen && styles.videoTitleNew]} numberOfLines={2}>
+                  {video.title}
+                </Text>
+                {video.published && (
+                  <Text style={styles.timeAgo}>{timeAgo(video.published)}</Text>
+                )}
+              </View>
+              {!isSeen && <View style={styles.newDot} />}
+            </TouchableOpacity>
+          );
+        })}
+      </View>
     );
   };
 
@@ -351,16 +381,33 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
     justifyContent: 'center',
   },
-  channelRow: {
+  channelSection: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+    paddingBottom: 8,
+  },
+  channelSectionNew: {
+    backgroundColor: 'rgba(79, 195, 247, 0.04)',
+  },
+  channelHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
+    paddingTop: 12,
+    paddingBottom: 4,
   },
-  channelRowNew: {
-    backgroundColor: 'rgba(79, 195, 247, 0.05)',
+  channelNameBtn: {
+    flex: 1,
+  },
+  videoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 5,
+    paddingLeft: 68, // indent under avatar
+  },
+  videoInfo: {
+    flex: 1,
   },
   avatarContainer: {
     marginRight: 12,
@@ -391,34 +438,11 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: '700',
   },
-  channelInfo: {
-    flex: 1,
-  },
-  channelHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
   channelName: {
     color: COLORS.text,
     fontSize: 14,
     fontWeight: '600',
     flex: 1,
-  },
-  channelNameFlex: {
-    flex: 1,
-  },
-  unseenBadge: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginLeft: 8,
-  },
-  unseenBadgeNew: {
-    color: COLORS.accent,
-  },
-  unseenBadgeZero: {
-    color: COLORS.textDim,
-    opacity: 0.5,
   },
   channelNameNew: {
     color: '#FFFFFF',
