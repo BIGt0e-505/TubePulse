@@ -108,6 +108,11 @@ export default function HomeScreen({ navigation }) {
       if (state === 'active') {
         loadData();
         startInterval();
+        // Sync widget whenever app comes back to foreground
+        try {
+          const { requestWidgetUpdate } = require('react-native-android-widget');
+          requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+        } catch {}
       } else {
         if (refreshRef.current) clearInterval(refreshRef.current);
       }
@@ -450,7 +455,7 @@ const styles = StyleSheet.create({
   timeAgo: {
     color: COLORS.textDim,
     fontSize: 12,
-    marginLeft: 8,
+    marginTop: 2,
   },
   videoTitle: {
     color: COLORS.textDim,
