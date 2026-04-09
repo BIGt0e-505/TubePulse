@@ -131,7 +131,7 @@ function ChannelSection({ channel }) {
       <FlexWidget
         clickAction="CHANNEL_CLICK"
         clickActionData={{ handle: channel.handle }}
-        style={{ paddingHorizontal: 12, paddingVertical: 4 }}
+        style={{ paddingHorizontal: 12, paddingVertical: 4, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: 'match_parent' }}
       >
         <TextWidget
           text={`@${channel.handle}`}
@@ -141,6 +141,14 @@ function ChannelSection({ channel }) {
             fontWeight: channel.hasNew ? 'bold' : 'normal',
           }}
           maxLines={1}
+        />
+        <TextWidget
+          text={channel.unseenCount > 0 ? `${channel.unseenCount} New` : '0 New'}
+          style={{
+            fontSize: 11,
+            color: channel.unseenCount > 0 ? COLORS.accent : COLORS.textDim,
+            fontWeight: channel.unseenCount > 0 ? 'bold' : 'normal',
+          }}
         />
       </FlexWidget>
 
