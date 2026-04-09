@@ -227,7 +227,11 @@ export default function ChannelsScreen() {
         onRequestClose={() => setEditingChannel(null)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalSheet}>
+          <ScrollView
+            style={styles.modalSheet}
+            contentContainerStyle={styles.modalSheetContent}
+            keyboardShouldPersistTaps="handled"
+          >
             <Text style={styles.modalTitle}>
               Notifications — @{editingChannel}
             </Text>
@@ -286,7 +290,7 @@ export default function ChannelsScreen() {
                 <Text style={styles.modalSaveText}>Save</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </ScrollView>
         </View>
       </Modal>
       {/* Add row */}
@@ -458,8 +462,11 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
+    maxHeight: '85%',
+  },
+  modalSheetContent: {
     padding: 24,
-    paddingBottom: 40,
+    paddingBottom: 56, // clear Android nav tray
   },
   modalTitle: {
     color: COLORS.text,
