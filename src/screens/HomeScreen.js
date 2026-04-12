@@ -266,6 +266,14 @@ export default function HomeScreen({ navigation }) {
     return `${days}d`;
   };
 
+  const formatViews = (views) => {
+    const n = parseInt(views, 10);
+    if (isNaN(n)) return '';
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1).replace(/\.0$/, '')}M views`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K views`;
+    return `${n} views`;
+  };
+
   const handleVideoTap = async (channel, video) => {
     const key = channel.handle;
     const updatedLastSeen = { ...lastSeen };
@@ -333,8 +341,13 @@ export default function HomeScreen({ navigation }) {
                 <Text style={[styles.videoTitle, !isSeen && styles.videoTitleNew]} numberOfLines={2}>
                   {video.title}
                 </Text>
-                {video.published && (
-                  <Text style={styles.timeAgo}>{timeAgo(video.published)}</Text>
+                {(video.published || video.views) && (
+                  <View style={styles.videoMeta}>
+                    <Text style={styles.timeAgo}>{video.published ? timeAgo(video.published) : ''}</Text>
+                    {video.views && video.views !== '0' && (
+                      <Text style={styles.timeAgo}>{formatViews(video.views)}</Text>
+                    )}
+                  </View>
                 )}
               </View>
               {!isSeen && <View style={styles.newDot} />}
@@ -452,10 +465,14 @@ const styles = StyleSheet.create({
   channelNameNew: {
     color: '#FFFFFF',
   },
+  videoMeta: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 2,
+  },
   timeAgo: {
     color: COLORS.textDim,
     fontSize: 12,
-    marginTop: 2,
   },
   videoTitle: {
     color: COLORS.textDim,
