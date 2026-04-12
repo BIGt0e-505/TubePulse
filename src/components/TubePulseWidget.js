@@ -18,9 +18,22 @@ const AVATAR_SIZE = 48;
 const THUMB_HEIGHT = 48;
 const THUMB_WIDTH = Math.round(THUMB_HEIGHT * (16 / 9));
 
+function formatViews(views) {
+  const n = parseInt(views, 10);
+  if (isNaN(n) || n === 0) return '';
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`;
+  return `${n}`;
+}
+
 function VideoRow({ video, seen, avatar, handle }) {
   const textColor = seen ? COLORS.textDim : COLORS.text;
   const titleWeight = seen ? 'normal' : 'bold';
+
+  // Build the meta line: timeAgo · viewCount
+  const viewStr = video.views ? formatViews(video.views) : '';
+  const metaParts = [video.timeAgo, viewStr].filter(Boolean);
+  const metaLine = metaParts.length > 0 ? metaParts.join(' · ') : '';
 
   return (
     <FlexWidget
@@ -92,16 +105,16 @@ function VideoRow({ video, seen, avatar, handle }) {
           />
         )}
 
-        {/* Title then age below — fills remaining width */}
+        {/* Title then meta below — fills remaining width */}
         <FlexWidget style={{ flex: 1, marginLeft: 8, flexDirection: 'column' }}>
           <TextWidget
             text={video.title || 'Untitled'}
             style={{ fontSize: 12, color: textColor, fontWeight: titleWeight }}
             maxLines={2}
           />
-          {video.timeAgo ? (
+          {metaLine ? (
             <TextWidget
-              text={video.timeAgo}
+              text={metaLine}
               style={{ fontSize: 10, color: COLORS.textDim, marginTop: 2 }}
             />
           ) : null}
