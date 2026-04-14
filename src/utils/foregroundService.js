@@ -82,8 +82,8 @@ const serviceOptions = {
   taskTitle: 'TubePulse',
   taskDesc: 'Watching for new videos',
   taskIcon: {
-    name: 'ic_launcher',
-    type: 'mipmap',
+    name: 'notification_icon',
+    type: 'drawable',
   },
   color: '#4FC3F7',
   parameters: {},
