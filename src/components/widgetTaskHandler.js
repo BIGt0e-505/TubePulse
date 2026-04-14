@@ -89,6 +89,7 @@ async function buildWidgetData(fetchFresh = false) {
         thumbnail: currentVideo.thumbnail,
         link: currentVideo.link,
         timeAgo: currentVideo.published ? timeAgo(currentVideo.published) : '',
+        views: currentVideo.views || '',
         seen: !hasNew,
         handle: ch.handle,
       }] : [];

@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="/mnt/d/Dev/TubePulse"
-REPO="BIGt0e-505/TubePulse"
+REPO="Undert0e-505/TubePulse"
 APP_NAME="TubePulse"
 GH="$HOME/bin/gh"
 ENV_SCRIPT="$HOME/.openclaw/workspace/android-env.sh"
