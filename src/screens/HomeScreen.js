@@ -327,7 +327,7 @@ export default function HomeScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* Video rows — each tappable individually */}
+        {/* Video rows — each tappable individually with thumbnail */}
         {videosToShow.map((video) => {
           const isSeen = !getUnseenVideos(item.handle).find(v => v.videoId === video.videoId);
           return (
@@ -337,8 +337,16 @@ export default function HomeScreen({ navigation }) {
               onPress={() => handleVideoTap(item, video)}
               activeOpacity={0.7}
             >
+              {/* Thumbnail */}
+              {video.thumbnail ? (
+                <Image source={{ uri: video.thumbnail }} style={styles.thumbnail} />
+              ) : (
+                <View style={[styles.thumbnail, styles.thumbnailPlaceholder]} />
+              )}
+
+              {/* Title and meta */}
               <View style={styles.videoInfo}>
-                <Text style={[styles.videoTitle, !isSeen && styles.videoTitleNew]} numberOfLines={2}>
+                <Text style={[styles.videoTitle, !isSeen && { color: COLORS.text, fontWeight: 'bold' }]} numberOfLines={2}>
                   {video.title}
                 </Text>
                 {(video.published || video.views) && (
@@ -422,10 +430,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingVertical: 5,
-    paddingLeft: 68, // indent under avatar
   },
   videoInfo: {
     flex: 1,
+    marginLeft: 8,
   },
   avatarContainer: {
     marginRight: 12,
@@ -458,9 +466,11 @@ const styles = StyleSheet.create({
   },
   channelName: {
     color: COLORS.text,
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: '600',
     flex: 1,
+    lineHeight: 40,
+    marginTop: 5,
   },
   channelNameNew: {
     color: '#FFFFFF',
@@ -479,8 +489,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginTop: 2,
   },
-  videoTitleNew: {
-    color: COLORS.text,
+  thumbnail: {
+    width: 85,
+    height: 48,
+    borderRadius: 4,
+  },
+  thumbnailPlaceholder: {
+    backgroundColor: '#1A1A1A',
   },
   newDot: {
     width: 8,
