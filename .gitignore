@@ -2,3 +2,5 @@ node_modules/
 .expo/
 *.apk
 .aider*
+worker/tubepulse-fcm-service-account.json
+.firebaserc
