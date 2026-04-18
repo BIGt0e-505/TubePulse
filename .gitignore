@@ -4,3 +4,4 @@ node_modules/
 .aider*
 worker/tubepulse-fcm-service-account.json
 .firebaserc
+firebase-debug.log
