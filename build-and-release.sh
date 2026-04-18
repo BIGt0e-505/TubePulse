@@ -18,6 +18,12 @@ ENV_SCRIPT="$HOME/.openclaw/workspace/android-env.sh"
 # --- Source environment ---
 source "$ENV_SCRIPT"
 
+# --- Use D drive for temp files ---
+export TMPDIR="/mnt/d/tmp"
+export TEMP="/mnt/d/tmp"
+export TMP="/mnt/d/tmp"
+mkdir -p "$TMPDIR"
+
 # --- Parse version arg ---
 VERSION="${1:?Usage: build-and-release.sh <version> (e.g., 1.0.0)}"
 TAG="v${VERSION}"

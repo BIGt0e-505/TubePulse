@@ -2,7 +2,7 @@
   "expo": {
     "name": "TubePulse",
     "slug": "TubePulse",
-    "version": "1.0.48",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -35,7 +35,12 @@
         }
       ],
       "./plugins/withNotificationIcon",
-      "./plugins/withForegroundService",
+      [
+        "@react-native-firebase/app",
+        {
+          "androidGoogleServicesFile": "./android/app/google-services.json"
+        }
+      ],
       [
         "react-native-android-widget",
         {

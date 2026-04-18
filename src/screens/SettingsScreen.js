@@ -1,15 +1,13 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  Linking, Platform, Switch, ScrollView,
+  Platform, Switch, ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS, DEFAULT_SETTINGS } from '../utils/constants';
 import TimeSpinner from '../components/TimeSpinner';
 import { getSettings, saveSettings } from '../utils/storage';
-import { registerBackgroundFetch } from '../utils/backgroundTask';
-
-const POLL_OPTIONS = [5, 15, 30, 60, 120];
+import { updateSettings } from '../utils/api';
 
 // ── Main Screen ───────────────────────────────────────────────────────────────
 export default function SettingsScreen() {
@@ -25,8 +23,16 @@ export default function SettingsScreen() {
     const updated = { ...settings, [key]: value };
     setSettings(updated);
     await saveSettings(updated);
-    if (key === 'pollIntervalMinutes') {
-      await registerBackgroundFetch(value);
+
+    // Sync settings with API Worker
+    try {
+      const messaging = require('@react-native-firebase/messaging').default;
+      const fcmToken = await messaging().getToken();
+      if (fcmToken) {
+        await updateSettings(fcmToken, updated);
+      }
+    } catch (e) {
+      console.warn('Failed to sync settings with server:', e);
     }
   };
 
@@ -51,22 +57,6 @@ export default function SettingsScreen() {
         ))}
       </View>
 
-      {/* Poll Interval */}
-      <Text style={styles.sectionTitle}>Check for new videos every:</Text>
-      <View style={styles.optionGroup}>
-        {POLL_OPTIONS.map((mins) => (
-          <TouchableOpacity
-            key={mins}
-            style={[styles.option, settings.pollIntervalMinutes === mins && styles.optionActive]}
-            onPress={() => updateSetting('pollIntervalMinutes', mins)}
-          >
-            <Text style={[styles.optionText, settings.pollIntervalMinutes === mins && styles.optionTextActive]}>
-              {mins < 60 ? `${mins}m` : `${mins / 60}h`}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
       {/* Notification Mode */}
       <Text style={styles.sectionTitle}>Notification mode</Text>
       <View style={styles.optionGroup}>
@@ -86,6 +76,9 @@ export default function SettingsScreen() {
         {mode === 'chill'
           ? 'Chill: one notification when a video drops, then a nudge every 4 hours until you watch it.'
           : "Relentless: hammers you every check cycle until you've watched it. You asked for this."}
+      </Text>
+      <Text style={styles.guidance}>
+        The server checks for new videos every 2 minutes — no battery drain on your phone.
       </Text>
 
       {/* Do Not Disturb */}
@@ -160,20 +153,13 @@ export default function SettingsScreen() {
         </Text>
       )}
 
-      {/* Battery Optimization */}
-      <Text style={styles.sectionTitle}>Background polling</Text>
+      {/* Push Architecture Note */}
+      <Text style={styles.sectionTitle}>Push notifications</Text>
       <Text style={styles.guidance}>
-        For reliable notifications and widget updates, disable battery optimization for TubePulse.
-        Otherwise Android may pause polling when the app is in the background.
+        TubePulse now uses server-side push notifications. Your phone doesn't poll in the background — 
+        the server checks YouTube every 2 minutes and pushes new videos to you instantly. 
+        No battery drain, no foreground service.
       </Text>
-      {Platform.OS === 'android' && (
-        <TouchableOpacity
-          style={styles.batteryButton}
-          onPress={() => Linking.openSettings()}
-        >
-          <Text style={styles.batteryButtonText}>Open App Settings</Text>
-        </TouchableOpacity>
-      )}
 
     </ScrollView>
   );
@@ -275,20 +261,5 @@ const styles = StyleSheet.create({
     color: COLORS.textDim,
     fontSize: 20,
     marginTop: 20,
-  },
-  batteryButton: {
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.accent,
-    borderRadius: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    alignSelf: 'flex-start',
-    marginTop: 8,
-  },
-  batteryButtonText: {
-    color: COLORS.accent,
-    fontSize: 14,
-    fontWeight: '600',
   },
 });
