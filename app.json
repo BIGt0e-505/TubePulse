@@ -17,6 +17,7 @@
     },
     "android": {
       "package": "com.tubepulse.app",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#121212"
@@ -38,7 +39,7 @@
       [
         "@react-native-firebase/app",
         {
-          "androidGoogleServicesFile": "./android/app/google-services.json"
+          "androidGoogleServicesFile": "./google-services.json"
         }
       ],
       [
