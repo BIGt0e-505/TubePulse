@@ -1,0 +1,8 @@
+{
+  "name": "tubepulse-cron",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "fast-xml-parser": "^5.5.10"
+  }
+}
