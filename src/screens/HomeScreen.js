@@ -60,13 +60,14 @@ export default function HomeScreen({ navigation }) {
         // Fetch from server
         const result = await fetchFeed(token);
         if (result.ok && result.feeds) {
-          // Merge server feed data into local cache
+          // Merge server feed data into local cache, but don't overwrite avatar with null
           const newCache = {};
           for (const [handle, feed] of Object.entries(result.feeds)) {
             const channel = (await getChannels()).find(ch => ch.handle === handle);
+            const existingEntry = cache[handle] || {};
             newCache[handle] = {
-              name: feed.name,
-              avatar: feed.avatar,
+              name: feed.name || existingEntry.name,
+              avatar: feed.avatar || existingEntry.avatar || null,
               videos: feed.videos || [],
               latestVideo: feed.videos?.[0] || null,
               channelId: channel?.channelId || null,
