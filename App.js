@@ -1,14 +1,16 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { StatusBar, Text, TouchableOpacity, Platform, Linking } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import * as Notifications from 'expo-notifications';
 import HomeScreen from './src/screens/HomeScreen';
 import ChannelsScreen from './src/screens/ChannelsScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
 import { getSettings, getLastSeen, saveLastSeen } from './src/utils/storage';
+import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNotificationOpenedApp, getInitialNotification, setBackgroundMessageHandler } from './src/utils/fcm';
+import { registerDevice, markSeen } from './src/utils/api';
+import { setupNotificationChannel } from './src/utils/notifications';
 
 const Stack = createNativeStackNavigator();
 
@@ -29,43 +31,89 @@ function HeaderButton({ title, onPress, style }) {
   );
 }
 
+// Background message handler — must be registered at top level
+setBackgroundMessageHandler(async (remoteMessage) => {
+  // FCM handles displaying the notification. We just log it.
+  console.log('Background push received:', remoteMessage.messageId);
+});
+
 export default function App() {
+  const fcmTokenRef = useRef(null);
+
   useEffect(() => {
     (async () => {
       try {
-        const { requestPermissions, setupNotificationChannel } = require('./src/utils/notifications');
-        await requestPermissions();
+        // Set up Android notification channels
         await setupNotificationChannel();
-        const settings = await getSettings();
-        const { registerBackgroundFetch } = require('./src/utils/backgroundTask');
-        await registerBackgroundFetch(settings.pollIntervalMinutes);
-        // Start foreground service for reliable polling
-        const { startForegroundService } = require('./src/utils/foregroundService');
-        await startForegroundService();
+
+        // Request permission and get FCM token
+        const token = await requestPermissionAndGetToken();
+        if (token) {
+          fcmTokenRef.current = token;
+
+          // Register with API Worker
+          const { getChannels, getSettings } = require('./src/utils/storage');
+          const [channels, settings] = await Promise.all([
+            getChannels(),
+            getSettings(),
+          ]);
+
+          await registerDevice(token, channels, settings);
+        }
       } catch (e) {
         console.warn('Init error:', e);
       }
     })();
 
-    // Handle notification taps — mark video as seen, open URL, update widget
-    const subscription = Notifications.addNotificationResponseReceivedListener(async (response) => {
-      const data = response.notification.request.content.data;
-      if (data?.videoId && data?.handle) {
-        try {
-          const lastSeen = await getLastSeen();
-          const ls = lastSeen[data.handle] || { seenIds: [] };
-          const seenIds = ls.seenIds || [];
-          if (!seenIds.includes(data.videoId)) {
-            lastSeen[data.handle] = { seenIds: [...seenIds, data.videoId] };
-            await saveLastSeen(lastSeen);
-          }
-          // Update widget
-          try {
-            const { requestWidgetUpdate } = require('react-native-android-widget');
-            await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-          } catch {}
-        } catch {}
+    // Handle token refresh — re-register with API Worker
+    const tokenUnsubscribe = onTokenRefresh(async (newToken) => {
+      fcmTokenRef.current = newToken;
+      try {
+        const { getChannels, getSettings } = require('./src/utils/storage');
+        const [channels, settings] = await Promise.all([
+          getChannels(),
+          getSettings(),
+        ]);
+        await registerDevice(newToken, channels, settings);
+      } catch (e) {
+        console.warn('Token refresh re-register failed:', e);
       }
+    });
+
+    // Handle foreground messages — update UI if on Home screen
+    const foregroundUnsubscribe = onForegroundMessage(async (remoteMessage) => {
+      console.log('Foreground push:', remoteMessage?.data?.videoId);
+      // Foreground messages don't auto-display — the notification tray will handle it
+      // for background, but in foreground we just log. The user can pull-to-refresh.
+    });
+
+    // Handle notification tap (app opened from notification)
+    const handleNotificationTap = async (remoteMessage) => {
+      const data = remoteMessage?.data;
+      if (!data?.videoId || !data?.handle) return;
+
+      try {
+        // Mark video as seen locally
+        const lastSeen = await getLastSeen();
+        const ls = lastSeen[data.handle] || { seenIds: [] };
+        const seenIds = ls.seenIds || [];
+        if (!seenIds.includes(data.videoId)) {
+          lastSeen[data.handle] = { seenIds: [...seenIds, data.videoId] };
+          await saveLastSeen(lastSeen);
+        }
+
+        // Mark seen on server
+        if (fcmTokenRef.current) {
+          await markSeen(fcmTokenRef.current, data.handle, [data.videoId]);
+        }
+
+        // Update widget
+        try {
+          const { requestWidgetUpdate } = require('react-native-android-widget');
+          await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+        } catch {}
+      } catch {}
+
       // Open the video or channel based on settings
       try {
         const settings = await getSettings();
@@ -74,9 +122,23 @@ export default function App() {
           : data.videoLink;
         if (url) Linking.openURL(url);
       } catch {}
+    };
+
+    // Check if app was opened from a notification (cold start)
+    getInitialNotification().then((remoteMessage) => {
+      if (remoteMessage) {
+        handleNotificationTap(remoteMessage);
+      }
     });
 
-    return () => subscription.remove();
+    // Listen for notification taps (warm start)
+    const tapUnsubscribe = onNotificationOpenedApp(handleNotificationTap);
+
+    return () => {
+      tokenUnsubscribe();
+      foregroundUnsubscribe();
+      tapUnsubscribe();
+    };
   }, []);
 
   return (

@@ -24,7 +24,8 @@ import {
   getSettings,
   getChannelNotifSettings, saveChannelNotifSettings,
 } from '../utils/storage';
-import { checkAllChannels } from '../utils/rss';
+import { resolveHandle } from '../utils/api';
+import { updateChannels } from '../utils/api';
 import TimeSpinner from '../components/TimeSpinner';
 
 // Default per-channel settings (mirrors global defaults)
@@ -95,39 +96,54 @@ export default function ChannelsScreen() {
     const newChannel = { handle, name: handle, channelId: null };
 
     try {
-      const results = await checkAllChannels([newChannel]);
-      const r = results[0];
+      // Resolve handle via API Worker
+      const result = await resolveHandle(handle);
 
-      if (!r || r.error || !r.latestVideo) {
+      if (!result || !result.ok || !result.channelId) {
         setAddError(`Couldn't find @${handle} — check the handle and try again.`);
         setAdding(false);
         return;
       }
 
       // Valid channel — save it
-      const updated = [...channels, { handle, name: r.name || handle, channelId: r.channelId || null }];
+      const channelId = result.channelId;
+      const name = result.name || handle;
+      const avatar = result.avatar || null;
+
+      const updated = [...channels, { handle, name, channelId }];
       await saveChannels(updated);
       setChannels(updated);
       setNewHandle('');
 
       // Cache data
       const existingCache = await getChannelCache();
-      existingCache[r.handle] = {
-        name: r.name,
-        avatar: r.avatar,
-        videos: r.videos,
-        latestVideo: r.latestVideo,
-        channelId: r.channelId,
+      existingCache[handle] = {
+        name,
+        avatar,
+        videos: [],
+        latestVideo: null,
+        channelId,
         lastChecked: new Date().toISOString(),
       };
       await saveChannelCache(existingCache);
       setCache({ ...existingCache });
 
-      // Seed as already seen
+      // Seed last seen as empty (server will populate on next cron)
       const lastSeen = await getLastSeen();
-      if (!lastSeen[r.handle]) {
-        lastSeen[r.handle] = { seenIds: [r.latestVideo.videoId] };
+      if (!lastSeen[handle]) {
+        lastSeen[handle] = { seenIds: [] };
         await saveLastSeen(lastSeen);
+      }
+
+      // Sync channels with API Worker
+      try {
+        const messaging = require('@react-native-firebase/messaging').default;
+        const fcmToken = await messaging().getToken();
+        if (fcmToken) {
+          await updateChannels(fcmToken, updated);
+        }
+      } catch (e) {
+        console.warn('Failed to sync channels with server:', e);
       }
 
       // Update widget
@@ -156,6 +172,17 @@ export default function ChannelsScreen() {
             const updated = channels.filter((c) => c.handle !== handle);
             await saveChannels(updated);
             setChannels(updated);
+
+            // Sync with API Worker
+            try {
+              const messaging = require('@react-native-firebase/messaging').default;
+              const fcmToken = await messaging().getToken();
+              if (fcmToken) {
+                await updateChannels(fcmToken, updated);
+              }
+            } catch (e) {
+              console.warn('Failed to sync channel removal with server:', e);
+            }
           },
         },
       ]
@@ -165,6 +192,17 @@ export default function ChannelsScreen() {
   const onDragEnd = async ({ data }) => {
     setChannels(data);
     await saveChannels(data);
+
+    // Sync with API Worker
+    try {
+      const messaging = require('@react-native-firebase/messaging').default;
+      const fcmToken = await messaging().getToken();
+      if (fcmToken) {
+        await updateChannels(fcmToken, data);
+      }
+    } catch (e) {
+      console.warn('Failed to sync channel reorder with server:', e);
+    }
   };
 
   const renderItem = ({ item, drag, isActive }) => {
