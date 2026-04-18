@@ -2,7 +2,7 @@ import React from 'react';
 import { Linking } from 'react-native';
 import { TubePulseWidget } from './TubePulseWidget';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
-import { checkAllChannels } from '../utils/rss';
+import { fetchFeed } from '../utils/api';
 
 const nameToWidget = {
   TubePulseWidget: TubePulseWidget,
@@ -30,33 +30,33 @@ async function buildWidgetData(fetchFresh = false) {
 
     let activeCache = cache;
 
-    // If cache is empty or a fresh fetch is requested, pull live data
+    // If cache is empty or a fresh fetch is requested, pull from server
     const cacheEmpty = Object.keys(cache).length === 0;
     if ((cacheEmpty || fetchFresh) && channels.length > 0) {
       try {
-        const results = await checkAllChannels(channels);
-        const newCache = {};
-        const updatedLastSeen = { ...lastSeen };
-        for (const r of results) {
-          if (r.error || !r.latestVideo) continue;
-          newCache[r.handle] = {
-            name: r.name,
-            avatar: r.avatar,
-            videos: r.videos,
-            latestVideo: r.latestVideo,
-            channelId: r.channelId,
-            lastChecked: new Date().toISOString(),
-          };
-          // First time seeing channel in widget — mark all seen (clean slate)
-          if (!updatedLastSeen[r.handle]) {
-            const allIds = (r.videos?.length ? r.videos : [r.latestVideo]).map(v => v.videoId);
-            updatedLastSeen[r.handle] = { seenIds: allIds };
+        const messaging = require('@react-native-firebase/messaging').default;
+        const fcmToken = await messaging().getToken();
+        if (fcmToken) {
+          const result = await fetchFeed(fcmToken);
+          if (result.ok && result.feeds) {
+            const newCache = {};
+            for (const [handle, feed] of Object.entries(result.feeds)) {
+              const channel = channels.find(ch => ch.handle === handle);
+              newCache[handle] = {
+                name: feed.name,
+                avatar: feed.avatar,
+                videos: feed.videos || [],
+                latestVideo: feed.videos?.[0] || null,
+                channelId: channel?.channelId || null,
+                lastChecked: feed.lastChecked,
+              };
+            }
+            if (Object.keys(newCache).length > 0) {
+              await saveChannelCache(newCache);
+              if (result.lastSeen) await saveLastSeen(result.lastSeen);
+              activeCache = newCache;
+            }
           }
-        }
-        if (Object.keys(newCache).length > 0) {
-          await saveChannelCache(newCache);
-          await saveLastSeen(updatedLastSeen);
-          activeCache = newCache;
         }
       } catch {
         // Network failed — fall through to whatever cache we have
