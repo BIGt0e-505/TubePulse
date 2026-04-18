@@ -302,6 +302,23 @@ export default {
         lastChecked: new Date().toISOString(),
       };
 
+      // If avatar is missing, try to fetch it from YouTube Data API
+      if (!meta.avatar && env.YOUTUBE_API_KEY) {
+        try {
+          const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${channelId}&key=${env.YOUTUBE_API_KEY}`;
+          const chResp = await fetch(apiUrl);
+          if (chResp.ok) {
+            const chData = await chResp.json();
+            if (chData.items?.[0]?.snippet?.thumbnails) {
+              const thumbs = chData.items[0].snippet.thumbnails;
+              meta.avatar = thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null;
+            }
+          }
+        } catch (e) {
+          console.warn(`[Cron] Avatar fetch failed for ${channelId}:`, e.message);
+        }
+      }
+
       // Save feed data (top 5 videos)
       const feed = {
         videos: (rssResult.videos || []).slice(0, 5),
