@@ -11,11 +11,10 @@ import {
   ActivityIndicator,
   AppState,
 } from 'react-native';
-import * as Notifications from 'expo-notifications';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
-import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
-import { checkAllChannels } from '../utils/rss';
+import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache, getGentleNotifState, saveGentleNotifState } from '../utils/storage';
+import { fetchFeed, markSeen } from '../utils/api';
 
 export default function HomeScreen({ navigation }) {
   const [channels, setChannels] = useState([]);
@@ -24,6 +23,20 @@ export default function HomeScreen({ navigation }) {
   const [settings, setSettings] = useState({ tapAction: 'video' });
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [fcmToken, setFcmToken] = useState(null);
+
+  // Get FCM token from App context (passed via navigation params or stored)
+  const getFcmToken = useCallback(async () => {
+    if (fcmToken) return fcmToken;
+    try {
+      const messaging = require('@react-native-firebase/messaging').default;
+      const token = await messaging().getToken();
+      setFcmToken(token);
+      return token;
+    } catch {
+      return null;
+    }
+  }, [fcmToken]);
 
   const loadData = useCallback(async () => {
     const [ch, s, ls, ca] = await Promise.all([
@@ -37,138 +50,56 @@ export default function HomeScreen({ navigation }) {
     setLastSeen(ls);
     setCache(ca);
     setLoading(false);
-
-    // Auto-fetch on first open if cache is empty
-    if (Object.keys(ca).length === 0 && ch.length > 0) {
-      autoFetch(ch, ls);
-    }
   }, []);
 
-  const autoFetch = async (ch, ls) => {
+  const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const results = await checkAllChannels(ch);
-      const newCache = {};
-      const updatedLastSeen = { ...ls };
+      const token = await getFcmToken();
+      if (token) {
+        // Fetch from server
+        const result = await fetchFeed(token);
+        if (result.ok && result.feeds) {
+          // Merge server feed data into local cache
+          const newCache = {};
+          for (const [handle, feed] of Object.entries(result.feeds)) {
+            const channel = (await getChannels()).find(ch => ch.handle === handle);
+            newCache[handle] = {
+              name: feed.name,
+              avatar: feed.avatar,
+              videos: feed.videos || [],
+              latestVideo: feed.videos?.[0] || null,
+              channelId: channel?.channelId || null,
+              lastChecked: feed.lastChecked,
+            };
+          }
+          await saveChannelCache(newCache);
+          setCache(newCache);
 
-      for (const r of results) {
-        if (r.error || !r.latestVideo) continue;
-        newCache[r.handle] = {
-          name: r.name,
-          avatar: r.avatar,
-          videos: r.videos,
-          latestVideo: r.latestVideo,
-          channelId: r.channelId,
-          lastChecked: new Date().toISOString(),
-        };
-        // First open — mark ALL cached videos seen so user starts with a clean slate
-        if (!updatedLastSeen[r.handle]) {
-          const allIds = (r.videos?.length ? r.videos : [r.latestVideo]).map(v => v.videoId);
-          updatedLastSeen[r.handle] = { seenIds: allIds };
+          // Also update lastSeen from server if available
+          if (result.lastSeen) {
+            await saveLastSeen(result.lastSeen);
+            setLastSeen(result.lastSeen);
+          }
+
+          // Update settings from server
+          if (result.settings) {
+            const { saveSettings } = require('../utils/storage');
+            await saveSettings(result.settings);
+            setSettings(result.settings);
+          }
         }
-      }
-
-      await saveChannelCache(newCache);
-      await saveLastSeen(updatedLastSeen);
-      setCache(newCache);
-      setLastSeen(updatedLastSeen);
-
-      // Request widget update
-      try {
-        const { requestWidgetUpdate } = require('react-native-android-widget');
-        await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-      } catch {}
-    } catch (e) {
-      console.warn('Auto-fetch failed:', e);
-    }
-    setRefreshing(false);
-  };
-
-  useFocusEffect(
-    useCallback(() => {
-      loadData();
-    }, [loadData])
-  );
-
-  // Auto-refresh at the user's configured poll interval while in foreground
-  const refreshRef = useRef(null);
-  useEffect(() => {
-    const startInterval = async () => {
-      if (refreshRef.current) clearInterval(refreshRef.current);
-      const s = await getSettings();
-      const intervalMs = (s.pollIntervalMinutes || 30) * 60 * 1000;
-      refreshRef.current = setInterval(() => {
-        refresh();
-      }, intervalMs);
-    };
-
-    startInterval();
-
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') {
-        loadData();
-        startInterval();
-        // Sync widget whenever app comes back to foreground
-        try {
-          const { requestWidgetUpdate } = require('react-native-android-widget');
-          requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-        } catch {}
       } else {
-        if (refreshRef.current) clearInterval(refreshRef.current);
+        // Fallback: load from local cache
+        const ca = await getChannelCache();
+        setCache(ca);
       }
-    });
-
-    // Reload data when a notification is tapped (App.js handler updates storage first,
-    // then this fires to refresh the UI so tapped channels go from highlight to lowlight)
-    const notifSub = Notifications.addNotificationResponseReceivedListener(() => {
-      // Small delay to ensure App.js handler finishes writing to storage first
-      setTimeout(() => loadData(), 300);
-    });
-
-    return () => {
-      if (refreshRef.current) clearInterval(refreshRef.current);
-      sub.remove();
-      notifSub.remove();
-    };
-  }, []);
-
-  const refresh = async () => {
-    setRefreshing(true);
-    const ch = await getChannels();
-    const results = await checkAllChannels(ch);
-    const ls = await getLastSeen();
-    const existingCache = await getChannelCache();
-
-    const newCache = { ...existingCache };
-    const updatedLastSeen = { ...ls };
-
-    for (const r of results) {
-      if (r.error || !r.latestVideo) continue;
-      newCache[r.handle] = {
-        name: r.name,
-        avatar: r.avatar,
-        videos: r.videos,
-        latestVideo: r.latestVideo,
-        channelId: r.channelId,
-        lastChecked: new Date().toISOString(),
-      };
-      // Migrate old format or seed new channels (first refresh — mark all seen)
-      if (!updatedLastSeen[r.handle]) {
-        const allIds = (r.videos?.length ? r.videos : [r.latestVideo]).map(v => v.videoId);
-        updatedLastSeen[r.handle] = { seenIds: allIds };
-      } else if (!updatedLastSeen[r.handle].seenIds) {
-        // Migrate from old { videoId, seen } format
-        const oldId = updatedLastSeen[r.handle].videoId;
-        const wasSeen = updatedLastSeen[r.handle].seen;
-        updatedLastSeen[r.handle] = { seenIds: wasSeen && oldId ? [oldId] : [] };
-      }
+    } catch (e) {
+      console.warn('Refresh failed:', e);
+      // Fallback to local cache
+      const ca = await getChannelCache();
+      setCache(ca);
     }
-
-    await saveChannelCache(newCache);
-    await saveLastSeen(updatedLastSeen);
-    setCache(newCache);
-    setLastSeen(updatedLastSeen);
-    setChannels(ch);
     setRefreshing(false);
 
     // Update widget
@@ -176,7 +107,39 @@ export default function HomeScreen({ navigation }) {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
-  };
+  }, [getFcmToken]);
+
+  // Auto-fetch on first open if cache is empty
+  const autoFetch = useCallback(async () => {
+    const [ch, ca] = await Promise.all([getChannels(), getChannelCache()]);
+    if (Object.keys(ca).length === 0 && ch.length > 0) {
+      await refresh();
+    }
+  }, [refresh]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [loadData])
+  );
+
+  useEffect(() => {
+    autoFetch();
+
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        loadData();
+        // Refresh from server when coming back to foreground
+        refresh();
+        try {
+          const { requestWidgetUpdate } = require('react-native-android-widget');
+          requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+        } catch {}
+      }
+    });
+
+    return () => sub.remove();
+  }, [loadData, refresh, autoFetch]);
 
   // Returns videos sorted newest-first
   const getVideos = (handle) => {
@@ -186,7 +149,6 @@ export default function HomeScreen({ navigation }) {
     return [...vids].sort((a, b) => new Date(b.published) - new Date(a.published));
   };
 
-  // Unseen videos = in the list but not in seenIds
   const getUnseenVideos = (handle) => {
     const seenIds = lastSeen[handle]?.seenIds || [];
     return getVideos(handle).filter(v => !seenIds.includes(v.videoId));
@@ -194,16 +156,14 @@ export default function HomeScreen({ navigation }) {
 
   const unseenCount = (handle) => getUnseenVideos(handle).length;
 
-  // The "current" video to show = oldest unseen, or latest if all seen
   const getCurrentVideo = (handle) => {
     const unseen = getUnseenVideos(handle);
-    if (unseen.length > 0) return unseen[unseen.length - 1]; // oldest unseen
+    if (unseen.length > 0) return unseen[unseen.length - 1];
     const vids = getVideos(handle);
     return vids[0] || null;
   };
 
   const handleChannelOpen = async (channel) => {
-    // Always marks ALL seen and opens channel page — used by pfp tap
     const key = channel.handle;
     const updatedLastSeen = { ...lastSeen };
     if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
@@ -212,6 +172,13 @@ export default function HomeScreen({ navigation }) {
     updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
     await saveLastSeen(updatedLastSeen);
     setLastSeen(updatedLastSeen);
+
+    // Mark seen on server
+    const token = await getFcmToken();
+    if (token) {
+      markSeen(token, key, allIds).catch(() => {});
+    }
+
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
@@ -225,15 +192,19 @@ export default function HomeScreen({ navigation }) {
     if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
 
     if (settings.tapAction === 'channel') {
-      // Channel tap — mark ALL seen, reset count
       const allIds = getVideos(key).map(v => v.videoId);
       const existing = updatedLastSeen[key].seenIds || [];
       updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
+
+      const token = await getFcmToken();
+      if (token) {
+        markSeen(token, key, allIds).catch(() => {});
+      }
+
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     } else {
-      // Video tap — open oldest unseen, mark it seen, decrement
       const video = getCurrentVideo(key);
       if (video) {
         const seenIds = updatedLastSeen[key].seenIds || [];
@@ -242,11 +213,38 @@ export default function HomeScreen({ navigation }) {
         }
         await saveLastSeen(updatedLastSeen);
         setLastSeen(updatedLastSeen);
+
+        const token = await getFcmToken();
+        if (token) {
+          markSeen(token, key, [video.videoId]).catch(() => {});
+        }
+
         Linking.openURL(video.link);
       }
     }
 
-    // Update widget
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
+  };
+
+  const handleVideoTap = async (channel, video) => {
+    const key = channel.handle;
+    const updatedLastSeen = { ...lastSeen };
+    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
+    const seenIds = updatedLastSeen[key].seenIds || [];
+    if (!seenIds.includes(video.videoId)) {
+      updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
+      await saveLastSeen(updatedLastSeen);
+      setLastSeen(updatedLastSeen);
+
+      const token = await getFcmToken();
+      if (token) {
+        markSeen(token, key, [video.videoId]).catch(() => {});
+      }
+    }
+    Linking.openURL(video.link);
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
@@ -274,36 +272,16 @@ export default function HomeScreen({ navigation }) {
     return `${n} views`;
   };
 
-  const handleVideoTap = async (channel, video) => {
-    const key = channel.handle;
-    const updatedLastSeen = { ...lastSeen };
-    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
-    const seenIds = updatedLastSeen[key].seenIds || [];
-    if (!seenIds.includes(video.videoId)) {
-      updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
-      await saveLastSeen(updatedLastSeen);
-      setLastSeen(updatedLastSeen);
-    }
-    Linking.openURL(video.link);
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
-  };
-
   const renderChannel = ({ item }) => {
     const cached = cache[item.handle];
     const hasNew = isNew(item.handle);
     const displayName = cached?.name || item.name || item.handle;
-    // All unseen videos for this channel (oldest first so tapping goes chronologically)
     const unseenVids = getUnseenVideos(item.handle);
-    // If nothing unseen, show the latest video as a greyed fallback
     const latestVideo = getVideos(item.handle)[0] || null;
     const videosToShow = unseenVids.length > 0 ? [...unseenVids].reverse() : (latestVideo ? [latestVideo] : []);
 
     return (
       <View style={[styles.channelSection, hasNew && styles.channelSectionNew]}>
-        {/* Channel header row — tap pfp to open channel */}
         <View style={styles.channelHeaderRow}>
           <TouchableOpacity
             onPress={() => handleChannelOpen(item)}
@@ -327,7 +305,6 @@ export default function HomeScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* Video rows — each tappable individually with thumbnail */}
         {videosToShow.map((video) => {
           const isSeen = !getUnseenVideos(item.handle).find(v => v.videoId === video.videoId);
           return (
@@ -337,14 +314,12 @@ export default function HomeScreen({ navigation }) {
               onPress={() => handleVideoTap(item, video)}
               activeOpacity={0.7}
             >
-              {/* Thumbnail */}
               {video.thumbnail ? (
                 <Image source={{ uri: video.thumbnail }} style={styles.thumbnail} />
               ) : (
                 <View style={[styles.thumbnail, styles.thumbnailPlaceholder]} />
               )}
 
-              {/* Title and meta */}
               <View style={styles.videoInfo}>
                 <Text style={[styles.videoTitle, !isSeen && { color: COLORS.text, fontWeight: 'bold' }]} numberOfLines={2}>
                   {video.title}

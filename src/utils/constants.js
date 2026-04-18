@@ -18,12 +18,11 @@ export const STORAGE_KEYS = {
   LAST_SEEN: 'tubepulse_last_seen',
   CHANNEL_CACHE: 'tubepulse_channel_cache',
   GENTLE_NOTIF_STATE: 'tubepulse_gentle_notif_state',
-  CHANNEL_NOTIF_SETTINGS: 'tubepulse_channel_notif_settings', // per-channel notif overrides
+  CHANNEL_NOTIF_SETTINGS: 'tubepulse_channel_notif_settings',
 };
 
 export const DEFAULT_SETTINGS = {
   tapAction: 'video', // 'video' or 'channel'
-  pollIntervalMinutes: 30,
   notificationMode: 'relentless', // 'relentless' | 'chill'
   dndEnabled: false,
   dndStart: '22:00',
@@ -44,5 +43,3 @@ export const COLORS = {
   border: '#2A2A2A',
   danger: '#EF5350',
 };
-
-export const BACKGROUND_FETCH_TASK = 'TUBEPULSE_BACKGROUND_FETCH';
