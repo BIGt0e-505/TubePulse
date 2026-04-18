@@ -8,7 +8,7 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 
 ### 📺 Channel Tracking
 - Add channels by handle (`@handle`) — no URLs, no pasting video links
-- Auto-resolves handles to channel IDs via YouTube's internal API
+- Resolves handles to channel IDs via YouTube Data API v3 (proxied through Cloudflare Worker)
 - Draggable channel list — reorder by priority
 - Per-channel avatars and video counts cached locally
 - Pre-seeded with MattO and DND Rebecca AFTG (remove or add your own)
@@ -37,7 +37,6 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 - Configurable poll intervals: 5, 15, 30, 60, or 120 minutes
 - Uses Android's background fetch API for battery efficiency
 - Smart caching — only fetches RSS feeds for channels that might have new content
-- Handles YouTube's EU cookie consent wall automatically
 
 ### 🎨 Dark Theme
 - Full dark mode with translucent surfaces
@@ -53,6 +52,8 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 | Navigation | React Navigation (bottom tabs + native stack) |
 | Storage | AsyncStorage (channels, settings, cache) |
 | RSS | YouTube RSS feeds + fast-xml-parser |
+| API | YouTube Data API v3 (handle resolution + avatars) |
+| Proxy | Cloudflare Worker (keeps API key server-side) |
 | Notifications | Expo Notifications + Android channels |
 | Widgets | react-native-android-widget |
 | Background | Expo Background Fetch + TaskManager |
@@ -70,12 +71,15 @@ TubePulse/
 │   ├── components/
 │   │   └── TubePulseWidget.js   # Android home screen widget
 │   ├── utils/
-│   │   ├── rss.js               # YouTube RSS fetching + channel resolution
+│   │   ├── rss.js               # YouTube RSS fetching + Data API proxy resolution
 │   │   ├── notifications.js     # Notification scheduling, DND logic, channels
 │   │   ├── storage.js           # AsyncStorage wrapper for all persistent data
 │   │   ├── backgroundTask.js   # Background fetch registration + polling
 │   │   └── constants.js         # Colours, defaults, storage keys
 │   └── App.js                  # Navigation setup, fonts, theming
+├── worker/
+│   ├── index.js                # Cloudflare Worker — YouTube Data API proxy
+│   └── wrangler.toml           # Worker config
 ├── app.json                     # Expo config
 └── package.json
 ```
@@ -96,7 +100,7 @@ npx expo run:android
 ## How It Works
 
 1. **Add a channel** by its YouTube handle (e.g. `@mkbhd`)
-2. TubePulse resolves the handle to a channel ID using YouTube's internal API (bypassing the consent wall)
+2. TubePulse resolves the handle to a channel ID via the YouTube Data API (proxied through a Cloudflare Worker so the API key stays server-side)
 3. It fetches the channel's RSS feed to get the latest videos
 4. In the background, it polls at your chosen interval (5–120 min)
 5. When a new video appears, it sends a notification with the channel name and video title

@@ -5,13 +5,8 @@ const parser = new XMLParser({
   attributeNamePrefix: '@_',
 });
 
-// Common headers to bypass YouTube's consent wall (EU/UK cookie consent redirect)
-const YT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Cookie': 'SOCS=CAESEwgDEgk2MTcxNTcyNjAaAmVuIAEaBgiA_LyaBg; CONSENT=YES+cb',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-};
+// Cloudflare Worker proxy for YouTube Data API v3 — keeps API key server-side
+const RESOLVER_URL = 'https://tubepulse-resolver.aaronjoakley55.workers.dev';
 
 // Fetch with a timeout so the app never hangs
 function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
@@ -21,50 +16,16 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     .finally(() => clearTimeout(timer));
 }
 
-// Resolve @handle to channel ID via YouTube's internal API (no consent wall)
+// Resolve @handle to channel ID via our Cloudflare Worker proxy (YouTube Data API v3)
 export async function resolveChannelId(handle) {
-  // Method 1: YouTube's navigation/resolve_url API — most reliable, no consent wall
   try {
-    const resp = await fetchWithTimeout('https://www.youtube.com/youtubei/v1/navigation/resolve_url', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-      },
-      body: JSON.stringify({
-        context: {
-          client: { clientName: 'WEB', clientVersion: '2.20240101' },
-        },
-        url: `https://www.youtube.com/@${handle}`,
-      }),
-    });
+    const resp = await fetchWithTimeout(
+      `${RESOLVER_URL}?handle=@${encodeURIComponent(handle)}`
+    );
     if (resp.ok) {
       const data = await resp.json();
-      const str = JSON.stringify(data);
-      const idMatch = str.match(/"browseId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"/);
-      if (idMatch) return idMatch[1];
-      const chanMatch = str.match(/"channelId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"/);
-      if (chanMatch) return chanMatch[1];
+      if (data.channelId) return data.channelId;
     }
-  } catch {}
-
-  // Method 2: Scrape the channel page (fallback)
-  try {
-    const url = `https://www.youtube.com/@${handle}`;
-    const resp = await fetchWithTimeout(url, {
-      headers: YT_HEADERS,
-      redirect: 'follow',
-    });
-    const html = await resp.text();
-
-    const rssMatch = html.match(/channel_id=([a-zA-Z0-9_-]{24})/);
-    if (rssMatch) return rssMatch[1];
-
-    const chanMatch = html.match(/"channelId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"/);
-    if (chanMatch) return chanMatch[1];
-
-    const canonMatch = html.match(/\/channel\/(UC[a-zA-Z0-9_-]{22})/);
-    if (canonMatch) return canonMatch[1];
   } catch {}
 
   return null;
@@ -110,83 +71,26 @@ export async function fetchChannelFeed(channelId) {
   return { channel, videos };
 }
 
-// Get channel profile picture URL by parsing ytInitialData from the channel page
+// Get channel avatar via our Cloudflare Worker proxy (YouTube Data API v3)
 export async function fetchChannelAvatar(channelId, handle = null) {
-  // Method 1: YouTube innertube API — no auth, no cookies, very reliable
   try {
-    const body = JSON.stringify({
-      context: { client: { clientName: 'WEB', clientVersion: '2.20240101' } },
-      browseId: channelId,
-    });
-    const resp = await fetchWithTimeout('https://www.youtube.com/youtubei/v1/browse', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-      },
-      body,
-    });
+    const resp = await fetchWithTimeout(
+      `${RESOLVER_URL}?channelId=${encodeURIComponent(channelId)}`
+    );
     if (resp.ok) {
-      const text = await resp.text();
-      // Pull the largest yt3 avatar URL (=s240 or similar suffix = higher res)
-      const matches = [...text.matchAll(/yt3\.googleusercontent\.com\/([^"\\,}{]{20,})/g)];
-      if (matches.length) {
-        // Prefer larger sizes — strip size suffix and request 240px
-        const base = matches[0][1].replace(/=[^=]*$/, '');
-        return `https://yt3.googleusercontent.com/${base}=s240-c-k-c0x00ffffff-no-rj`;
-      }
+      const data = await resp.json();
+      if (data.avatar) return data.avatar;
     }
-  } catch {}
-
-  // Method 2: HTML scrape fallback using @handle URL
-  try {
-    const url = handle
-      ? `https://www.youtube.com/@${handle}`
-      : `https://www.youtube.com/channel/${channelId}`;
-    const resp = await fetchWithTimeout(url, { headers: YT_HEADERS, redirect: 'follow' });
-    const html = await resp.text();
-
-    const guFallback = html.match(/(https:\/\/yt3\.googleusercontent\.com\/[^"\\]{20,})/);
-    if (guFallback) return guFallback[1];
-
-    const ggphtMatch = html.match(/(https:\/\/yt3\.ggpht\.com\/[^"\\]{20,})/);
-    if (ggphtMatch) return ggphtMatch[1];
   } catch {}
 
   return null;
 }
 
-// Fetch latest community posts for a channel via innertube API
+// Community posts — currently disabled (was using undocumented innertube API)
+// TODO: Add community posts via YouTube Data API v3 (search.list or activities.list)
+// if this feature is needed for monetisation. Requires extending the Worker proxy.
 export async function fetchCommunityPosts(channelId) {
-  try {
-    const body = JSON.stringify({
-      context: { client: { clientName: 'WEB', clientVersion: '2.20240101' } },
-      browseId: channelId,
-      params: 'Egljb21tdW5pdHnyBgQKAkoA', // community tab param
-    });
-    const resp = await fetchWithTimeout('https://www.youtube.com/youtubei/v1/browse', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-      body,
-    });
-    if (!resp.ok) return [];
-
-    const data = await resp.json();
-    const str = JSON.stringify(data);
-
-    // Extract post IDs and snippets
-    const postMatches = [...str.matchAll(/"postId"\s*:\s*"([^"]+)"/g)];
-    const posts = postMatches.slice(0, 5).map((m, i) => ({
-      postId: m[1],
-      title: `Community post`,
-      link: `https://www.youtube.com/post/${m[1]}`,
-      published: new Date().toISOString(),
-    }));
-
-    return posts;
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 // Check all channels for new content
