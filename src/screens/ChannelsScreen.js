@@ -24,8 +24,7 @@ import {
   getSettings,
   getChannelNotifSettings, saveChannelNotifSettings,
 } from '../utils/storage';
-import { resolveHandle } from '../utils/api';
-import { updateChannels } from '../utils/api';
+import { resolveHandle, updateChannels, getDeviceId } from '../utils/api';
 import TimeSpinner from '../components/TimeSpinner';
 
 // Default per-channel settings (mirrors global defaults)
@@ -97,7 +96,8 @@ export default function ChannelsScreen() {
 
     try {
       // Resolve handle via API Worker
-      const result = await resolveHandle(handle);
+      const deviceId = await getDeviceId();
+      const result = await resolveHandle(deviceId, handle);
 
       if (!result || !result.ok || !result.channelId) {
         setAddError(`Couldn't find @${handle} — check the handle and try again.`);
@@ -137,10 +137,10 @@ export default function ChannelsScreen() {
 
       // Sync channels with API Worker
       try {
-        const messaging = require('@react-native-firebase/messaging').default;
-        const fcmToken = await messaging().getToken();
-        if (fcmToken) {
-          await updateChannels(fcmToken, updated);
+        
+        const deviceId = await getDeviceId();
+        
+          await updateChannels(deviceId, updated);
         }
       } catch (e) {
         console.warn('Failed to sync channels with server:', e);
@@ -175,10 +175,10 @@ export default function ChannelsScreen() {
 
             // Sync with API Worker
             try {
-              const messaging = require('@react-native-firebase/messaging').default;
-              const fcmToken = await messaging().getToken();
-              if (fcmToken) {
-                await updateChannels(fcmToken, updated);
+              
+              const deviceId = await getDeviceId();
+              
+                await updateChannels(deviceId, updated);
               }
             } catch (e) {
               console.warn('Failed to sync channel removal with server:', e);
@@ -195,10 +195,10 @@ export default function ChannelsScreen() {
 
     // Sync with API Worker
     try {
-      const messaging = require('@react-native-firebase/messaging').default;
-      const fcmToken = await messaging().getToken();
-      if (fcmToken) {
-        await updateChannels(fcmToken, data);
+      
+      const deviceId = await getDeviceId();
+      
+        await updateChannels(deviceId, data);
       }
     } catch (e) {
       console.warn('Failed to sync channel reorder with server:', e);
