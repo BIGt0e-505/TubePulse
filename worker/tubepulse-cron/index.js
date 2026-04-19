@@ -260,6 +260,28 @@ export default {
       return;
     }
 
+    // Pre-fetch all channel feeds/meta once (cache across devices)
+    const feedCache = {};
+    const metaCache = {};
+    const channelIds = new Set();
+    // First pass: collect all unique channelIds
+    for (const key of deviceKeys) {
+      const device = await getKV(env.TUBEPULSE_KV, key);
+      if (!device) continue;
+      for (const ch of device.channels || []) {
+        if (ch.channelId) channelIds.add(ch.channelId);
+      }
+    }
+    // Batch fetch feeds and meta
+    await Promise.all([...channelIds].map(async (channelId) => {
+      const [feed, meta] = await Promise.all([
+        getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId),
+        getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId),
+      ]);
+      if (feed) feedCache[channelId] = feed;
+      if (meta) metaCache[channelId] = meta;
+    }));
+
     let accessToken;
     try {
       accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
@@ -292,8 +314,8 @@ export default {
         if (!ch.channelId) continue;
 
         const handle = ch.handle;
-        const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + ch.channelId);
-        const meta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + ch.channelId);
+        const feed = feedCache[ch.channelId];
+        const meta = metaCache[ch.channelId];
         if (!feed?.videos) continue;
 
         const channelName = meta?.name || ch.name || handle;
@@ -568,7 +590,7 @@ export default {
           const ch = device.channels?.find((c) => c.handle === handle);
           if (!ch?.channelId) continue;
 
-          const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + ch.channelId);
+          const feed = feedCache[ch.channelId];
           if (!feed?.videos) continue;
 
           const feedVideoIds = new Set(feed.videos.map((v) => v.videoId));
