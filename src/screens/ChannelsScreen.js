@@ -137,11 +137,8 @@ export default function ChannelsScreen() {
 
       // Sync channels with API Worker
       try {
-        
         const deviceId = await getDeviceId();
-        
-          await updateChannels(deviceId, updated);
-        }
+        await updateChannels(deviceId, updated);
       } catch (e) {
         console.warn('Failed to sync channels with server:', e);
       }
@@ -175,11 +172,8 @@ export default function ChannelsScreen() {
 
             // Sync with API Worker
             try {
-              
               const deviceId = await getDeviceId();
-              
-                await updateChannels(deviceId, updated);
-              }
+              await updateChannels(deviceId, updated);
             } catch (e) {
               console.warn('Failed to sync channel removal with server:', e);
             }
@@ -195,11 +189,8 @@ export default function ChannelsScreen() {
 
     // Sync with API Worker
     try {
-      
       const deviceId = await getDeviceId();
-      
-        await updateChannels(deviceId, data);
-      }
+      await updateChannels(deviceId, data);
     } catch (e) {
       console.warn('Failed to sync channel reorder with server:', e);
     }
