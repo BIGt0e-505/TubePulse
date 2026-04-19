@@ -286,7 +286,7 @@ async function handleRegister(request, env, ctx) {
  */
 async function handleChannels(request, env, ctx) {
   const deviceId = getDeviceId(request);
-  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
 
   let body;
   try {
@@ -380,7 +380,7 @@ async function handleChannels(request, env, ctx) {
  */
 async function handleSettings(request, env) {
   const deviceId = getDeviceId(request);
-  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
 
   let body;
   try {
@@ -408,7 +408,7 @@ async function handleSettings(request, env) {
  */
 async function handleSeen(request, env) {
   const deviceId = getDeviceId(request);
-  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
 
   let body;
   try {
@@ -468,7 +468,7 @@ async function handleSeen(request, env) {
  */
 async function handleFeed(request, env) {
   const deviceId = getDeviceId(request);
-  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
 
   const device = await getDevice(env.TUBEPULSE_KV, deviceId);
   if (!device) return errorResponse('Device not registered', 404);
