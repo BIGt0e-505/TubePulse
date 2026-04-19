@@ -1,6 +1,6 @@
 # TubePulse
 
-Never miss a video from the creators you actually care about.
+Never miss a video from the creators you actually care about. **Android only.**
 
 TubePulse is a lightweight YouTube tracker for Android that monitors your favourite channels and notifies you the moment they upload. No algorithm, no recommendations, no rabbit holes — just a clean list of who's posted what, in the order they posted it.
 
@@ -39,10 +39,11 @@ Shorts are currently not filtered — they're treated as regular uploads.
 TubePulse's notification system is built around **nagging**, not polling. You control how often you're allowed to be nagged about an unwatched video:
 
 - **Nag interval** — 5m / 15m / 30m / 1h / 2h (default 15m)
+- **Chill mode** (default) — notify once, then nudge every 4 hours until you watch it
 - **Relentless mode** — re-nag every nag interval until you watch the video
-- **Chill mode** — notify once, then nudge every 4 hours until you watch it
 - **Per-channel overrides** — set different notification modes and DND per creator
 - **DND scheduling** — blocks all pushes during custom silent hours (default 22:00–07:00). Videos that arrive during DND are held and delivered when DND ends by the nag cycle.
+- **DND batching** — when DND ends and multiple videos are pending, TubePulse sends a single batched summary (e.g. "3 new videos from 2 channels") instead of flooding you with individual notifications.
 
 When a WebSub push arrives, TubePulse immediately notifies all eligible devices (unless DND is active). The nag cycle then handles re-notifications on the user's chosen schedule.
 
@@ -150,7 +151,7 @@ WebSub subscriptions expire (typically 4–10 days). The cron renews any subscri
 
 | Key Prefix | Contents |
 |-----------|----------|
-| `device:<fcmToken>` | Device record: channels, settings, lastSeen (seenIds, nagState, gentleState) |
+| `device:<uuid>` | Device record: fcmToken (mutable), channels, settings, lastSeen (seenIds, nagState, gentleState, scheduledState) |
 | `channel:<channelId>` | Channel meta: name, avatar, lastVideoId, lastChecked |
 | `feed:<channelId>` | Cached feed: top 5 videos with thumbnails |
 | `sub:<channelId>` | WebSub subscription: subscribedAt, leaseExpires |
@@ -165,6 +166,8 @@ WebSub subscriptions expire (typically 4–10 days). The cron renews any subscri
    - Video tap → `POST /seen { handle, videoIds: [id] }`
    - Channel tap → `POST /seen { handle, clearAll: true }`
 6. **On feed refresh**: `GET /feed` → returns cached data from KV
+
+**Device identity:** Each device generates a persistent UUID on first launch. This UUID is the auth token and primary key — independent of the FCM token, which is stored as a mutable field on the device record and updated on token refresh. This avoids orphan records when FCM tokens rotate.
 
 ### Notification Flow
 
@@ -215,7 +218,7 @@ Repeat until user watches
 | Database | Cloudflare KV (devices, feeds, subscriptions) |
 | Notifications | Firebase Cloud Messaging (FCM) via HTTP v1 API |
 | Widgets | react-native-android-widget |
-| Auth | FCM token as device identity (Bearer token) |
+| Auth | Persistent device UUID (Bearer token, independent of FCM token rotation) |
 
 ## Project Structure
 
@@ -253,7 +256,7 @@ TubePulse/
 | Setting | Values | Default | Description |
 |---------|--------|---------|-------------|
 | `tapAction` | `video` / `channel` | `video` | What happens when you tap a notification or feed item |
-| `notificationMode` | `relentless` / `chill` | `relentless` | Relentless = re-nag every interval; Chill = nudge every 4h |
+| `notificationMode` | `chill` / `relentless` | `chill` | Chill = nudge every 4h; Relentless = re-nag every interval |
 | `nagInterval` | 5 / 15 / 30 / 60 / 120 | 15 | Minutes between nag attempts for unwatched videos |
 | `dndEnabled` | boolean | false | Block all notifications during DND hours |
 | `dndStart` | HH:MM | 22:00 | DND start time |

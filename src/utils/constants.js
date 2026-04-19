@@ -31,7 +31,7 @@ export const NAG_INTERVALS = [
 
 export const DEFAULT_SETTINGS = {
   tapAction: 'video',              // 'video' or 'channel'
-  notificationMode: 'relentless',  // 'relentless' | 'chill'
+  notificationMode: 'chill',        // 'relentless' | 'chill'
   nagInterval: 15,                 // minutes between nag attempts (5, 15, 30, 60, 120)
   includeCommunityPosts: false,    // placeholder — not detectable via RSS/WebSub
   dndEnabled: false,

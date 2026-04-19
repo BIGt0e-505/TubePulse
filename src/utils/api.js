@@ -2,20 +2,42 @@
  * TubePulse API Client
  *
  * REST client for the tubepulse-api Cloudflare Worker.
- * All requests use the FCM token as authentication.
+ * Uses a persistent device UUID as authentication (not FCM token).
+ * The FCM token is sent as a field in /register and updated on refresh.
  */
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 const API_URL = 'https://tubepulse-api.aaronjoakley55.workers.dev';
+const DEVICE_ID_KEY = 'tubepulse_device_id';
+
+/**
+ * Get or create a persistent device UUID.
+ * Generated once on first launch, stored in AsyncStorage.
+ */
+export async function getDeviceId() {
+  let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    // Generate UUID v4
+    id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+    await AsyncStorage.setItem(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
 
 async function apiFetch(path, options = {}) {
-  const { token, body, method = 'GET' } = options;
+  const { deviceId, body, method = 'GET' } = options;
 
   const headers = {
     'Content-Type': 'application/json',
   };
 
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (deviceId) {
+    headers['Authorization'] = `Bearer ${deviceId}`;
   }
 
   const fetchOptions = {
@@ -47,33 +69,34 @@ async function apiFetch(path, options = {}) {
 /**
  * Register device with the API Worker.
  * Called on app launch and token refresh.
+ * Uses device UUID as auth, FCM token as a field.
  */
-export async function registerDevice(token, channels, settings) {
+export async function registerDevice(deviceId, fcmToken, channels, settings) {
   return await apiFetch('/register', {
     method: 'POST',
-    token,
-    body: { channels, settings },
+    deviceId,
+    body: { fcmToken, channels, settings },
   });
 }
 
 /**
  * Update tracked channels.
  */
-export async function updateChannels(token, channels) {
+export async function updateChannels(deviceId, channels, fcmToken) {
   return await apiFetch('/channels', {
     method: 'PUT',
-    token,
-    body: { channels },
+    deviceId,
+    body: { channels, fcmToken },
   });
 }
 
 /**
  * Update notification settings.
  */
-export async function updateSettings(token, settings) {
+export async function updateSettings(deviceId, settings) {
   return await apiFetch('/settings', {
     method: 'PUT',
-    token,
+    deviceId,
     body: { settings },
   });
 }
@@ -83,7 +106,7 @@ export async function updateSettings(token, settings) {
  * videoIds: mark specific videos as seen (video tap)
  * clearAll: mark all current feed videos as seen (channel tap)
  */
-export async function markSeen(token, handle, videoIds = [], clearAll = false) {
+export async function markSeen(deviceId, handle, videoIds = [], clearAll = false) {
   const body = { handle };
   if (clearAll) {
     body.clearAll = true;
@@ -92,7 +115,7 @@ export async function markSeen(token, handle, videoIds = [], clearAll = false) {
   }
   return await apiFetch('/seen', {
     method: 'POST',
-    token,
+    deviceId,
     body,
   });
 }
@@ -100,18 +123,20 @@ export async function markSeen(token, handle, videoIds = [], clearAll = false) {
 /**
  * Fetch current feed data from the server.
  */
-export async function fetchFeed(token) {
+export async function fetchFeed(deviceId) {
   return await apiFetch('/feed', {
     method: 'GET',
-    token,
+    deviceId,
   });
 }
 
 /**
  * Resolve a YouTube handle to channelId + name + avatar.
- * No auth required — public endpoint.
+ * Requires authentication — gated to registered devices.
  */
-export async function resolveHandle(handle) {
+export async function resolveHandle(deviceId, handle) {
   const clean = handle.replace(/^@/, '');
-  return await apiFetch(`/resolve?handle=@${encodeURIComponent(clean)}`);
+  return await apiFetch(`/resolve?handle=@${encodeURIComponent(clean)}`, {
+    deviceId,
+  });
 }

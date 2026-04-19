@@ -5,6 +5,8 @@
  *
  * 1. Nag cycle — scan devices for unwatched videos and re-notify
  *    based on mode (relentless/chill) and nag interval.
+ *    DND batching: if DND just ended and multiple videos are pending,
+ *    sends a single batched notification instead of one per video.
  *
  * 2. WebSub lease renewal — re-subscribe to channels whose
  *    WebSub leases are expiring soon.
@@ -77,7 +79,7 @@ async function renewSubscriptions(env, callbackUrl) {
     const channelId = key.replace(KV_PREFIX_SUBSCRIPTION, '');
     const expiresAt = sub.leaseExpires || 0;
 
-    if (expiresAt > renewThreshold) continue; // Still valid
+    if (expiresAt > renewThreshold) continue;
 
     console.log(`[Cron] Renewing WebSub for ${channelId} (expires ${new Date(expiresAt).toISOString()})`);
 
@@ -98,7 +100,6 @@ async function renewSubscriptions(env, callbackUrl) {
       });
 
       if (resp.ok || resp.status === 202 || resp.status === 204) {
-        // Lease will be updated by the verification handler
         console.log(`[Cron] Renewal request accepted for ${channelId}`);
         renewed++;
       } else {
@@ -230,16 +231,11 @@ export default {
     console.log(`[Cron] Starting at ${new Date().toISOString()}`);
 
     // ── Job 1: WebSub lease renewal ──
-    // Determine callback URL from the API worker's route
-    // We need the public URL — derive from the API worker's known URL
     const callbackUrl = 'https://tubepulse-api.aaronjoakley55.workers.dev/websub';
-
     const renewed = await renewSubscriptions(env, callbackUrl);
     console.log(`[Cron] WebSub renewals: ${renewed}`);
 
     // ── Job 2: Nag cycle ──
-    // Scan all devices for unwatched videos that need re-notifying
-
     const deviceKeys = [];
     let cursor = undefined;
     do {
@@ -257,7 +253,6 @@ export default {
       return;
     }
 
-    // Get FCM access token
     let accessToken;
     try {
       accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
@@ -276,10 +271,16 @@ export default {
       const device = await getKV(env.TUBEPULSE_KV, key);
       if (!device) continue;
 
-      const fcmToken = key.replace(KV_PREFIX_DEVICE, '');
+      const fcmToken = device.fcmToken;
+      if (!fcmToken) continue;
       let deviceUpdated = false;
 
-      // For each channel the device tracks, check feed for unwatched videos
+      // Collect pending notifications per channel
+      // { handle: { channelName, videos: [{videoId, title, link, type}] } }
+      const pendingPerChannel = {};
+      // Collect scheduled events
+      const scheduledNotifications = [];
+
       for (const ch of device.channels || []) {
         if (!ch.channelId) continue;
 
@@ -290,7 +291,6 @@ export default {
 
         const channelName = meta?.name || ch.name || handle;
 
-        // Get effective settings
         const perChannelEnabled = device.settings?.perChannelNotifications || false;
         const channelOverride = perChannelEnabled
           ? device.settings?.channelNotifSettings?.[handle]
@@ -299,10 +299,9 @@ export default {
           ? { ...device.settings, ...channelOverride }
           : device.settings;
 
-        const mode = effectiveSettings?.notificationMode || 'relentless';
+        const mode = effectiveSettings?.notificationMode || 'chill';
         const nagIntervalMs = (effectiveSettings?.nagInterval || 15) * 60 * 1000;
 
-        // DND check
         const globalDndEnabled = device.settings?.dndEnabled || false;
         const globalDndActive = globalDndEnabled && isDndActive(
           device.settings?.dndStart || '22:00',
@@ -335,26 +334,18 @@ export default {
           // "Upcoming" notification: 1 nag interval before the event
           if (!sched.notified && timeUntilLive > 0 && timeUntilLive <= nagIntervalMs) {
             if (!dndActive) {
-              // Find the video in the feed for title/link
               const video = feed.videos.find((v) => v.videoId === videoId);
-              const title = video?.title || 'Upcoming event';
-              const link = video?.link || `https://www.youtube.com/watch?v=${videoId}`;
-
-              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+              scheduledNotifications.push({
                 title: `${channelName} going live soon`,
-                body: title,
+                body: video?.title || 'Upcoming event',
                 data: {
                   videoId,
                   channelName,
                   handle,
-                  videoLink: link,
+                  videoLink: video?.link || `https://www.youtube.com/watch?v=${videoId}`,
                   type: 'upcoming',
                 },
-                silent: false,
               });
-
-              if (result.sent) pushCount++;
-              else if (result.deadToken) { deadTokens.push(key); break; }
             }
             sched.notified = true;
             deviceUpdated = true;
@@ -364,54 +355,45 @@ export default {
           if (!sched.wentLiveNotified && timeUntilLive <= 0) {
             if (!dndActive) {
               const video = feed.videos.find((v) => v.videoId === videoId);
-              const title = video?.title || 'Now live';
-              const link = video?.link || `https://www.youtube.com/watch?v=${videoId}`;
-
-              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
-                title: `${channelName} is live`,
-                body: title,
-                data: {
-                  videoId,
-                  channelName,
-                  handle,
-                  videoLink: link,
-                  type: 'new_video',
-                },
-                silent: false,
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              pendingPerChannel[handle].videos.push({
+                videoId,
+                title: video?.title || 'Now live',
+                link: video?.link || `https://www.youtube.com/watch?v=${videoId}`,
+                type: 'new_video',
               });
-
-              if (result.sent) pushCount++;
-              else if (result.deadToken) { deadTokens.push(key); break; }
             }
             sched.wentLiveNotified = true;
-            // Move to normal nag state so it gets re-nagged like any other video
             if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
             device.lastSeen[handle].nagState[videoId] = {
               firstNotifiedAt: nowMs,
               lastNotifiedAt: nowMs,
             };
-            // Remove from scheduled state
             delete scheduledState[videoId];
             deviceUpdated = true;
           }
         }
-        if (Object.keys(scheduledState).length !== (device.lastSeen[handle].scheduledState ? Object.keys(device.lastSeen[handle].scheduledState).length : 0)) {
+        if (device.lastSeen[handle].scheduledState !== scheduledState) {
           device.lastSeen[handle].scheduledState = scheduledState;
           deviceUpdated = true;
         }
 
+        // ── Regular video nag cycle ──
+        if (dndActive) continue; // Skip all regular nagging during DND
+
         for (const video of feed.videos) {
-          if (seenIds.has(video.videoId)) continue; // Already watched
+          if (seenIds.has(video.videoId)) continue;
+
+          // Skip future-dated videos (scheduled, handled above)
+          const publishedTime = video.published ? new Date(video.published).getTime() : 0;
+          if (publishedTime > nowMs) continue;
 
           // ── Relentless mode ──
           if (mode === 'relentless') {
             const nagState = device.lastSeen[handle].nagState?.[video.videoId];
 
             if (!nagState) {
-              // Not yet notified — WebSub should have done this, but if missed,
-              // send first notification now
-              if (dndActive) continue;
-
+              // Not yet notified — send first notification now
               if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
               device.lastSeen[handle].nagState[video.videoId] = {
                 firstNotifiedAt: nowMs,
@@ -419,47 +401,28 @@ export default {
               };
               deviceUpdated = true;
 
-              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
-                title: `${channelName} uploaded`,
-                body: video.title,
-                data: {
-                  videoId: video.videoId,
-                  channelName,
-                  handle,
-                  videoLink: video.link,
-                  type: 'new_video',
-                },
-                silent: false,
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              pendingPerChannel[handle].videos.push({
+                videoId: video.videoId,
+                title: video.title,
+                link: video.link,
+                type: 'new_video',
               });
-
-              if (result.sent) pushCount++;
-              else if (result.deadToken) { deadTokens.push(key); break; }
             } else {
-              // Already notified — check if it's time to re-nag
               const elapsed = nowMs - (nagState.lastNotifiedAt || 0);
               if (elapsed < nagIntervalMs) continue;
-
-              if (dndActive) continue;
 
               // Re-nag
               device.lastSeen[handle].nagState[video.videoId].lastNotifiedAt = nowMs;
               deviceUpdated = true;
 
-              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
-                title: `${channelName} uploaded`,
-                body: video.title,
-                data: {
-                  videoId: video.videoId,
-                  channelName,
-                  handle,
-                  videoLink: video.link,
-                  type: 'new_video',
-                },
-                silent: false,
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              pendingPerChannel[handle].videos.push({
+                videoId: video.videoId,
+                title: video.title,
+                link: video.link,
+                type: 'new_video',
               });
-
-              if (result.sent) pushCount++;
-              else if (result.deadToken) { deadTokens.push(key); break; }
             }
           }
 
@@ -468,9 +431,7 @@ export default {
             const gentleState = device.lastSeen[handle].gentleState;
 
             if (!gentleState || gentleState.videoId !== video.videoId) {
-              // Not yet notified for this video — first notification
-              if (dndActive) continue;
-
+              // First notification for this video
               device.lastSeen[handle].gentleState = {
                 videoId: video.videoId,
                 firstNotifiedAt: nowMs,
@@ -478,52 +439,96 @@ export default {
               };
               deviceUpdated = true;
 
-              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
-                title: `${channelName} uploaded`,
-                body: video.title,
-                data: {
-                  videoId: video.videoId,
-                  channelName,
-                  handle,
-                  videoLink: video.link,
-                  type: 'new_video',
-                },
-                silent: false,
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              pendingPerChannel[handle].videos.push({
+                videoId: video.videoId,
+                title: video.title,
+                link: video.link,
+                type: 'new_video',
               });
-
-              if (result.sent) pushCount++;
-              else if (result.deadToken) { deadTokens.push(key); break; }
             } else if (gentleState.videoId === video.videoId) {
-              // Already notified — remind every 4h
               const elapsed = nowMs - (gentleState.lastRemindedAt || 0);
               if (elapsed < GENTLE_REMINDER_INTERVAL_MS) continue;
-
-              if (dndActive) continue;
 
               // Reminder
               device.lastSeen[handle].gentleState.lastRemindedAt = nowMs;
               deviceUpdated = true;
 
-              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
-                title: `${channelName} uploaded`,
-                body: video.title,
-                data: {
-                  videoId: video.videoId,
-                  channelName,
-                  handle,
-                  videoLink: video.link,
-                  type: 'new_video',
-                },
-                silent: false,
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              pendingPerChannel[handle].videos.push({
+                videoId: video.videoId,
+                title: video.title,
+                link: video.link,
+                type: 'new_video',
               });
-
-              if (result.sent) pushCount++;
-              else if (result.deadToken) { deadTokens.push(key); break; }
             }
           }
         }
+      }
 
-        if (deadTokens.includes(key)) break; // Dead token — stop processing this device
+      // ── Send collected notifications ──
+      // Scheduled event notifications go first (individual)
+      for (const notif of scheduledNotifications) {
+        const result = await sendFCMPush(accessToken, projectId, fcmToken, notif);
+        if (result.sent) pushCount++;
+        else if (result.deadToken) { deadTokens.push(key); break; }
+      }
+
+      // Now send video notifications — batch if multiple channels have pending
+      const channelHandles = Object.keys(pendingPerChannel);
+      const totalVideos = channelHandles.reduce(
+        (sum, h) => sum + pendingPerChannel[h].videos.length, 0
+      );
+
+      if (totalVideos === 0) {
+        // No notifications needed
+      } else if (totalVideos === 1) {
+        // Single video — send individual notification
+        const handle = channelHandles[0];
+        const video = pendingPerChannel[handle].videos[0];
+        const channelName = pendingPerChannel[handle].channelName;
+
+        const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+          title: `${channelName} uploaded`,
+          body: video.title,
+          data: {
+            videoId: video.videoId,
+            channelName,
+            handle,
+            videoLink: video.link,
+            type: video.type,
+          },
+          silent: false,
+        });
+        if (result.sent) pushCount++;
+        else if (result.deadToken) deadTokens.push(key);
+      } else {
+        // Multiple videos — batch into one summary notification
+        const channelNames = [...new Set(channelHandles.map((h) => pendingPerChannel[h].channelName))];
+        const title = channelNames.length === 1
+          ? `${channelNames[0]} — ${totalVideos} new videos`
+          : `${totalVideos} new videos from ${channelNames.length} channels`;
+        const body = channelHandles
+          .map((h) => {
+            const v = pendingPerChannel[h].videos;
+            return v.length === 1
+              ? `${pendingPerChannel[h].channelName}: ${v[0].title}`
+              : `${pendingPerChannel[h].channelName}: ${v.length} videos`;
+          })
+          .join('\n');
+
+        const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+          title,
+          body,
+          data: {
+            type: 'batch',
+            count: String(totalVideos),
+            channels: String(channelNames.length),
+          },
+          silent: false,
+        });
+        if (result.sent) pushCount++;
+        else if (result.deadToken) deadTokens.push(key);
       }
 
       // Prune stale nag states for videos no longer in the feed

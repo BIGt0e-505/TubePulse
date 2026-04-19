@@ -7,7 +7,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { COLORS, DEFAULT_SETTINGS, NAG_INTERVALS } from '../utils/constants';
 import TimeSpinner from '../components/TimeSpinner';
 import { getSettings, saveSettings } from '../utils/storage';
-import { updateSettings } from '../utils/api';
+import { updateSettings, getDeviceId } from '../utils/api';
 
 // ── Main Screen ───────────────────────────────────────────────────────────────
 export default function SettingsScreen() {
@@ -26,11 +26,8 @@ export default function SettingsScreen() {
 
     // Sync settings with API Worker
     try {
-      const messaging = require('@react-native-firebase/messaging').default;
-      const fcmToken = await messaging().getToken();
-      if (fcmToken) {
-        await updateSettings(fcmToken, updated);
-      }
+      const deviceId = await getDeviceId();
+      await updateSettings(deviceId, updated);
     } catch (e) {
       console.warn('Failed to sync settings with server:', e);
     }

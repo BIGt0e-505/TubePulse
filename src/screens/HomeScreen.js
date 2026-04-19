@@ -14,7 +14,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache, getGentleNotifState, saveGentleNotifState } from '../utils/storage';
-import { fetchFeed, markSeen } from '../utils/api';
+import { fetchFeed, markSeen, getDeviceId } from '../utils/api';
 
 export default function HomeScreen({ navigation }) {
   const [channels, setChannels] = useState([]);
@@ -23,20 +23,6 @@ export default function HomeScreen({ navigation }) {
   const [settings, setSettings] = useState({ tapAction: 'video' });
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [fcmToken, setFcmToken] = useState(null);
-
-  // Get FCM token from App context (passed via navigation params or stored)
-  const getFcmToken = useCallback(async () => {
-    if (fcmToken) return fcmToken;
-    try {
-      const messaging = require('@react-native-firebase/messaging').default;
-      const token = await messaging().getToken();
-      setFcmToken(token);
-      return token;
-    } catch {
-      return null;
-    }
-  }, [fcmToken]);
 
   const loadData = useCallback(async () => {
     const [ch, s, ls, ca] = await Promise.all([
@@ -55,10 +41,9 @@ export default function HomeScreen({ navigation }) {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const token = await getFcmToken();
-      if (token) {
+      if (deviceId) {
         // Fetch from server
-        const result = await fetchFeed(token);
+        const result = await fetchFeed(deviceId);
         if (result.ok && result.feeds) {
           // Merge server feed data into local cache, but don't overwrite avatar with null
           const newCache = {};
@@ -108,7 +93,6 @@ export default function HomeScreen({ navigation }) {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
-  }, [getFcmToken]);
 
   // Auto-fetch on first open if cache is empty
   const autoFetch = useCallback(async () => {
@@ -175,9 +159,8 @@ export default function HomeScreen({ navigation }) {
     setLastSeen(updatedLastSeen);
 
     // Mark seen on server
-    const token = await getFcmToken();
-    if (token) {
-      markSeen(token, key, allIds).catch(() => {});
+    if (deviceId) {
+      markSeen(deviceId, key, allIds).catch(() => {});
     }
 
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
@@ -199,9 +182,8 @@ export default function HomeScreen({ navigation }) {
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
 
-      const token = await getFcmToken();
-      if (token) {
-        markSeen(token, key, allIds).catch(() => {});
+      if (deviceId) {
+        markSeen(deviceId, key, allIds).catch(() => {});
       }
 
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
@@ -215,9 +197,8 @@ export default function HomeScreen({ navigation }) {
         await saveLastSeen(updatedLastSeen);
         setLastSeen(updatedLastSeen);
 
-        const token = await getFcmToken();
-        if (token) {
-          markSeen(token, key, [video.videoId]).catch(() => {});
+        if (deviceId) {
+          markSeen(deviceId, key, [video.videoId]).catch(() => {});
         }
 
         Linking.openURL(video.link);
@@ -240,9 +221,8 @@ export default function HomeScreen({ navigation }) {
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
 
-      const token = await getFcmToken();
-      if (token) {
-        markSeen(token, key, [video.videoId]).catch(() => {});
+      if (deviceId) {
+        markSeen(deviceId, key, [video.videoId]).catch(() => {});
       }
     }
     Linking.openURL(video.link);
