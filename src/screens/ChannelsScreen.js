@@ -24,7 +24,8 @@ import {
   getSettings,
   getChannelNotifSettings, saveChannelNotifSettings,
 } from '../utils/storage';
-import { resolveHandle, updateChannels, getDeviceId } from '../utils/api';
+import { resolveHandle, updateChannels, registerDevice, getDeviceId } from '../utils/api';
+import { getFCMToken } from '../utils/fcm';
 import TimeSpinner from '../components/TimeSpinner';
 
 // Default per-channel settings (mirrors global defaults)
@@ -97,9 +98,28 @@ export default function ChannelsScreen() {
     try {
       // Resolve handle via API Worker
       const deviceId = await getDeviceId();
+
+      // Ensure device is registered before resolve (may not have completed on fresh install)
+      const { getChannels, getSettings } = require('../utils/storage');
+      const fcmToken = await getFCMToken();
+      if (fcmToken) {
+        await registerDevice(deviceId, fcmToken, await getChannels(), await getSettings());
+      }
+
       const result = await resolveHandle(deviceId, handle);
 
-      if (!result || !result.ok || !result.channelId) {
+      if (!result || !result.ok) {
+        const errMsg = result?.error?.includes('not registered') 
+          ? 'Device not registered — try restarting the app' 
+          : result?.error?.includes('not found') 
+            ? `Couldn't find @${handle} — check the handle and try again.`
+            : `Error: ${result?.error || 'Unknown error'}`;
+        setAddError(errMsg);
+        setAdding(false);
+        return;
+      }
+
+      if (!result.channelId) {
         setAddError(`Couldn't find @${handle} — check the handle and try again.`);
         setAdding(false);
         return;
