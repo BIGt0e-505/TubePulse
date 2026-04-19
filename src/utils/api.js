@@ -103,11 +103,12 @@ export async function updateSettings(deviceId, settings) {
 
 /**
  * Mark video(s) as seen.
+ * channelId: the stable channel ID (handles can change)
  * videoIds: mark specific videos as seen (video tap)
  * clearAll: mark all current feed videos as seen (channel tap)
  */
-export async function markSeen(deviceId, handle, videoIds = [], clearAll = false) {
-  const body = { handle };
+export async function markSeen(deviceId, channelId, videoIds = [], clearAll = false) {
+  const body = { channelId };
   if (clearAll) {
     body.clearAll = true;
   } else {

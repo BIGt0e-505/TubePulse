@@ -78,7 +78,7 @@ async function putDevice(kv, token, data) {
 const HUB_URL = 'https://pubsubhubbub.appspot.com/';
 const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';
 
-async function subscribeToChannel(channelId, callbackUrl) {
+async function subscribeToChannel(channelId, callbackUrl, secret) {
   const feedUrl = `${FEED_TEMPLATE}${channelId}`;
   const body = new URLSearchParams({
     'hub.callback': callbackUrl,
@@ -86,6 +86,7 @@ async function subscribeToChannel(channelId, callbackUrl) {
     'hub.topic': feedUrl,
     'hub.verify': 'sync',
     'hub.lease_seconds': String(86400 * 5), // 5 days
+    'hub.secret': secret,
   });
 
   try {
@@ -137,6 +138,34 @@ async function isChannelTracked(kv, channelId) {
     cursor = list.list_complete ? undefined : list.cursor;
   } while (cursor);
   return false;
+}
+
+// ─── WebSub HMAC verification ────────────────────────────────────────────
+
+async function verifyWebSubSignature(payload, signatureHeader, secret) {
+  if (!signatureHeader || !secret) return false;
+
+  // X-Hub-Signature format: "sha256=<hex>"
+  const match = signatureHeader.match(/^sha256=(.+)$/i);
+  if (!match) return false;
+
+  const expectedHex = match[1];
+
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
+  const sigHex = Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  return sigHex === expectedHex;
 }
 
 // ─── XML Parser (lightweight, no dependency) ────────────────────────────
@@ -265,11 +294,14 @@ async function handleRegister(request, env, ctx) {
       // Subscribe to WebSub if not already subscribed
       const subState = await getKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId);
       if (!subState) {
-        const success = await subscribeToChannel(ch.channelId, callbackUrl);
+        // Generate a random secret for HMAC verification
+        const secret = crypto.randomUUID();
+        const success = await subscribeToChannel(ch.channelId, callbackUrl, secret);
         if (success) {
           await putKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId, {
             subscribedAt: Date.now(),
             leaseExpires: Date.now() + 86400 * 5 * 1000,
+            secret,
           });
         }
       }
@@ -323,11 +355,13 @@ async function handleChannels(request, env, ctx) {
 
       const subState = await getKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId);
       if (!subState) {
-        const success = await subscribeToChannel(ch.channelId, callbackUrl);
+        const secret = crypto.randomUUID();
+        const success = await subscribeToChannel(ch.channelId, callbackUrl, secret);
         if (success) {
           await putKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId, {
             subscribedAt: Date.now(),
             leaseExpires: Date.now() + 86400 * 5 * 1000,
+            secret,
           });
         }
       }
@@ -403,8 +437,9 @@ async function handleSettings(request, env) {
 
 /**
  * POST /seen
- * Body: { handle: string, videoIds: string[] }   — mark specific videos as seen (video tap)
- *    or { handle: string, clearAll: true }         — clear all unwatched for channel (channel tap)
+ * Body: { channelId: string, videoIds: string[] }  — mark specific videos as seen (video tap)
+ *    or { channelId: string, clearAll: true }        — clear all unwatched for channel (channel tap)
+ * channelId is the stable primary key (handles can change).
  */
 async function handleSeen(request, env) {
   const deviceId = getDeviceId(request);
@@ -417,28 +452,28 @@ async function handleSeen(request, env) {
     return errorResponse('Invalid JSON body');
   }
 
-  const { handle, videoIds, clearAll } = body;
-  if (!handle) return errorResponse('handle is required');
+  const { channelId, videoIds, clearAll } = body;
+  if (!channelId) return errorResponse('channelId is required');
 
   const device = await getDevice(env.TUBEPULSE_KV, deviceId);
   if (!device) return errorResponse('Device not registered', 404);
+
+  // Look up handle from channel list (handle is the key in lastSeen for backwards compat)
+  const channel = device.channels.find((ch) => ch.channelId === channelId);
+  const handle = channel?.handle || channelId;
 
   if (!device.lastSeen) device.lastSeen = {};
   if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
 
   if (clearAll) {
     // Channel tap: mark all currently unwatched videos as seen
-    // We need to know which videos are unwatched — pull from the feed
-    const channel = device.channels.find((ch) => ch.handle === handle);
-    if (channel?.channelId) {
-      const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channel.channelId);
-      if (feed?.videos) {
-        const existing = new Set(device.lastSeen[handle].seenIds || []);
-        for (const v of feed.videos) {
-          if (v.videoId) existing.add(v.videoId);
-        }
-        device.lastSeen[handle].seenIds = [...existing];
+    const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId);
+    if (feed?.videos) {
+      const existing = new Set(device.lastSeen[handle].seenIds || []);
+      for (const v of feed.videos) {
+        if (v.videoId) existing.add(v.videoId);
       }
+      device.lastSeen[handle].seenIds = [...existing];
     }
   } else if (Array.isArray(videoIds)) {
     // Video tap: mark specific videos as seen
@@ -451,7 +486,7 @@ async function handleSeen(request, env) {
     return errorResponse('Provide videoIds array or clearAll: true');
   }
 
-  // Clear gentle state for this channel (video watched or channel cleared)
+  // Clear gentle/nag state for this channel
   if (device.lastSeen[handle].gentleState) {
     delete device.lastSeen[handle].gentleState;
   }
@@ -632,11 +667,27 @@ async function handleWebSubVerification(request, env) {
  * Body: Atom XML feed for the channel.
  */
 async function handleWebSubPush(request, env, ctx) {
+  // Verify HMAC signature
+  const signature = request.headers.get('X-Hub-Signature');
+
   let xmlText;
   try {
     xmlText = await request.text();
   } catch {
     return new Response('Bad request', { status: 400 });
+  }
+
+  // Extract channelId from the XML to look up the secret
+  const quickChannelId = xmlText.match(/<yt:channelId>([^<]+)<\/yt:channelId>/)?.[1];
+  if (quickChannelId && signature) {
+    const subState = await getKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + quickChannelId);
+    if (subState?.secret) {
+      const valid = await verifyWebSubSignature(xmlText, signature, subState.secret);
+      if (!valid) {
+        console.warn(`[WebSub] Invalid signature for ${quickChannelId} — rejecting`);
+        return new Response('Forbidden', { status: 403 });
+      }
+    }
   }
 
   const parsed = parseWebSubPush(xmlText);
@@ -664,18 +715,27 @@ async function handleWebSubPush(request, env, ctx) {
 
   await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId, meta);
 
-  // Update feed (top 5 entries)
+  // Update feed (top 5 entries), refreshing title/thumbnail if <updated> changed
+  const prevFeed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId);
+  const prevVideos = prevFeed?.videos || [];
+
   const feed = {
-    videos: parsed.entries.slice(0, 5).map((e) => ({
-      videoId: e.videoId,
-      title: e.title,
-      published: e.published,
-      updated: e.updated,
-      link: e.link,
-      thumbnail: e.thumbnail,
-      description: e.description,
-      views: '0', // Not in WebSub push
-    })),
+    videos: parsed.entries.slice(0, 5).map((e) => {
+      // If we already have this video, preserve it unless <updated> changed
+      const prev = prevVideos.find((v) => v.videoId === e.videoId);
+      if (prev && prev.updated === e.updated) return prev; // No change
+
+      return {
+        videoId: e.videoId,
+        title: e.title,
+        published: e.published,
+        updated: e.updated,
+        link: e.link,
+        thumbnail: e.thumbnail,
+        description: e.description,
+        views: '0',
+      };
+    }),
     lastFetched: new Date().toISOString(),
   };
   await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId, feed);
@@ -819,6 +879,7 @@ async function handleWebSubPush(request, env, ctx) {
         body: parsed.entries[0].title,
         data: {
           videoId: newVideoId,
+          channelId,
           channelName: channelName || handle,
           handle,
           videoLink: parsed.entries[0].link,
