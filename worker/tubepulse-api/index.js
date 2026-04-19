@@ -634,43 +634,59 @@ async function handleResolve(request, env) {
   }
 
   try {
-    let apiUrl = 'https://www.googleapis.com/youtube/v3/channels?part=snippet';
-    if (handle) {
-      const clean = handle.replace(/^@/, '');
-      apiUrl += `&forHandle=${encodeURIComponent(clean)}`;
-    } else {
-      apiUrl += `&id=${encodeURIComponent(channelId)}`;
-    }
-    apiUrl += `&key=${env.YOUTUBE_API_KEY}`;
-
-    const resp = await fetch(apiUrl);
-    if (!resp.ok) {
-      console.error('YouTube API error:', resp.status);
-      return errorResponse('Upstream API error', 502);
-    }
-
-    const data = await resp.json();
-    if (!data.items || data.items.length === 0) {
-      return errorResponse('Channel not found', 404);
+    // If channelId provided, resolve directly
+    if (channelId) {
+      const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${encodeURIComponent(channelId)}&key=${env.YOUTUBE_API_KEY}`;
+      const resp = await fetch(apiUrl);
+      if (!resp.ok) return errorResponse('Upstream API error', 502);
+      const data = await resp.json();
+      if (!data.items?.length) return errorResponse('Channel not found', 404);
+      const ch = data.items[0];
+      const thumbs = ch.snippet?.thumbnails || {};
+      return json({
+        channelId: ch.id,
+        name: ch.snippet?.title || null,
+        avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+      }, 200, { 'Cache-Control': 'public, max-age=3600' });
     }
 
-    const channel = data.items[0];
-    const thumbs = channel.snippet?.thumbnails || {};
-    const avatar =
-      thumbs.high?.url ||
-      thumbs.medium?.url ||
-      thumbs.default?.url ||
-      null;
+    // Try forHandle first, then fallback to forUsername
+    const clean = handle.replace(/^@/, '');
 
-    return json(
-      {
-        channelId: channel.id,
-        name: channel.snippet?.title || null,
-        avatar,
-      },
-      200,
-      { 'Cache-Control': 'public, max-age=3600' }
-    );
+    // Attempt 1: forHandle (works for @handles)
+    let apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&forHandle=${encodeURIComponent(clean)}&key=${env.YOUTUBE_API_KEY}`;
+    let resp = await fetch(apiUrl);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.items?.length) {
+        const ch = data.items[0];
+        const thumbs = ch.snippet?.thumbnails || {};
+        return json({
+          channelId: ch.id,
+          name: ch.snippet?.title || null,
+          avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+        }, 200, { 'Cache-Control': 'public, max-age=3600' });
+      }
+    }
+
+    // Attempt 2: forUsername fallback (works for legacy custom URLs)
+    apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&forUsername=${encodeURIComponent(clean)}&key=${env.YOUTUBE_API_KEY}`;
+    resp = await fetch(apiUrl);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.items?.length) {
+        const ch = data.items[0];
+        const thumbs = ch.snippet?.thumbnails || {};
+        return json({
+          channelId: ch.id,
+          name: ch.snippet?.title || null,
+          avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+        }, 200, { 'Cache-Control': 'public, max-age=3600' });
+      }
+    }
+
+    // Neither worked
+    return errorResponse('Channel not found', 404);
   } catch (err) {
     console.error('Resolver error:', err);
     return errorResponse('Internal error', 500);

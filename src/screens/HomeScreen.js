@@ -45,11 +45,15 @@ export default function HomeScreen({ navigation }) {
       if (deviceId) {
         const result = await fetchFeed(deviceId);
         if (result.ok && result.feeds) {
+          // Always read fresh from storage to avoid race with bootstrap
+          const [localCache, channels] = await Promise.all([
+            getChannelCache(),
+            getChannels(),
+          ]);
           const newCache = {};
-          const channels = await getChannels();
           for (const [handle, feed] of Object.entries(result.feeds)) {
             const channel = channels.find(ch => ch.handle === handle);
-            const existingEntry = cache[handle] || {};
+            const existingEntry = localCache[handle] || {};
             const serverVideos = feed.videos || [];
             // Don't overwrite local cache if we have more data than the server
             const localVideos = existingEntry.videos || [];
@@ -65,8 +69,8 @@ export default function HomeScreen({ navigation }) {
           }
           // Preserve channels that exist locally but weren't in server response
           for (const ch of channels) {
-            if (!newCache[ch.handle] && cache[ch.handle]) {
-              newCache[ch.handle] = cache[ch.handle];
+            if (!newCache[ch.handle] && localCache[ch.handle]) {
+              newCache[ch.handle] = localCache[ch.handle];
             }
           }
           await saveChannelCache(newCache);
