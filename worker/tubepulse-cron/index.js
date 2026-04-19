@@ -320,6 +320,86 @@ export default {
 
         const seenIds = new Set(device.lastSeen[handle].seenIds || []);
 
+        // ── Scheduled events (premieres / scheduled livestreams) ──
+        const scheduledState = device.lastSeen[handle].scheduledState || {};
+        for (const [videoId, sched] of Object.entries(scheduledState)) {
+          if (seenIds.has(videoId)) {
+            delete scheduledState[videoId];
+            deviceUpdated = true;
+            continue;
+          }
+
+          const publishedTime = sched.publishedTime;
+          const timeUntilLive = publishedTime - nowMs;
+
+          // "Upcoming" notification: 1 nag interval before the event
+          if (!sched.notified && timeUntilLive > 0 && timeUntilLive <= nagIntervalMs) {
+            if (!dndActive) {
+              // Find the video in the feed for title/link
+              const video = feed.videos.find((v) => v.videoId === videoId);
+              const title = video?.title || 'Upcoming event';
+              const link = video?.link || `https://www.youtube.com/watch?v=${videoId}`;
+
+              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+                title: `${channelName} going live soon`,
+                body: title,
+                data: {
+                  videoId,
+                  channelName,
+                  handle,
+                  videoLink: link,
+                  type: 'upcoming',
+                },
+                silent: false,
+              });
+
+              if (result.sent) pushCount++;
+              else if (result.deadToken) { deadTokens.push(key); break; }
+            }
+            sched.notified = true;
+            deviceUpdated = true;
+          }
+
+          // "Now available" notification: published time has passed
+          if (!sched.wentLiveNotified && timeUntilLive <= 0) {
+            if (!dndActive) {
+              const video = feed.videos.find((v) => v.videoId === videoId);
+              const title = video?.title || 'Now live';
+              const link = video?.link || `https://www.youtube.com/watch?v=${videoId}`;
+
+              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+                title: `${channelName} is live`,
+                body: title,
+                data: {
+                  videoId,
+                  channelName,
+                  handle,
+                  videoLink: link,
+                  type: 'new_video',
+                },
+                silent: false,
+              });
+
+              if (result.sent) pushCount++;
+              else if (result.deadToken) { deadTokens.push(key); break; }
+            }
+            sched.wentLiveNotified = true;
+            // Move to normal nag state so it gets re-nagged like any other video
+            if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
+            device.lastSeen[handle].nagState[videoId] = {
+              firstNotifiedAt: nowMs,
+              lastNotifiedAt: nowMs,
+            };
+            // Remove from scheduled state
+            delete scheduledState[videoId];
+            deviceUpdated = true;
+          }
+        }
+        if (Object.keys(scheduledState).length !== (device.lastSeen[handle].scheduledState ? Object.keys(device.lastSeen[handle].scheduledState).length : 0)) {
+          device.lastSeen[handle].scheduledState = scheduledState;
+          deviceUpdated = true;
+        }
+
         for (const video of feed.videos) {
           if (seenIds.has(video.videoId)) continue; // Already watched
 

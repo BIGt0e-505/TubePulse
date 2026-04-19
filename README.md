@@ -26,7 +26,13 @@ TubePulse doesn't poll YouTube. It uses **WebSub** (PubSubHubbub) — YouTube pu
 
 When a channel is added, TubePulse subscribes to its WebSub feed. YouTube sends a verification handshake, then pushes an Atom XML payload whenever new content is published. WebSub leases expire (typically 5 days), so a cron job renews subscriptions 24 hours before expiry. The last device to remove a channel triggers an unsubscribe.
 
-**Known limitation:** YouTube's Atom feed doesn't distinguish Shorts, premieres, or livestreams from regular uploads. TubePulse will notify about all of them. Premieres can appear with a `<published>` time in the future (their scheduled start), so they may trigger a notification before they actually air.
+**Known limitation:** YouTube's Atom feed doesn't distinguish Shorts, premieres, or livestreams from regular uploads. However, TubePulse detects **scheduled events** (premieres and scheduled livestreams) by checking if the `<published>` time is in the future. These are handled specially:
+- Stored silently when detected — no immediate notification
+- **"Going live soon"** notification sent 1 nag interval before the scheduled start
+- **"Is live"** notification sent when the scheduled time passes
+- Then nagged like any other unwatched video until you watch it
+
+Shorts are currently not filtered — they're treated as regular uploads.
 
 ### 🔔 Smart Notifications
 
