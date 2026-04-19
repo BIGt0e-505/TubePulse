@@ -16,6 +16,7 @@
  */
 
 const GENTLE_REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const UPCOMING_LEAD_TIME_MS = 15 * 60 * 1000; // 15 min warning before scheduled events
 
 // ─── KV key prefixes ────────────────────────────────────────────────────
 
@@ -91,6 +92,11 @@ async function renewSubscriptions(env, callbackUrl) {
       'hub.verify': 'sync',
       'hub.lease_seconds': String(86400 * 5),
     });
+
+    // Include the existing secret if we have one
+    if (sub?.secret) {
+      body.set('hub.secret', sub.secret);
+    }
 
     try {
       const resp = await fetch(HUB_URL, {
@@ -276,7 +282,7 @@ export default {
       let deviceUpdated = false;
 
       // Collect pending notifications per channel
-      // { handle: { channelName, videos: [{videoId, title, link, type}] } }
+      // { handle: { channelName, channelId, videos: [{videoId, title, link, type}] } }
       const pendingPerChannel = {};
       // Collect scheduled events
       const scheduledNotifications = [];
@@ -332,7 +338,7 @@ export default {
           const timeUntilLive = publishedTime - nowMs;
 
           // "Upcoming" notification: 1 nag interval before the event
-          if (!sched.notified && timeUntilLive > 0 && timeUntilLive <= nagIntervalMs) {
+          if (!sched.notified && timeUntilLive > 0 && timeUntilLive <= UPCOMING_LEAD_TIME_MS) {
             if (!dndActive) {
               const video = feed.videos.find((v) => v.videoId === videoId);
               scheduledNotifications.push({
@@ -343,6 +349,7 @@ export default {
                   channelName,
                   handle,
                   videoLink: video?.link || `https://www.youtube.com/watch?v=${videoId}`,
+                  channelId: ch.channelId,
                   type: 'upcoming',
                 },
               });
@@ -355,7 +362,7 @@ export default {
           if (!sched.wentLiveNotified && timeUntilLive <= 0) {
             if (!dndActive) {
               const video = feed.videos.find((v) => v.videoId === videoId);
-              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId,
                 title: video?.title || 'Now live',
@@ -401,7 +408,7 @@ export default {
               };
               deviceUpdated = true;
 
-              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
                 title: video.title,
@@ -416,7 +423,7 @@ export default {
               device.lastSeen[handle].nagState[video.videoId].lastNotifiedAt = nowMs;
               deviceUpdated = true;
 
-              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
                 title: video.title,
@@ -439,7 +446,7 @@ export default {
               };
               deviceUpdated = true;
 
-              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
                 title: video.title,
@@ -454,7 +461,7 @@ export default {
               device.lastSeen[handle].gentleState.lastRemindedAt = nowMs;
               deviceUpdated = true;
 
-              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, videos: [] };
+              if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
                 title: video.title,
@@ -493,6 +500,7 @@ export default {
           body: video.title,
           data: {
             videoId: video.videoId,
+            channelId: pendingPerChannel[handle].channelId,
             channelName,
             handle,
             videoLink: video.link,

@@ -151,7 +151,7 @@ export default function HomeScreen({ navigation }) {
     setLastSeen(updatedLastSeen);
 
     const deviceId = await getDeviceId();
-    markSeen(deviceId, key, [], true).catch(() => {});
+    markSeen(deviceId, channel.channelId, [], true).catch(() => {});
 
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     try {
@@ -173,7 +173,7 @@ export default function HomeScreen({ navigation }) {
       setLastSeen(updatedLastSeen);
 
       const deviceId = await getDeviceId();
-      markSeen(deviceId, key, [], true).catch(() => {});
+      markSeen(deviceId, channel.channelId, [], true).catch(() => {});
 
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     } else {
@@ -187,7 +187,7 @@ export default function HomeScreen({ navigation }) {
         setLastSeen(updatedLastSeen);
 
         const deviceId = await getDeviceId();
-        markSeen(deviceId, key, [video.videoId]).catch(() => {});
+        markSeen(deviceId, channel.channelId, [video.videoId]).catch(() => {});
 
         Linking.openURL(video.link);
       }
@@ -210,7 +210,7 @@ export default function HomeScreen({ navigation }) {
       setLastSeen(updatedLastSeen);
 
       const deviceId = await getDeviceId();
-      markSeen(deviceId, key, [video.videoId]).catch(() => {});
+      markSeen(deviceId, channel.channelId, [video.videoId]).catch(() => {});
     }
     Linking.openURL(video.link);
     try {

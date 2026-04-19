@@ -100,9 +100,9 @@ export default function App() {
         const deviceId = deviceIdRef.current || await getDeviceId();
 
         if (settings.tapAction === 'channel') {
-          await markSeen(deviceId, data.handle, [], true);
+          await markSeen(deviceId, data.channelId, [], true);
         } else {
-          await markSeen(deviceId, data.handle, [data.videoId]);
+          await markSeen(deviceId, data.channelId, [data.videoId]);
         }
 
         // Update local state
