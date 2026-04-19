@@ -41,7 +41,16 @@ export async function saveChannels(channels) {
 
 export async function getSettings() {
   const data = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);
-  if (data) return JSON.parse(data);
+  if (data) {
+    const settings = JSON.parse(data);
+    // Migrate pollInterval → nagInterval
+    if (settings.pollInterval && !settings.nagInterval) {
+      settings.nagInterval = settings.pollInterval;
+      delete settings.pollInterval;
+      await saveSettings(settings);
+    }
+    return settings;
+  }
   await saveSettings(DEFAULT_SETTINGS);
   return DEFAULT_SETTINGS;
 }

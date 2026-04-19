@@ -93,19 +93,47 @@ export default function App() {
       if (!data?.videoId || !data?.handle) return;
 
       try {
-        // Mark video as seen locally
-        const lastSeen = await getLastSeen();
-        const ls = lastSeen[data.handle] || { seenIds: [] };
-        const seenIds = ls.seenIds || [];
-        if (!seenIds.includes(data.videoId)) {
-          lastSeen[data.handle] = { seenIds: [...seenIds, data.videoId] };
-          await saveLastSeen(lastSeen);
+        const settings = await getSettings();
+
+        if (fcmTokenRef.current) {
+          if (settings.tapAction === 'channel') {
+            // Channel tap: mark all videos for this channel as seen
+            await markSeen(fcmTokenRef.current, data.handle, [], true);
+          } else {
+            // Video tap: mark this specific video as seen
+            await markSeen(fcmTokenRef.current, data.handle, [data.videoId]);
+          }
         }
 
-        // Mark seen on server
-        if (fcmTokenRef.current) {
-          await markSeen(fcmTokenRef.current, data.handle, [data.videoId]);
+        // Also update local state
+        const lastSeen = await getLastSeen();
+        if (!lastSeen[data.handle]) lastSeen[data.handle] = { seenIds: [] };
+
+        if (settings.tapAction === 'channel') {
+          // Mark all current feed videos as seen locally
+          const { getChannels, getChannelCache } = require('./src/utils/storage');
+          const channels = await getChannels();
+          const ch = channels.find((c) => c.handle === data.handle);
+          if (ch?.channelId) {
+            const cache = await getChannelCache();
+            const channelVideos = cache[data.handle]?.videos || [];
+            const existing = new Set(lastSeen[data.handle].seenIds || []);
+            for (const v of channelVideos) {
+              if (v.videoId) existing.add(v.videoId);
+            }
+            lastSeen[data.handle].seenIds = [...existing];
+          }
+        } else {
+          const seenIds = lastSeen[data.handle].seenIds || [];
+          if (!seenIds.includes(data.videoId)) {
+            lastSeen[data.handle].seenIds = [...seenIds, data.videoId];
+          }
         }
+
+        // Clear gentle/nag state for this handle
+        delete lastSeen[data.handle]?.gentleState;
+        delete lastSeen[data.handle]?.nagState;
+        await saveLastSeen(lastSeen);
 
         // Update widget
         try {

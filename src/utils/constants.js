@@ -21,14 +21,23 @@ export const STORAGE_KEYS = {
   CHANNEL_NOTIF_SETTINGS: 'tubepulse_channel_notif_settings',
 };
 
+export const NAG_INTERVALS = [
+  { label: '5m', value: 5 },
+  { label: '15m', value: 15 },
+  { label: '30m', value: 30 },
+  { label: '1h', value: 60 },
+  { label: '2h', value: 120 },
+];
+
 export const DEFAULT_SETTINGS = {
-  tapAction: 'video', // 'video' or 'channel'
-  notificationMode: 'relentless', // 'relentless' | 'chill'
+  tapAction: 'video',              // 'video' or 'channel'
+  notificationMode: 'relentless',  // 'relentless' | 'chill'
+  nagInterval: 15,                 // minutes between nag attempts (5, 15, 30, 60, 120)
+  includeCommunityPosts: false,    // placeholder — not detectable via RSS/WebSub
   dndEnabled: false,
   dndStart: '22:00',
   dndEnd: '07:00',
-  perChannelNotifications: false, // enable per-channel notification overrides
-  includeCommunityPosts: false,   // notify on community posts as well as videos
+  perChannelNotifications: false,  // enable per-channel notification overrides
 };
 
 export const COLORS = {
