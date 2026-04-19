@@ -680,8 +680,13 @@ async function handleWebSubPush(request, env, ctx) {
 
   console.log(`[WebSub] NEW video: ${newVideoId} — "${parsed.entries[0].title}"`);
 
-  // Find devices tracking this channel and send immediate notifications
-  // (nag cycle handles re-nagging later)
+  // Check if this is a scheduled event (published time in the future)
+  const publishedTime = parsed.entries[0].published
+    ? new Date(parsed.entries[0].published).getTime()
+    : 0;
+  const isScheduled = publishedTime > Date.now();
+
+  // Find devices tracking this channel
   ctx.waitUntil((async () => {
     // Get FCM access token
     let accessToken;
@@ -734,6 +739,28 @@ async function handleWebSubPush(request, env, ctx) {
         ? { ...device.settings, ...channelOverride }
         : device.settings;
 
+      const mode = effectiveSettings?.notificationMode || 'relentless';
+
+      if (isScheduled) {
+        // Scheduled premiere/live — store as pending, don't notify now
+        // Nag cron will send "upcoming" notification 1 nag interval before
+        if (!device.lastSeen) device.lastSeen = {};
+        if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
+        if (!device.lastSeen[handle].scheduledState) device.lastSeen[handle].scheduledState = {};
+
+        device.lastSeen[handle].scheduledState[newVideoId] = {
+          publishedTime,
+          detectedAt: Date.now(),
+          notified: false,       // haven't sent "upcoming" yet
+          wentLiveNotified: false, // haven't sent "now available" yet
+        };
+        await putDevice(env.TUBEPULSE_KV, fcmToken, device);
+        console.log(`[WebSub] Stored scheduled event ${newVideoId} for ${handle} (airs ${new Date(publishedTime).toISOString()})`);
+        continue;
+      }
+
+      // Not scheduled — available now. Send immediate notification.
+
       // DND blocks all pushes
       const globalDndEnabled = device.settings?.dndEnabled || false;
       const globalDndActive = globalDndEnabled && isDndActive(
@@ -747,13 +774,11 @@ async function handleWebSubPush(request, env, ctx) {
       );
 
       if (globalDndActive || channelDndActive) {
-        // DND active — skip for now, nag cron will catch it later
+        // DND active — skip, nag cron catches later
         continue;
       }
 
-      const mode = effectiveSettings?.notificationMode || 'relentless';
-
-      // Chill mode: store gentle state for this video (first notification)
+      // Store nag/gentle state
       if (mode === 'chill') {
         if (!device.lastSeen) device.lastSeen = {};
         if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
@@ -765,7 +790,6 @@ async function handleWebSubPush(request, env, ctx) {
         await putDevice(env.TUBEPULSE_KV, fcmToken, device);
       }
 
-      // Relentless: store lastNotifiedAt for nag interval tracking
       if (mode === 'relentless') {
         if (!device.lastSeen) device.lastSeen = {};
         if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
