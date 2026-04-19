@@ -4,7 +4,7 @@ import {
   Platform, Switch, ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { COLORS, DEFAULT_SETTINGS } from '../utils/constants';
+import { COLORS, DEFAULT_SETTINGS, NAG_INTERVALS } from '../utils/constants';
 import TimeSpinner from '../components/TimeSpinner';
 import { getSettings, saveSettings } from '../utils/storage';
 import { updateSettings } from '../utils/api';
@@ -56,6 +56,11 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         ))}
       </View>
+      <Text style={styles.guidance}>
+        {settings.tapAction === 'video'
+          ? 'Opens the specific video in YouTube and marks it as watched.'
+          : 'Opens the channel page in YouTube and marks all their videos as watched.'}
+      </Text>
 
       {/* Notification Mode */}
       <Text style={styles.sectionTitle}>Notification mode</Text>
@@ -74,11 +79,27 @@ export default function SettingsScreen() {
       </View>
       <Text style={styles.guidance}>
         {mode === 'chill'
-          ? 'Chill: one notification when a video drops, then a nudge every 4 hours until you watch it.'
-          : "Relentless: hammers you every check cycle until you've watched it. You asked for this."}
+          ? 'Chill: notify once, then nudge every 4 hours until you watch it.'
+          : "Relentless: remind you every nag interval until you've watched it."}
       </Text>
+
+      {/* Nag Interval */}
+      <Text style={styles.sectionTitle}>Nag interval</Text>
+      <View style={styles.optionGroup}>
+        {NAG_INTERVALS.map(({ label, value }) => (
+          <TouchableOpacity
+            key={value}
+            style={[styles.option, settings.nagInterval === value && styles.optionActive]}
+            onPress={() => updateSetting('nagInterval', value)}
+          >
+            <Text style={[styles.optionText, settings.nagInterval === value && styles.optionTextActive]}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
       <Text style={styles.guidance}>
-        The server checks for new videos every 2 minutes — no battery drain on your phone.
+        Minimum time between notifications for the same unwatched video.
       </Text>
 
       {/* Do Not Disturb */}
@@ -96,7 +117,7 @@ export default function SettingsScreen() {
       {settings.dndEnabled && (
         <>
           <Text style={styles.guidance}>
-            During DND, notifications appear silently — no sound or vibration.
+            During DND, all notifications are held. They'll come through when DND ends.
           </Text>
           <View style={styles.timeRow}>
             <View style={styles.timeField}>
@@ -118,18 +139,19 @@ export default function SettingsScreen() {
         </>
       )}
 
-      {/* Community Posts */}
+      {/* Community Posts placeholder */}
       <Text style={styles.sectionTitle}>Content types</Text>
       <View style={styles.dndRow}>
         <View style={styles.switchLabelWrap}>
           <Text style={styles.dndLabel}>Include community posts</Text>
-          <Text style={styles.switchSubtitle}>Notify on community tab posts as well as videos</Text>
+          <Text style={styles.switchSubtitle}>Coming soon — not yet detectable via RSS</Text>
         </View>
         <Switch
           value={settings.includeCommunityPosts || false}
           onValueChange={(v) => updateSetting('includeCommunityPosts', v)}
           trackColor={{ false: COLORS.border, true: COLORS.accent }}
           thumbColor={settings.includeCommunityPosts ? COLORS.bg : COLORS.textDim}
+          disabled
         />
       </View>
 
@@ -149,16 +171,14 @@ export default function SettingsScreen() {
       </View>
       {settings.perChannelNotifications && (
         <Text style={styles.guidance}>
-          When enabled, each channel in your list has its own notification settings. Long-press a channel to configure it.
+          Long-press a channel to configure its own notification settings.
         </Text>
       )}
 
       {/* Push Architecture Note */}
       <Text style={styles.sectionTitle}>Push notifications</Text>
       <Text style={styles.guidance}>
-        TubePulse now uses server-side push notifications. Your phone doesn't poll in the background — 
-        the server checks YouTube every 2 minutes and pushes new videos to you instantly. 
-        No battery drain, no foreground service.
+        TubePulse uses WebSub — YouTube pushes to us the instant a video drops, then we push to you. Your phone never polls. No battery drain.
       </Text>
 
     </ScrollView>

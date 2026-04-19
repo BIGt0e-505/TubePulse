@@ -1,13 +1,19 @@
 /**
  * TubePulse API Worker
  *
- * REST API for the TubePulse app:
- *   POST /register   — Register/update FCM token + channels + settings
- *   PUT  /channels   — Update tracked channels for a device
- *   PUT  /settings   — Update notification settings
- *   POST /seen        — Mark video(s) as seen
- *   GET  /feed        — Get current feed data for all tracked channels
- *   GET  /resolve     — Handle → channelId resolution (migrated from resolver)
+ * REST API for the TubePulse app + WebSub callback endpoint.
+ *
+ * App endpoints:
+ *   POST /register       — Register/update FCM token + channels + settings
+ *   PUT  /channels        — Update tracked channels for a device
+ *   PUT  /settings        — Update notification settings
+ *   POST /seen            — Mark video(s) as seen (video tap) or clear channel (channel tap)
+ *   GET  /feed            — Get current feed data for all tracked channels
+ *   GET  /resolve         — Handle → channelId resolution
+ *
+ * WebSub endpoints:
+ *   GET  /websub          — Verification handshake (subscribe/unsubscribe)
+ *   POST /websub          — Push notification from YouTube (new video detected)
  */
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -38,7 +44,6 @@ function errorResponse(message, status = 400) {
 
 // ─── Auth ───────────────────────────────────────────────────────────────
 
-// Extract FCM token from Authorization header: "Bearer <token>"
 function getFcmToken(request) {
   const auth = request.headers.get('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) return null;
@@ -50,26 +55,125 @@ function getFcmToken(request) {
 const KV_PREFIX_DEVICE = 'device:';
 const KV_PREFIX_CHANNEL_META = 'channel:';
 const KV_PREFIX_CHANNEL_FEED = 'feed:';
+const KV_PREFIX_SUBSCRIPTION = 'sub:';  // WebSub subscription state per channel
+
+async function getKV(kv, key) {
+  return await kv.get(key, 'json');
+}
+
+async function putKV(kv, key, value) {
+  await kv.put(key, JSON.stringify(value));
+}
 
 async function getDevice(kv, token) {
-  const data = await kv.get(KV_PREFIX_DEVICE + token, 'json');
-  return data;
+  return await kv.get(KV_PREFIX_DEVICE + token, 'json');
 }
 
 async function putDevice(kv, token, data) {
   await kv.put(KV_PREFIX_DEVICE + token, JSON.stringify(data));
 }
 
-async function getChannelMeta(kv, channelId) {
-  return await kv.get(KV_PREFIX_CHANNEL_META + channelId, 'json');
+// ─── WebSub subscription management ────────────────────────────────────
+
+const HUB_URL = 'https://pubsubhubbub.appspot.com/';
+const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';
+
+async function subscribeToChannel(channelId, callbackUrl) {
+  const feedUrl = `${FEED_TEMPLATE}${channelId}`;
+  const body = new URLSearchParams({
+    'hub.callback': callbackUrl,
+    'hub.mode': 'subscribe',
+    'hub.topic': feedUrl,
+    'hub.verify': 'sync',
+    'hub.lease_seconds': String(86400 * 5), // 5 days
+  });
+
+  try {
+    const resp = await fetch(HUB_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    console.log(`[WebSub] Subscribe request for ${channelId}: ${resp.status}`);
+    return resp.ok || resp.status === 202 || resp.status === 204;
+  } catch (err) {
+    console.error(`[WebSub] Subscribe failed for ${channelId}:`, err.message);
+    return false;
+  }
 }
 
-async function putChannelMeta(kv, channelId, data) {
-  await kv.put(KV_PREFIX_CHANNEL_META + channelId, JSON.stringify(data));
+async function unsubscribeFromChannel(channelId, callbackUrl) {
+  const feedUrl = `${FEED_TEMPLATE}${channelId}`;
+  const body = new URLSearchParams({
+    'hub.callback': callbackUrl,
+    'hub.mode': 'unsubscribe',
+    'hub.topic': feedUrl,
+    'hub.verify': 'sync',
+  });
+
+  try {
+    await fetch(HUB_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    console.log(`[WebSub] Unsubscribe request for ${channelId}`);
+  } catch (err) {
+    console.error(`[WebSub] Unsubscribe failed for ${channelId}:`, err.message);
+  }
 }
 
-async function getChannelFeed(kv, channelId) {
-  return await kv.get(KV_PREFIX_CHANNEL_FEED + channelId, 'json');
+// Check if any device still tracks a channel
+async function isChannelTracked(kv, channelId) {
+  let cursor = undefined;
+  do {
+    const list = await kv.list({ prefix: KV_PREFIX_DEVICE, cursor });
+    for (const key of list.keys) {
+      const device = await kv.get(key.name, 'json');
+      if (device?.channels?.some((ch) => ch.channelId === channelId)) {
+        return true;
+      }
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+  return false;
+}
+
+// ─── XML Parser (lightweight, no dependency) ────────────────────────────
+
+function parseWebSubPush(xmlText) {
+  // WebSub pushes the full Atom feed — extract video entries
+  const entries = [];
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+  let match;
+
+  while ((match = entryRegex.exec(xmlText)) !== null) {
+    const entryXml = match[1];
+
+    const videoId = entryXml.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1];
+    const title = entryXml.match(/<title>([^<]+)<\/title>/)?.[1];
+    const link = entryXml.match(/<link[^>]*rel="alternate"[^>]*href="([^"]+)"/)?.[1]
+      || entryXml.match(/<link[^>]*href="([^"]+)"[^>]*rel="alternate"/)?.[1]
+      || `https://www.youtube.com/watch?v=${videoId}`;
+    const published = entryXml.match(/<published>([^<]+)<\/published>/)?.[1];
+    const updated = entryXml.match(/<updated>([^<]+)<\/updated>/)?.[1];
+
+    const thumbMatch = entryXml.match(/<media:thumbnail[^>]*url="([^"]+)"/);
+    const thumbnail = thumbMatch ? thumbMatch[1] : null;
+
+    const descMatch = entryXml.match(/<media:description>([^<]*)<\/media:description>/);
+    const description = descMatch ? descMatch[1] : '';
+
+    if (videoId) {
+      entries.push({ videoId, title, link, published, updated, thumbnail, description });
+    }
+  }
+
+  // Extract channel info from feed-level
+  const channelId = xmlText.match(/<yt:channelId>([^<]+)<\/yt:channelId>/)?.[1];
+  const channelName = xmlText.match(/<name>([^<]+)<\/name>/)?.[1];
+
+  return { channelId, channelName, entries };
 }
 
 // ─── Route handlers ─────────────────────────────────────────────────────
@@ -78,8 +182,9 @@ async function getChannelFeed(kv, channelId) {
  * POST /register
  * Body: { channels: [{handle, channelId, name?}], settings: {...} }
  * Registers or updates a device. Called on app launch + token refresh.
+ * Also ensures WebSub subscriptions exist for all tracked channels.
  */
-async function handleRegister(request, env) {
+async function handleRegister(request, env, ctx) {
   const token = getFcmToken(request);
   if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
 
@@ -94,7 +199,6 @@ async function handleRegister(request, env) {
 
   if (!Array.isArray(channels)) return errorResponse('channels must be an array');
 
-  // Validate channel entries
   for (const ch of channels) {
     if (!ch.handle) return errorResponse('Each channel must have a handle');
   }
@@ -106,6 +210,8 @@ async function handleRegister(request, env) {
     channels,
     settings: {
       notificationMode: settings.notificationMode || 'relentless',
+      nagInterval: settings.nagInterval || 15,
+      includeCommunityPosts: settings.includeCommunityPosts || false,
       dndEnabled: settings.dndEnabled || false,
       dndStart: settings.dndStart || '22:00',
       dndEnd: settings.dndEnd || '07:00',
@@ -120,15 +226,63 @@ async function handleRegister(request, env) {
 
   await putDevice(env.TUBEPULSE_KV, token, device);
 
+  // Auto-refresh channel avatars on first register + ensure WebSub subscriptions
+  const callbackUrl = `${new URL(request.url).origin}/websub`;
+  ctx.waitUntil((async () => {
+    for (const ch of channels) {
+      if (!ch.channelId) continue;
+
+      // Fetch avatar if missing
+      const existingMeta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + ch.channelId);
+      if (!existingMeta && env.YOUTUBE_API_KEY) {
+        try {
+          const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${ch.channelId}&key=${env.YOUTUBE_API_KEY}`;
+          const chResp = await fetch(apiUrl);
+          if (chResp.ok) {
+            const chData = await chResp.json();
+            if (chData.items?.[0]) {
+              const item = chData.items[0];
+              const thumbs = item.snippet?.thumbnails || {};
+              const meta = {
+                name: item.snippet?.title || ch.name || ch.handle,
+                avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+                lastVideoId: null,
+                lastVideoTitle: null,
+                lastVideoPublished: null,
+                lastChecked: new Date().toISOString(),
+              };
+              await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + ch.channelId, meta);
+              console.log(`[API] Auto-refreshed channel: ${ch.handle}`);
+            }
+          }
+        } catch (e) {
+          console.warn(`[API] Auto-refresh failed for ${ch.handle}:`, e.message);
+        }
+      }
+
+      // Subscribe to WebSub if not already subscribed
+      const subState = await getKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId);
+      if (!subState) {
+        const success = await subscribeToChannel(ch.channelId, callbackUrl);
+        if (success) {
+          await putKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId, {
+            subscribedAt: Date.now(),
+            leaseExpires: Date.now() + 86400 * 5 * 1000,
+          });
+        }
+      }
+    }
+  })());
+
   return json({ ok: true, registeredAt: device.registeredAt });
 }
 
 /**
  * PUT /channels
  * Body: { channels: [{handle, channelId, name?}] }
- * Updates the channel list for a device.
+ * Updates the channel list. Handles WebSub subscribe/unsubscribe.
  */
-async function handleChannels(request, env) {
+async function handleChannels(request, env, ctx) {
   const token = getFcmToken(request);
   if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
 
@@ -148,9 +302,69 @@ async function handleChannels(request, env) {
   const device = await getDevice(env.TUBEPULSE_KV, token);
   if (!device) return errorResponse('Device not registered', 404);
 
+  const oldChannelIds = new Set((device.channels || []).map((ch) => ch.channelId).filter(Boolean));
+  const newChannelIds = new Set(channels.map((ch) => ch.channelId).filter(Boolean));
+
   device.channels = channels;
   device.lastActiveAt = Date.now();
   await putDevice(env.TUBEPULSE_KV, token, device);
+
+  const callbackUrl = `${new URL(request.url).origin}/websub`;
+  ctx.waitUntil((async () => {
+    // Subscribe to new channels
+    for (const ch of channels) {
+      if (!ch.channelId) continue;
+      if (oldChannelIds.has(ch.channelId)) continue; // already tracked
+
+      const subState = await getKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId);
+      if (!subState) {
+        const success = await subscribeToChannel(ch.channelId, callbackUrl);
+        if (success) {
+          await putKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + ch.channelId, {
+            subscribedAt: Date.now(),
+            leaseExpires: Date.now() + 86400 * 5 * 1000,
+          });
+        }
+      }
+
+      // Fetch avatar if missing
+      const existingMeta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + ch.channelId);
+      if (!existingMeta && env.YOUTUBE_API_KEY) {
+        try {
+          const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${ch.channelId}&key=${env.YOUTUBE_API_KEY}`;
+          const chResp = await fetch(apiUrl);
+          if (chResp.ok) {
+            const chData = await chResp.json();
+            if (chData.items?.[0]) {
+              const item = chData.items[0];
+              const thumbs = item.snippet?.thumbnails || {};
+              await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + ch.channelId, {
+                name: item.snippet?.title || ch.name || ch.handle,
+                avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+                lastVideoId: null,
+                lastVideoTitle: null,
+                lastVideoPublished: null,
+                lastChecked: new Date().toISOString(),
+              });
+            }
+          }
+        } catch (e) {
+          console.warn(`[API] Avatar fetch failed for ${ch.handle}:`, e.message);
+        }
+      }
+    }
+
+    // Unsubscribe from removed channels (only if no other device tracks them)
+    for (const channelId of oldChannelIds) {
+      if (newChannelIds.has(channelId)) continue;
+      const tracked = await isChannelTracked(env.TUBEPULSE_KV, channelId);
+      if (!tracked) {
+        await unsubscribeFromChannel(channelId, callbackUrl);
+        // Clean up subscription state (keep meta + feed for any stragglers)
+        await env.TUBEPULSE_KV.delete(KV_PREFIX_SUBSCRIPTION + channelId);
+      }
+    }
+  })());
 
   return json({ ok: true });
 }
@@ -158,7 +372,6 @@ async function handleChannels(request, env) {
 /**
  * PUT /settings
  * Body: { settings: {...} }
- * Updates notification settings for a device.
  */
 async function handleSettings(request, env) {
   const token = getFcmToken(request);
@@ -185,8 +398,8 @@ async function handleSettings(request, env) {
 
 /**
  * POST /seen
- * Body: { handle: string, videoIds: string[] }
- * Marks videos as seen for a device.
+ * Body: { handle: string, videoIds: string[] }   — mark specific videos as seen (video tap)
+ *    or { handle: string, clearAll: true }         — clear all unwatched for channel (channel tap)
  */
 async function handleSeen(request, env) {
   const token = getFcmToken(request);
@@ -199,9 +412,8 @@ async function handleSeen(request, env) {
     return errorResponse('Invalid JSON body');
   }
 
-  const { handle, videoIds = [] } = body;
+  const { handle, videoIds, clearAll } = body;
   if (!handle) return errorResponse('handle is required');
-  if (!Array.isArray(videoIds)) return errorResponse('videoIds must be an array');
 
   const device = await getDevice(env.TUBEPULSE_KV, token);
   if (!device) return errorResponse('Device not registered', 404);
@@ -209,21 +421,45 @@ async function handleSeen(request, env) {
   if (!device.lastSeen) device.lastSeen = {};
   if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
 
-  const existing = new Set(device.lastSeen[handle].seenIds || []);
-  for (const id of videoIds) {
-    existing.add(id);
+  if (clearAll) {
+    // Channel tap: mark all currently unwatched videos as seen
+    // We need to know which videos are unwatched — pull from the feed
+    const channel = device.channels.find((ch) => ch.handle === handle);
+    if (channel?.channelId) {
+      const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channel.channelId);
+      if (feed?.videos) {
+        const existing = new Set(device.lastSeen[handle].seenIds || []);
+        for (const v of feed.videos) {
+          if (v.videoId) existing.add(v.videoId);
+        }
+        device.lastSeen[handle].seenIds = [...existing];
+      }
+    }
+  } else if (Array.isArray(videoIds)) {
+    // Video tap: mark specific videos as seen
+    const existing = new Set(device.lastSeen[handle].seenIds || []);
+    for (const id of videoIds) {
+      existing.add(id);
+    }
+    device.lastSeen[handle].seenIds = [...existing];
+  } else {
+    return errorResponse('Provide videoIds array or clearAll: true');
   }
-  device.lastSeen[handle].seenIds = [...existing];
+
+  // Clear gentle state for this channel (video watched or channel cleared)
+  if (device.lastSeen[handle].gentleState) {
+    delete device.lastSeen[handle].gentleState;
+  }
+
   device.lastActiveAt = Date.now();
   await putDevice(env.TUBEPULSE_KV, token, device);
 
-  return json({ ok: true, seenCount: existing.size });
+  return json({ ok: true, seenCount: device.lastSeen[handle].seenIds.length });
 }
 
 /**
  * GET /feed
  * Returns current feed data for all channels the device tracks.
- * Reads from KV channel feed cache (populated by the cron worker).
  */
 async function handleFeed(request, env) {
   const token = getFcmToken(request);
@@ -237,14 +473,13 @@ async function handleFeed(request, env) {
 
   const feeds = {};
   const channelIds = device.channels
-    .map(ch => ch.channelId)
+    .map((ch) => ch.channelId)
     .filter(Boolean);
 
-  // Fetch all channel feeds in parallel
   const feedPromises = channelIds.map(async (channelId) => {
     const [meta, feed] = await Promise.all([
-      getChannelMeta(env.TUBEPULSE_KV, channelId),
-      getChannelFeed(env.TUBEPULSE_KV, channelId),
+      getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId),
+      getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId),
     ]);
     return { channelId, meta, feed };
   });
@@ -252,8 +487,7 @@ async function handleFeed(request, env) {
   const results = await Promise.all(feedPromises);
 
   for (const { channelId, meta, feed } of results) {
-    // Find the handle for this channel
-    const channel = device.channels.find(ch => ch.channelId === channelId);
+    const channel = device.channels.find((ch) => ch.channelId === channelId);
     const handle = channel?.handle || channelId;
     feeds[handle] = {
       name: meta?.name || channel?.name || handle,
@@ -273,8 +507,6 @@ async function handleFeed(request, env) {
 
 /**
  * GET /resolve?handle=@mkbhd
- * Migrated from the original tubepulse-resolver worker.
- * Resolves YouTube handle → channelId + name + avatar.
  */
 async function handleResolve(request, env) {
   const url = new URL(request.url);
@@ -333,11 +565,372 @@ async function handleResolve(request, env) {
   }
 }
 
+// ─── WebSub handlers ────────────────────────────────────────────────────
+
+/**
+ * GET /websub
+ * WebSub verification handshake.
+ * Hub sends: hub.mode, hub.topic, hub.challenge, hub.lease_seconds
+ * We must: respond with hub.challenge as plain text (200)
+ */
+async function handleWebSubVerification(request, env) {
+  const url = new URL(request.url);
+  const mode = url.searchParams.get('hub.mode');
+  const topic = url.searchParams.get('hub.topic');
+  const challenge = url.searchParams.get('hub.challenge');
+  const leaseSeconds = url.searchParams.get('hub.lease_seconds');
+
+  if (!mode || !topic || !challenge) {
+    console.warn('[WebSub] Invalid verification request');
+    return new Response('Missing parameters', { status: 400 });
+  }
+
+  // Extract channelId from topic URL
+  const channelIdMatch = topic.match(/channel_id=([A-Za-z0-9_-]+)/);
+  const channelId = channelIdMatch ? channelIdMatch[1] : null;
+
+  if (!channelId) {
+    console.warn('[WebSub] Could not extract channelId from topic:', topic);
+    return new Response('Invalid topic', { status: 400 });
+  }
+
+  if (mode === 'subscribe') {
+    // Store/update subscription state
+    const leaseMs = leaseSeconds ? parseInt(leaseSeconds) * 1000 : 86400 * 5 * 1000;
+    await putKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + channelId, {
+      subscribedAt: Date.now(),
+      leaseExpires: Date.now() + leaseMs,
+    });
+    console.log(`[WebSub] Subscribed to ${channelId}, lease: ${leaseSeconds}s`);
+  } else if (mode === 'unsubscribe') {
+    await env.TUBEPULSE_KV.delete(KV_PREFIX_SUBSCRIPTION + channelId);
+    console.log(`[WebSub] Unsubscribed from ${channelId}`);
+  }
+
+  // Must respond with the challenge as plain text
+  return new Response(challenge, {
+    status: 200,
+    headers: { 'Content-Type': 'text/plain' },
+  });
+}
+
+/**
+ * POST /websub
+ * WebSub push — YouTube notifies us of new content.
+ * Body: Atom XML feed for the channel.
+ */
+async function handleWebSubPush(request, env, ctx) {
+  let xmlText;
+  try {
+    xmlText = await request.text();
+  } catch {
+    return new Response('Bad request', { status: 400 });
+  }
+
+  const parsed = parseWebSubPush(xmlText);
+  if (!parsed.channelId || parsed.entries.length === 0) {
+    // Empty or malformed push — acknowledge but do nothing
+    return new Response('OK', { status: 200 });
+  }
+
+  const channelId = parsed.channelId;
+  const channelName = parsed.channelName;
+
+  console.log(`[WebSub] Push for ${channelId}: ${parsed.entries.length} entries`);
+
+  // Update channel meta and feed
+  const prevMeta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId);
+
+  const meta = {
+    name: channelName || prevMeta?.name || channelId,
+    avatar: prevMeta?.avatar || null, // Preserve avatar (set at add time)
+    lastVideoId: parsed.entries[0]?.videoId || prevMeta?.lastVideoId || null,
+    lastVideoTitle: parsed.entries[0]?.title || prevMeta?.lastVideoTitle || null,
+    lastVideoPublished: parsed.entries[0]?.published || prevMeta?.lastVideoPublished || null,
+    lastChecked: new Date().toISOString(),
+  };
+
+  await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId, meta);
+
+  // Update feed (top 5 entries)
+  const feed = {
+    videos: parsed.entries.slice(0, 5).map((e) => ({
+      videoId: e.videoId,
+      title: e.title,
+      published: e.published,
+      updated: e.updated,
+      link: e.link,
+      thumbnail: e.thumbnail,
+      description: e.description,
+      views: '0', // Not in WebSub push
+    })),
+    lastFetched: new Date().toISOString(),
+  };
+  await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId, feed);
+
+  // Detect if there's actually a NEW video (compared to prevMeta)
+  const newVideoId = parsed.entries[0]?.videoId;
+  const prevVideoId = prevMeta?.lastVideoId;
+  const isNewVideo = newVideoId && newVideoId !== prevVideoId;
+
+  if (!isNewVideo) {
+    console.log(`[WebSub] No new video (same as prev: ${prevVideoId})`);
+    return new Response('OK', { status: 200 });
+  }
+
+  console.log(`[WebSub] NEW video: ${newVideoId} — "${parsed.entries[0].title}"`);
+
+  // Find devices tracking this channel and send immediate notifications
+  // (nag cycle handles re-nagging later)
+  ctx.waitUntil((async () => {
+    // Get FCM access token
+    let accessToken;
+    try {
+      accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+    } catch (err) {
+      console.error('[WebSub] Failed to get FCM access token:', err);
+      return;
+    }
+
+    const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+    const projectId = sa.project_id;
+
+    const deviceKeys = [];
+    let cursor = undefined;
+    do {
+      const list = await env.TUBEPULSE_KV.list({ prefix: KV_PREFIX_DEVICE, cursor });
+      for (const key of list.keys) {
+        deviceKeys.push(key.name);
+      }
+      cursor = list.list_complete ? undefined : list.cursor;
+    } while (cursor);
+
+    for (const key of deviceKeys) {
+      const device = await getKV(env.TUBEPULSE_KV, key);
+      if (!device) continue;
+
+      const tracksChannel = device.channels?.some(
+        (ch) => ch.channelId === channelId
+      );
+      if (!tracksChannel) continue;
+
+      const fcmToken = key.replace(KV_PREFIX_DEVICE, '');
+      const handle = device.channels.find(
+        (ch) => ch.channelId === channelId
+      )?.handle;
+
+      if (!handle) continue;
+
+      // Check if already seen
+      const seenIds = device.lastSeen?.[handle]?.seenIds || [];
+      if (seenIds.includes(newVideoId)) continue;
+
+      // Get effective settings
+      const perChannelEnabled = device.settings?.perChannelNotifications || false;
+      const channelOverride = perChannelEnabled
+        ? device.settings?.channelNotifSettings?.[handle]
+        : null;
+      const effectiveSettings = channelOverride
+        ? { ...device.settings, ...channelOverride }
+        : device.settings;
+
+      // DND blocks all pushes
+      const globalDndEnabled = device.settings?.dndEnabled || false;
+      const globalDndActive = globalDndEnabled && isDndActive(
+        device.settings?.dndStart || '22:00',
+        device.settings?.dndEnd || '07:00'
+      );
+      const channelDndEnabled = effectiveSettings?.dndEnabled || false;
+      const channelDndActive = channelDndEnabled && isDndActive(
+        effectiveSettings?.dndStart || '22:00',
+        effectiveSettings?.dndEnd || '07:00'
+      );
+
+      if (globalDndActive || channelDndActive) {
+        // DND active — skip for now, nag cron will catch it later
+        continue;
+      }
+
+      const mode = effectiveSettings?.notificationMode || 'relentless';
+
+      // Chill mode: store gentle state for this video (first notification)
+      if (mode === 'chill') {
+        if (!device.lastSeen) device.lastSeen = {};
+        if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
+        device.lastSeen[handle].gentleState = {
+          videoId: newVideoId,
+          firstNotifiedAt: Date.now(),
+          lastRemindedAt: Date.now(),
+        };
+        await putDevice(env.TUBEPULSE_KV, fcmToken, device);
+      }
+
+      // Relentless: store lastNotifiedAt for nag interval tracking
+      if (mode === 'relentless') {
+        if (!device.lastSeen) device.lastSeen = {};
+        if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
+        if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
+        device.lastSeen[handle].nagState[newVideoId] = {
+          firstNotifiedAt: Date.now(),
+          lastNotifiedAt: Date.now(),
+        };
+        await putDevice(env.TUBEPULSE_KV, fcmToken, device);
+      }
+
+      // Send push
+      const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+        title: `${channelName || handle} uploaded`,
+        body: parsed.entries[0].title,
+        data: {
+          videoId: newVideoId,
+          channelName: channelName || handle,
+          handle,
+          videoLink: parsed.entries[0].link,
+          type: 'new_video',
+        },
+        silent: false,
+      });
+
+      if (result.deadToken) {
+        console.log(`[WebSub] Pruning dead token: ${key}`);
+        await env.TUBEPULSE_KV.delete(key);
+      }
+    }
+  })());
+
+  return new Response('OK', { status: 200 });
+}
+
+// ─── DND logic ──────────────────────────────────────────────────────────
+
+function isDndActive(dndStart, dndEnd) {
+  const now = new Date();
+  const [sh, sm] = dndStart.split(':').map(Number);
+  const [eh, em] = dndEnd.split(':').map(Number);
+  const nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const startMins = sh * 60 + sm;
+  const endMins = eh * 60 + em;
+
+  if (startMins <= endMins) {
+    return nowMins >= startMins && nowMins < endMins;
+  } else {
+    return nowMins >= startMins || nowMins < endMins;
+  }
+}
+
+// ─── FCM helpers (shared with cron) ─────────────────────────────────────
+
+async function getGoogleAccessToken(serviceAccountJson) {
+  const sa = JSON.parse(serviceAccountJson);
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/firebase.messaging',
+    aud: sa.token_uri,
+    iat: now,
+    exp: now + 3600,
+  };
+
+  const base64url = (obj) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const headerB64 = base64url(header);
+  const payloadB64 = base64url(payload);
+  const input = `${headerB64}.${payloadB64}`;
+
+  const pemKey = sa.private_key;
+  const pemBody = pemKey
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s/g, '');
+
+  const binaryStr = atob(pemBody);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8',
+    bytes.buffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    cryptoKey,
+    new TextEncoder().encode(input)
+  );
+
+  const signatureB64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  const jwt = `${input}.${signatureB64}`;
+
+  const tokenResp = await fetch(sa.token_uri, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  });
+
+  const tokenData = await tokenResp.json();
+  if (!tokenData.access_token) {
+    throw new Error(`Token exchange failed: ${JSON.stringify(tokenData)}`);
+  }
+
+  return tokenData.access_token;
+}
+
+async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
+  const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      message: {
+        token: fcmToken,
+        notification: {
+          title: payload.title,
+          body: payload.body,
+        },
+        data: payload.data,
+        android: {
+          priority: 'high',
+          notification: {
+            channel_id: payload.silent ? 'new-videos-silent' : 'new-videos',
+            sound: payload.silent ? null : 'default',
+          },
+        },
+      },
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.error(`FCM push failed for token ${fcmToken.slice(0, 10)}...: ${resp.status} ${errText}`);
+    if (resp.status === 404 || errText.includes('UNREGISTERED') || errText.includes('NotRegistered')) {
+      return { sent: false, deadToken: true };
+    }
+    return { sent: false, deadToken: false };
+  }
+
+  return { sent: true, deadToken: false };
+}
+
 // ─── Main handler ───────────────────────────────────────────────────────
 
 export default {
-  async fetch(request, env) {
-    // CORS preflight
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders() });
     }
@@ -346,39 +939,43 @@ export default {
     const path = url.pathname;
 
     try {
-      // Route: Resolve (no auth required — public endpoint)
+      // WebSub verification (GET /websub)
+      if (path === '/websub' && request.method === 'GET') {
+        return await handleWebSubVerification(request, env);
+      }
+
+      // WebSub push (POST /websub)
+      if (path === '/websub' && request.method === 'POST') {
+        return await handleWebSubPush(request, env, ctx);
+      }
+
+      // App routes
       if (path === '/resolve' && request.method === 'GET') {
         return await handleResolve(request, env);
       }
 
-      // Route: Register
       if (path === '/register' && request.method === 'POST') {
-        return await handleRegister(request, env);
+        return await handleRegister(request, env, ctx);
       }
 
-      // Route: Channels
       if (path === '/channels' && request.method === 'PUT') {
-        return await handleChannels(request, env);
+        return await handleChannels(request, env, ctx);
       }
 
-      // Route: Settings
       if (path === '/settings' && request.method === 'PUT') {
         return await handleSettings(request, env);
       }
 
-      // Route: Seen
       if (path === '/seen' && request.method === 'POST') {
         return await handleSeen(request, env);
       }
 
-      // Route: Feed
       if (path === '/feed' && request.method === 'GET') {
         return await handleFeed(request, env);
       }
 
-      // Health check
       if (path === '/' && request.method === 'GET') {
-        return json({ status: 'ok', version: '1.0.0', worker: 'tubepulse-api' });
+        return json({ status: 'ok', version: '2.0.0', worker: 'tubepulse-api' });
       }
 
       return errorResponse('Not found', 404);

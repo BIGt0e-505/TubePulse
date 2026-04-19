@@ -80,12 +80,20 @@ export async function updateSettings(token, settings) {
 
 /**
  * Mark video(s) as seen.
+ * videoIds: mark specific videos as seen (video tap)
+ * clearAll: mark all current feed videos as seen (channel tap)
  */
-export async function markSeen(token, handle, videoIds) {
+export async function markSeen(token, handle, videoIds = [], clearAll = false) {
+  const body = { handle };
+  if (clearAll) {
+    body.clearAll = true;
+  } else {
+    body.videoIds = videoIds;
+  }
   return await apiFetch('/seen', {
     method: 'POST',
     token,
-    body: { handle, videoIds },
+    body,
   });
 }
 
