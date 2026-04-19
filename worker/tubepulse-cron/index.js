@@ -1,21 +1,17 @@
 /**
  * TubePulse Cron Worker
  *
- * Runs every 2 minutes via Cloudflare Cron Trigger.
- * 1. Lists all registered devices from KV
- * 2. Deduplicates channel IDs across all devices
- * 3. Fetches YouTube RSS for each channel
- * 4. Detects new videos by comparing against stored state
- * 5. Sends FCM push notifications to devices that track the channel
- * 6. Updates KV state (channel meta, feed, device lastSeen)
+ * Runs every 5 minutes. Two jobs:
+ *
+ * 1. Nag cycle — scan devices for unwatched videos and re-notify
+ *    based on mode (relentless/chill) and nag interval.
+ *
+ * 2. WebSub lease renewal — re-subscribe to channels whose
+ *    WebSub leases are expiring soon.
+ *
+ * No YouTube RSS or API calls. All video detection happens via
+ * WebSub push to the API worker.
  */
-
-import { XMLParser } from 'fast-xml-parser';
-
-const parser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-});
 
 const GENTLE_REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
@@ -24,6 +20,7 @@ const GENTLE_REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const KV_PREFIX_DEVICE = 'device:';
 const KV_PREFIX_CHANNEL_META = 'channel:';
 const KV_PREFIX_CHANNEL_FEED = 'feed:';
+const KV_PREFIX_SUBSCRIPTION = 'sub:';
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -35,66 +32,88 @@ async function putKV(kv, key, value) {
   await kv.put(key, JSON.stringify(value));
 }
 
-// ─── YouTube RSS ────────────────────────────────────────────────────────
+// ─── DND logic ──────────────────────────────────────────────────────────
 
-async function fetchYouTubeRSS(channelId) {
-  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+function isDndActive(dndStart, dndEnd) {
+  const now = new Date();
+  const [sh, sm] = dndStart.split(':').map(Number);
+  const [eh, em] = dndEnd.split(':').map(Number);
+  const nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const startMins = sh * 60 + sm;
+  const endMins = eh * 60 + em;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  if (startMins <= endMins) {
+    return nowMins >= startMins && nowMins < endMins;
+  } else {
+    return nowMins >= startMins || nowMins < endMins;
+  }
+}
 
-  try {
-    const resp = await fetch(feedUrl, { signal: controller.signal });
-    if (!resp.ok) {
-      console.error(`RSS fetch failed for ${channelId}: ${resp.status}`);
-      return null;
+// ─── WebSub lease renewal ──────────────────────────────────────────────
+
+const HUB_URL = 'https://pubsubhubbub.appspot.com/';
+const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';
+
+async function renewSubscriptions(env, callbackUrl) {
+  const now = Date.now();
+  const renewThreshold = now + 24 * 60 * 60 * 1000; // Renew if expiring within 24h
+
+  const subKeys = [];
+  let cursor = undefined;
+  do {
+    const list = await env.TUBEPULSE_KV.list({ prefix: KV_PREFIX_SUBSCRIPTION, cursor });
+    for (const key of list.keys) {
+      subKeys.push(key.name);
     }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
 
-    const xml = await resp.text();
-    const result = parser.parse(xml);
+  let renewed = 0;
 
-    const feed = result.feed;
-    if (!feed || !feed.entry) return { channel: null, videos: [] };
+  for (const key of subKeys) {
+    const sub = await getKV(env.TUBEPULSE_KV, key);
+    if (!sub) continue;
 
-    const entries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+    const channelId = key.replace(KV_PREFIX_SUBSCRIPTION, '');
+    const expiresAt = sub.leaseExpires || 0;
 
-    const channel = {
-      name: feed.author?.name || feed.title || '',
-      uri: feed.author?.uri || '',
-    };
+    if (expiresAt > renewThreshold) continue; // Still valid
 
-    const videos = entries.map((entry) => {
-      const videoId = entry['yt:videoId'];
-      const link = entry.link?.['@_href'] || `https://www.youtube.com/watch?v=${videoId}`;
-      const mediaGroup = entry['media:group'] || {};
-      const thumbnail = mediaGroup['media:thumbnail']?.['@_url'] || null;
-      const description = mediaGroup['media:description'] || '';
-      const views = mediaGroup['media:community']?.['media:statistics']?.['@_views'] || '0';
+    console.log(`[Cron] Renewing WebSub for ${channelId} (expires ${new Date(expiresAt).toISOString()})`);
 
-      return {
-        videoId,
-        title: entry.title,
-        published: entry.published,
-        updated: entry.updated,
-        link,
-        thumbnail,
-        description,
-        views,
-      };
+    const feedUrl = `${FEED_TEMPLATE}${channelId}`;
+    const body = new URLSearchParams({
+      'hub.callback': callbackUrl,
+      'hub.mode': 'subscribe',
+      'hub.topic': feedUrl,
+      'hub.verify': 'sync',
+      'hub.lease_seconds': String(86400 * 5),
     });
 
-    return { channel, videos };
-  } catch (err) {
-    console.error(`RSS fetch error for ${channelId}:`, err.message);
-    return null;
-  } finally {
-    clearTimeout(timer);
+    try {
+      const resp = await fetch(HUB_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+
+      if (resp.ok || resp.status === 202 || resp.status === 204) {
+        // Lease will be updated by the verification handler
+        console.log(`[Cron] Renewal request accepted for ${channelId}`);
+        renewed++;
+      } else {
+        console.error(`[Cron] Renewal failed for ${channelId}: ${resp.status}`);
+      }
+    } catch (err) {
+      console.error(`[Cron] Renewal error for ${channelId}:`, err.message);
+    }
   }
+
+  return renewed;
 }
 
 // ─── FCM Push ───────────────────────────────────────────────────────────
 
-// Get Google OAuth2 access token using service account key
 async function getGoogleAccessToken(serviceAccountJson) {
   const sa = JSON.parse(serviceAccountJson);
 
@@ -108,7 +127,6 @@ async function getGoogleAccessToken(serviceAccountJson) {
     exp: now + 3600,
   };
 
-  // Base64url encode
   const base64url = (obj) =>
     btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
@@ -116,20 +134,6 @@ async function getGoogleAccessToken(serviceAccountJson) {
   const payloadB64 = base64url(payload);
   const input = `${headerB64}.${payloadB64}`;
 
-  // Sign with RSA - WebCrypto API
-  const keyData = {
-    kty: 'RSA',
-    n: null, // Will extract from PEM
-    e: 'AQAB',
-    d: null,
-    p: null,
-    q: null,
-    dp: null,
-    dq: null,
-    qi: null,
-  };
-
-  // Import the private key from PEM
   const pemKey = sa.private_key;
   const pemBody = pemKey
     .replace(/-----BEGIN PRIVATE KEY-----/, '')
@@ -163,7 +167,6 @@ async function getGoogleAccessToken(serviceAccountJson) {
 
   const jwt = `${input}.${signatureB64}`;
 
-  // Exchange JWT for access token
   const tokenResp = await fetch(sa.token_uri, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -178,7 +181,6 @@ async function getGoogleAccessToken(serviceAccountJson) {
   return tokenData.access_token;
 }
 
-// Send FCM push notification via HTTP v1 API
 async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
 
@@ -210,8 +212,6 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   if (!resp.ok) {
     const errText = await resp.text();
     console.error(`FCM push failed for token ${fcmToken.slice(0, 10)}...: ${resp.status} ${errText}`);
-
-    // If token is unregistered, return false so caller can prune it
     if (resp.status === 404 || errText.includes('UNREGISTERED') || errText.includes('NotRegistered')) {
       return { sent: false, deadToken: true };
     }
@@ -221,32 +221,25 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   return { sent: true, deadToken: false };
 }
 
-// ─── DND logic ──────────────────────────────────────────────────────────
-
-function isDndActive(dndStart, dndEnd) {
-  const now = new Date();
-  const utcOffset = now.getTimezoneOffset(); // We treat times as device-local; cron uses UTC
-  const [sh, sm] = dndStart.split(':').map(Number);
-  const [eh, em] = dndEnd.split(':').map(Number);
-  const nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const startMins = sh * 60 + sm;
-  const endMins = eh * 60 + em;
-
-  if (startMins <= endMins) {
-    return nowMins >= startMins && nowMins < endMins;
-  } else {
-    return nowMins >= startMins || nowMins < endMins;
-  }
-}
-
 // ─── Main cron handler ──────────────────────────────────────────────────
 
 export default {
   async scheduled(event, env, ctx) {
     const startTime = Date.now();
-    console.log(`[Cron] Starting poll at ${new Date().toISOString()}`);
+    const nowMs = Date.now();
+    console.log(`[Cron] Starting at ${new Date().toISOString()}`);
 
-    // 1. List all device keys
+    // ── Job 1: WebSub lease renewal ──
+    // Determine callback URL from the API worker's route
+    // We need the public URL — derive from the API worker's known URL
+    const callbackUrl = 'https://tubepulse-api.aaronjoakley55.workers.dev/websub';
+
+    const renewed = await renewSubscriptions(env, callbackUrl);
+    console.log(`[Cron] WebSub renewals: ${renewed}`);
+
+    // ── Job 2: Nag cycle ──
+    // Scan all devices for unwatched videos that need re-notifying
+
     const deviceKeys = [];
     let cursor = undefined;
     do {
@@ -257,106 +250,14 @@ export default {
       cursor = list.list_complete ? undefined : list.cursor;
     } while (cursor);
 
-    console.log(`[Cron] Found ${deviceKeys.length} registered devices`);
+    console.log(`[Cron] Found ${deviceKeys.length} devices`);
 
     if (deviceKeys.length === 0) {
-      console.log('[Cron] No devices registered. Done.');
+      console.log('[Cron] Nothing to do. Done.');
       return;
     }
 
-    // 2. Fetch all device data and collect unique channel IDs
-    const devices = [];
-    const channelIdSet = new Set();
-
-    for (const key of deviceKeys) {
-      const device = await getKV(env.TUBEPULSE_KV, key);
-      if (device) {
-        devices.push({ key, ...device });
-        for (const ch of device.channels || []) {
-          if (ch.channelId) channelIdSet.add(ch.channelId);
-        }
-      }
-    }
-
-    const channelIds = [...channelIdSet];
-    console.log(`[Cron] Tracking ${channelIds.length} unique channels across ${devices.length} devices`);
-
-    // 3. Fetch RSS for each channel and detect new videos
-    const channelUpdates = {};
-
-    for (const channelId of channelIds) {
-      const rssResult = await fetchYouTubeRSS(channelId);
-      if (!rssResult || !rssResult.channel) {
-        console.warn(`[Cron] No RSS data for ${channelId}`);
-        continue;
-      }
-
-      const prevMeta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId);
-
-      const meta = {
-        name: rssResult.channel.name,
-        avatar: prevMeta?.avatar || null, // RSS doesn't include avatar; preserve from previous fetch
-        lastVideoId: rssResult.channel.videos?.[0]?.videoId || prevMeta?.lastVideoId || null,
-        lastVideoTitle: rssResult.channel.videos?.[0]?.title || null,
-        lastVideoPublished: rssResult.channel.videos?.[0]?.published || null,
-        lastChecked: new Date().toISOString(),
-      };
-
-      // If avatar is missing, try to fetch it from YouTube Data API
-      if (!meta.avatar && env.YOUTUBE_API_KEY) {
-        try {
-          const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${channelId}&key=${env.YOUTUBE_API_KEY}`;
-          const chResp = await fetch(apiUrl);
-          if (chResp.ok) {
-            const chData = await chResp.json();
-            if (chData.items?.[0]?.snippet?.thumbnails) {
-              const thumbs = chData.items[0].snippet.thumbnails;
-              meta.avatar = thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null;
-            }
-          }
-        } catch (e) {
-          console.warn(`[Cron] Avatar fetch failed for ${channelId}:`, e.message);
-        }
-      }
-
-      // Save feed data (top 5 videos)
-      const feed = {
-        videos: (rssResult.videos || []).slice(0, 5),
-        lastFetched: new Date().toISOString(),
-      };
-
-      await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId, meta);
-      await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId, feed);
-
-      // Detect new video
-      const newVideoId = rssResult.videos?.[0]?.videoId;
-      const prevVideoId = prevMeta?.lastVideoId;
-
-      if (newVideoId && newVideoId !== prevVideoId) {
-        channelUpdates[channelId] = {
-          videoId: newVideoId,
-          title: rssResult.videos[0].title,
-          link: rssResult.videos[0].link,
-          published: rssResult.videos[0].published,
-          channelName: meta.name,
-          isNew: true,
-        };
-        console.log(`[Cron] NEW video on ${channelId}: ${newVideoId} — "${rssResult.videos[0].title}"`);
-      } else {
-        channelUpdates[channelId] = { isNew: false };
-      }
-    }
-
-    // 4. If no new videos, we're done
-    const newChannels = Object.entries(channelUpdates).filter(([_, v]) => v.isNew);
-    if (newChannels.length === 0) {
-      console.log('[Cron] No new videos. Done.');
-      return;
-    }
-
-    console.log(`[Cron] ${newChannels.length} channel(s) have new videos`);
-
-    // 5. Get FCM access token
+    // Get FCM access token
     let accessToken;
     try {
       accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
@@ -365,109 +266,221 @@ export default {
       return;
     }
 
-    // Extract project ID from service account
     const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
     const projectId = sa.project_id;
 
-    // 6. Push notifications to devices tracking new-video channels
     const deadTokens = [];
     let pushCount = 0;
 
-    for (const device of devices) {
-      const fcmToken = device.key.replace(KV_PREFIX_DEVICE, '');
+    for (const key of deviceKeys) {
+      const device = await getKV(env.TUBEPULSE_KV, key);
+      if (!device) continue;
+
+      const fcmToken = key.replace(KV_PREFIX_DEVICE, '');
       let deviceUpdated = false;
 
+      // For each channel the device tracks, check feed for unwatched videos
       for (const ch of device.channels || []) {
         if (!ch.channelId) continue;
-        const update = channelUpdates[ch.channelId];
-        if (!update || !update.isNew) continue;
 
-        // Check if device has already seen this video
         const handle = ch.handle;
-        const seenIds = device.lastSeen?.[handle]?.seenIds || [];
-        if (seenIds.includes(update.videoId)) continue;
+        const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + ch.channelId);
+        const meta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + ch.channelId);
+        if (!feed?.videos) continue;
 
-        // Determine notification mode
+        const channelName = meta?.name || ch.name || handle;
+
+        // Get effective settings
         const perChannelEnabled = device.settings?.perChannelNotifications || false;
-        const channelOverride = perChannelEnabled ? device.settings?.channelNotifSettings?.[handle] : null;
+        const channelOverride = perChannelEnabled
+          ? device.settings?.channelNotifSettings?.[handle]
+          : null;
         const effectiveSettings = channelOverride
           ? { ...device.settings, ...channelOverride }
           : device.settings;
-        const mode = effectiveSettings?.notificationMode || 'relentless';
 
-        // Check DND
-        const dndEnabled = effectiveSettings?.dndEnabled || false;
-        const silent = dndEnabled && isDndActive(
+        const mode = effectiveSettings?.notificationMode || 'relentless';
+        const nagIntervalMs = (effectiveSettings?.nagInterval || 15) * 60 * 1000;
+
+        // DND check
+        const globalDndEnabled = device.settings?.dndEnabled || false;
+        const globalDndActive = globalDndEnabled && isDndActive(
+          device.settings?.dndStart || '22:00',
+          device.settings?.dndEnd || '07:00'
+        );
+        const channelDndEnabled = effectiveSettings?.dndEnabled || false;
+        const channelDndActive = channelDndEnabled && isDndActive(
           effectiveSettings?.dndStart || '22:00',
           effectiveSettings?.dndEnd || '07:00'
         );
+        const dndActive = globalDndActive || channelDndActive;
 
-        // Chill mode logic: notify once, then remind every 4h
-        if (mode === 'chill') {
-          const gentle = device.lastSeen?.[handle]?.gentleState;
-          const now = Date.now();
+        if (!device.lastSeen) device.lastSeen = {};
+        if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
 
-          if (gentle && gentle.videoId === update.videoId) {
-            // Already notified about this one
-            if (now - gentle.lastRemindedAt < GENTLE_REMINDER_INTERVAL_MS) {
-              continue; // Too soon for a reminder
+        const seenIds = new Set(device.lastSeen[handle].seenIds || []);
+
+        for (const video of feed.videos) {
+          if (seenIds.has(video.videoId)) continue; // Already watched
+
+          // ── Relentless mode ──
+          if (mode === 'relentless') {
+            const nagState = device.lastSeen[handle].nagState?.[video.videoId];
+
+            if (!nagState) {
+              // Not yet notified — WebSub should have done this, but if missed,
+              // send first notification now
+              if (dndActive) continue;
+
+              if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
+              device.lastSeen[handle].nagState[video.videoId] = {
+                firstNotifiedAt: nowMs,
+                lastNotifiedAt: nowMs,
+              };
+              deviceUpdated = true;
+
+              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+                title: `${channelName} uploaded`,
+                body: video.title,
+                data: {
+                  videoId: video.videoId,
+                  channelName,
+                  handle,
+                  videoLink: video.link,
+                  type: 'new_video',
+                },
+                silent: false,
+              });
+
+              if (result.sent) pushCount++;
+              else if (result.deadToken) { deadTokens.push(key); break; }
+            } else {
+              // Already notified — check if it's time to re-nag
+              const elapsed = nowMs - (nagState.lastNotifiedAt || 0);
+              if (elapsed < nagIntervalMs) continue;
+
+              if (dndActive) continue;
+
+              // Re-nag
+              device.lastSeen[handle].nagState[video.videoId].lastNotifiedAt = nowMs;
+              deviceUpdated = true;
+
+              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+                title: `${channelName} uploaded`,
+                body: video.title,
+                data: {
+                  videoId: video.videoId,
+                  channelName,
+                  handle,
+                  videoLink: video.link,
+                  type: 'new_video',
+                },
+                silent: false,
+              });
+
+              if (result.sent) pushCount++;
+              else if (result.deadToken) { deadTokens.push(key); break; }
             }
-            // Time for a reminder
           }
 
-          // Update gentle state
-          if (!device.lastSeen) device.lastSeen = {};
-          if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
-          if (!device.lastSeen[handle].gentleState) {
-            device.lastSeen[handle].gentleState = {
-              videoId: update.videoId,
-              firstNotifiedAt: Date.now(),
-              lastRemindedAt: Date.now(),
-            };
-          } else {
-            device.lastSeen[handle].gentleState.lastRemindedAt = Date.now();
+          // ── Chill mode ──
+          if (mode === 'chill') {
+            const gentleState = device.lastSeen[handle].gentleState;
+
+            if (!gentleState || gentleState.videoId !== video.videoId) {
+              // Not yet notified for this video — first notification
+              if (dndActive) continue;
+
+              device.lastSeen[handle].gentleState = {
+                videoId: video.videoId,
+                firstNotifiedAt: nowMs,
+                lastRemindedAt: nowMs,
+              };
+              deviceUpdated = true;
+
+              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+                title: `${channelName} uploaded`,
+                body: video.title,
+                data: {
+                  videoId: video.videoId,
+                  channelName,
+                  handle,
+                  videoLink: video.link,
+                  type: 'new_video',
+                },
+                silent: false,
+              });
+
+              if (result.sent) pushCount++;
+              else if (result.deadToken) { deadTokens.push(key); break; }
+            } else if (gentleState.videoId === video.videoId) {
+              // Already notified — remind every 4h
+              const elapsed = nowMs - (gentleState.lastRemindedAt || 0);
+              if (elapsed < GENTLE_REMINDER_INTERVAL_MS) continue;
+
+              if (dndActive) continue;
+
+              // Reminder
+              device.lastSeen[handle].gentleState.lastRemindedAt = nowMs;
+              deviceUpdated = true;
+
+              const result = await sendFCMPush(accessToken, projectId, fcmToken, {
+                title: `${channelName} uploaded`,
+                body: video.title,
+                data: {
+                  videoId: video.videoId,
+                  channelName,
+                  handle,
+                  videoLink: video.link,
+                  type: 'new_video',
+                },
+                silent: false,
+              });
+
+              if (result.sent) pushCount++;
+              else if (result.deadToken) { deadTokens.push(key); break; }
+            }
           }
-          deviceUpdated = true;
         }
 
-        // Relentless mode: always push (no gentle state needed)
+        if (deadTokens.includes(key)) break; // Dead token — stop processing this device
+      }
 
-        // Send FCM push
-        const result = await sendFCMPush(accessToken, projectId, fcmToken, {
-          title: `${update.channelName} uploaded`,
-          body: update.title,
-          data: {
-            videoId: update.videoId,
-            channelName: update.channelName,
-            handle: handle,
-            videoLink: update.link,
-            type: 'new_video',
-          },
-          silent,
-        });
+      // Prune stale nag states for videos no longer in the feed
+      if (device.lastSeen) {
+        for (const handle of Object.keys(device.lastSeen)) {
+          const ch = device.channels?.find((c) => c.handle === handle);
+          if (!ch?.channelId) continue;
 
-        if (result.sent) {
-          pushCount++;
-        } else if (result.deadToken) {
-          deadTokens.push(device.key);
-          break; // No point pushing more to a dead token
+          const feed = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + ch.channelId);
+          if (!feed?.videos) continue;
+
+          const feedVideoIds = new Set(feed.videos.map((v) => v.videoId));
+          const nagState = device.lastSeen[handle]?.nagState;
+
+          if (nagState) {
+            for (const videoId of Object.keys(nagState)) {
+              if (!feedVideoIds.has(videoId)) {
+                delete nagState[videoId];
+                deviceUpdated = true;
+              }
+            }
+          }
         }
       }
 
-      // Save updated device state if modified
       if (deviceUpdated) {
-        const { key, ...data } = device;
-        await putKV(env.TUBEPULSE_KV, key, data);
+        await putKV(env.TUBEPULSE_KV, key, device);
       }
     }
 
-    // 7. Prune dead tokens
+    // Prune dead tokens
     for (const key of deadTokens) {
       console.log(`[Cron] Pruning dead token: ${key}`);
       await env.TUBEPULSE_KV.delete(key);
     }
 
     const elapsed = Date.now() - startTime;
-    console.log(`[Cron] Done in ${elapsed}ms. Pushed ${pushCount} notifications. Pruned ${deadTokens.length} dead tokens.`);
+    console.log(`[Cron] Done in ${elapsed}ms. Nag pushes: ${pushCount}. Renewals: ${renewed}. Pruned: ${deadTokens.length}.`);
   },
 };
