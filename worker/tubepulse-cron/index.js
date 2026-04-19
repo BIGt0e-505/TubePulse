@@ -210,6 +210,7 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
           notification: {
             channel_id: payload.silent ? 'new-videos-silent' : 'new-videos',
             sound: payload.silent ? null : 'default',
+            tag: payload.tag || 'tubepulse', // Same tag replaces previous notification
           },
         },
       },
@@ -371,11 +372,6 @@ export default {
               });
             }
             sched.wentLiveNotified = true;
-            if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
-            device.lastSeen[handle].nagState[videoId] = {
-              firstNotifiedAt: nowMs,
-              lastNotifiedAt: nowMs,
-            };
             delete scheduledState[videoId];
             deviceUpdated = true;
           }
@@ -400,14 +396,7 @@ export default {
             const nagState = device.lastSeen[handle].nagState?.[video.videoId];
 
             if (!nagState) {
-              // Not yet notified — send first notification now
-              if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
-              device.lastSeen[handle].nagState[video.videoId] = {
-                firstNotifiedAt: nowMs,
-                lastNotifiedAt: nowMs,
-              };
-              deviceUpdated = true;
-
+              // Not yet notified — include for first notification
               if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
@@ -419,10 +408,7 @@ export default {
               const elapsed = nowMs - (nagState.lastNotifiedAt || 0);
               if (elapsed < nagIntervalMs) continue;
 
-              // Re-nag
-              device.lastSeen[handle].nagState[video.videoId].lastNotifiedAt = nowMs;
-              deviceUpdated = true;
-
+              // Re-nag — include for reminder
               if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
@@ -439,13 +425,6 @@ export default {
 
             if (!gentleState || gentleState.videoId !== video.videoId) {
               // First notification for this video
-              device.lastSeen[handle].gentleState = {
-                videoId: video.videoId,
-                firstNotifiedAt: nowMs,
-                lastRemindedAt: nowMs,
-              };
-              deviceUpdated = true;
-
               if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
@@ -458,9 +437,6 @@ export default {
               if (elapsed < GENTLE_REMINDER_INTERVAL_MS) continue;
 
               // Reminder
-              device.lastSeen[handle].gentleState.lastRemindedAt = nowMs;
-              deviceUpdated = true;
-
               if (!pendingPerChannel[handle]) pendingPerChannel[handle] = { channelName, channelId: ch.channelId, videos: [] };
               pendingPerChannel[handle].videos.push({
                 videoId: video.videoId,
@@ -506,6 +482,7 @@ export default {
             videoLink: video.link,
             type: video.type,
           },
+          tag: `video-${video.videoId}`,
           silent: false,
         });
         if (result.sent) pushCount++;
@@ -533,10 +510,56 @@ export default {
             count: String(totalVideos),
             channels: String(channelNames.length),
           },
+          tag: 'tubepulse-batch', // Replace previous batch notification
           silent: false,
         });
         if (result.sent) pushCount++;
         else if (result.deadToken) deadTokens.push(key);
+      }
+
+      // After sending notifications, update nag/gentle state for all
+      // videos that were included in pendingPerChannel
+      for (const handle of channelHandles) {
+        const videos = pendingPerChannel[handle].videos;
+        const ch = device.channels?.find((c) => c.handle === handle);
+        if (!ch) continue;
+
+        const perChannelEnabled = device.settings?.perChannelNotifications || false;
+        const channelOverride = perChannelEnabled
+          ? device.settings?.channelNotifSettings?.[handle]
+          : null;
+        const effectiveSettings = channelOverride
+          ? { ...device.settings, ...channelOverride }
+          : device.settings;
+        const mode = effectiveSettings?.notificationMode || 'chill';
+
+        if (!device.lastSeen) device.lastSeen = {};
+        if (!device.lastSeen[handle]) device.lastSeen[handle] = { seenIds: [] };
+
+        for (const video of videos) {
+          if (mode === 'relentless') {
+            if (!device.lastSeen[handle].nagState) device.lastSeen[handle].nagState = {};
+            if (device.lastSeen[handle].nagState[video.videoId]) {
+              device.lastSeen[handle].nagState[video.videoId].lastNotifiedAt = nowMs;
+            } else {
+              device.lastSeen[handle].nagState[video.videoId] = {
+                firstNotifiedAt: nowMs,
+                lastNotifiedAt: nowMs,
+              };
+            }
+            deviceUpdated = true;
+          }
+          if (mode === 'chill') {
+            // For chill, only one "current" video tracked per channel
+            // Update the gentle state to the latest video in the batch
+            device.lastSeen[handle].gentleState = {
+              videoId: video.videoId,
+              firstNotifiedAt: device.lastSeen[handle].gentleState?.firstNotifiedAt || nowMs,
+              lastRemindedAt: nowMs,
+            };
+            deviceUpdated = true;
+          }
+        }
       }
 
       // Prune stale nag states for videos no longer in the feed

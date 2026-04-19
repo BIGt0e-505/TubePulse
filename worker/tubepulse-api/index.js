@@ -1170,6 +1170,7 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
           notification: {
             channel_id: payload.silent ? 'new-videos-silent' : 'new-videos',
             sound: payload.silent ? null : 'default',
+            tag: payload.tag || 'tubepulse',
           },
         },
       },
