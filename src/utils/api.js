@@ -132,6 +132,16 @@ export async function fetchFeed(deviceId) {
 }
 
 /**
+ * Bootstrap a newly added channel — fetches RSS + avatar from server.
+ * Returns video data so the app can populate immediately.
+ */
+export async function bootstrapChannel(deviceId, channelId) {
+  return await apiFetch(`/bootstrap?channelId=${encodeURIComponent(channelId)}`, {
+    deviceId,
+  });
+}
+
+/**
  * Resolve a YouTube handle to channelId + name + avatar.
  * Requires authentication — gated to registered devices.
  */

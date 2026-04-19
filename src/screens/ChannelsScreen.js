@@ -128,11 +128,44 @@ export default function ChannelsScreen() {
       await saveChannelCache(existingCache);
       setCache({ ...existingCache });
 
-      // Seed last seen as empty (server will populate on next cron)
+      // Seed last seen as empty
       const lastSeen = await getLastSeen();
       if (!lastSeen[handle]) {
         lastSeen[handle] = { seenIds: [] };
         await saveLastSeen(lastSeen);
+      }
+
+      // Bootstrap: fetch initial RSS data from server
+      try {
+        const deviceId = await getDeviceId();
+        const bootResult = await bootstrapChannel(deviceId, channelId);
+
+        if (bootResult?.ok && bootResult.videos?.length > 0) {
+          // Populate cache with fetched videos
+          const updatedCache = await getChannelCache();
+          updatedCache[handle] = {
+            name: bootResult.name || name,
+            avatar: bootResult.avatar || avatar,
+            videos: bootResult.videos,
+            latestVideo: bootResult.videos[0] || null,
+            channelId,
+            lastChecked: new Date().toISOString(),
+          };
+          await saveChannelCache(updatedCache);
+          setCache({ ...updatedCache });
+
+          // Mark all fetched videos as seen (so user isn't nagged about old content)
+          const updatedLastSeen = await getLastSeen();
+          if (!updatedLastSeen[handle]) updatedLastSeen[handle] = { seenIds: [] };
+          const seenIds = new Set(updatedLastSeen[handle].seenIds || []);
+          for (const v of bootResult.videos) {
+            if (v.videoId) seenIds.add(v.videoId);
+          }
+          updatedLastSeen[handle].seenIds = [...seenIds];
+          await saveLastSeen(updatedLastSeen);
+        }
+      } catch (e) {
+        console.warn('Bootstrap fetch failed:', e);
       }
 
       // Sync channels with API Worker
