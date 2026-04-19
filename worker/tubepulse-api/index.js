@@ -73,6 +73,57 @@ async function putDevice(kv, token, data) {
   await kv.put(KV_PREFIX_DEVICE + token, JSON.stringify(data));
 }
 
+// ─── YouTube RSS ────────────────────────────────────────────────────────
+
+async function fetchYouTubeRSS(channelId) {
+  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const resp = await fetch(feedUrl, { signal: controller.signal });
+    if (!resp.ok) return null;
+
+    const xml = await resp.text();
+    const result = parser.parse(xml);
+    const feed = result.feed;
+    if (!feed || !feed.entry) return { channel: null, videos: [] };
+
+    const entries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+    const channel = {
+      name: feed.author?.name || feed.title || '',
+      uri: feed.author?.uri || '',
+    };
+
+    const videos = entries.map((entry) => {
+      const videoId = entry['yt:videoId'];
+      const link = entry.link?.['@_href'] || `https://www.youtube.com/watch?v=${videoId}`;
+      const mediaGroup = entry['media:group'] || {};
+      const thumbnail = mediaGroup['media:thumbnail']?.['@_url'] || null;
+      const description = mediaGroup['media:description'] || '';
+      const views = mediaGroup['media:community']?.['media:statistics']?.['@_views'] || '0';
+
+      return {
+        videoId,
+        title: entry.title,
+        published: entry.published,
+        updated: entry.updated,
+        link,
+        thumbnail,
+        description,
+        views,
+      };
+    });
+
+    return { channel, videos };
+  } catch (err) {
+    console.error(`RSS fetch error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── WebSub subscription management ────────────────────────────────────
 
 const HUB_URL = 'https://pubsubhubbub.appspot.com/';
@@ -898,6 +949,119 @@ async function handleWebSubPush(request, env, ctx) {
   return new Response('OK', { status: 200 });
 }
 
+// ─── Bootstrap endpoint ─────────────────────────────────────────────────
+
+/**
+ * GET /bootstrap?channelId=UC...
+ * Fetches RSS + avatar for a newly added channel synchronously.
+ * Returns the feed data so the app can populate immediately.
+ */
+async function handleBootstrap(request, env, ctx) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Authentication required', 401);
+
+  const device = await getDevice(env.TUBEPULSE_KV, deviceId);
+  if (!device) return errorResponse('Device not registered', 404);
+
+  const url = new URL(request.url);
+  const channelId = url.searchParams.get('channelId');
+  if (!channelId) return errorResponse('channelId is required');
+
+  // Verify this device tracks this channel
+  const tracks = device.channels?.some((ch) => ch.channelId === channelId);
+  if (!tracks) return errorResponse('Channel not tracked by this device', 404);
+
+  const callbackUrl = `${new URL(request.url).origin}/websub`;
+
+  // Fetch avatar if missing
+  const existingMeta = await getKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId);
+  let meta = existingMeta;
+
+  if (!existingMeta && env.YOUTUBE_API_KEY) {
+    try {
+      const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${channelId}&key=${env.YOUTUBE_API_KEY}`;
+      const chResp = await fetch(apiUrl);
+      if (chResp.ok) {
+        const chData = await chResp.json();
+        if (chData.items?.[0]) {
+          const item = chData.items[0];
+          const thumbs = item.snippet?.thumbnails || {};
+          meta = {
+            name: item.snippet?.title,
+            avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+            lastVideoId: null,
+            lastVideoTitle: null,
+            lastVideoPublished: null,
+            lastChecked: new Date().toISOString(),
+          };
+          await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId, meta);
+        }
+      }
+    } catch (e) {
+      console.warn(`[Bootstrap] Avatar fetch failed for ${channelId}:`, e.message);
+    }
+  }
+
+  // Fetch RSS feed
+  const rssResult = await fetchYouTubeRSS(channelId);
+  let feed = { videos: [], lastFetched: new Date().toISOString() };
+
+  if (rssResult?.videos?.length > 0) {
+    feed = {
+      videos: rssResult.videos.slice(0, 5),
+      lastFetched: new Date().toISOString(),
+    };
+
+    // Update meta with latest video info
+    if (!meta) {
+      meta = {
+        name: rssResult.channel?.name || channelId,
+        avatar: null,
+        lastVideoId: rssResult.videos[0]?.videoId || null,
+        lastVideoTitle: rssResult.videos[0]?.title || null,
+        lastVideoPublished: rssResult.videos[0]?.published || null,
+        lastChecked: new Date().toISOString(),
+      };
+    } else {
+      meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+      meta.lastVideoTitle = rssResult.videos[0]?.title || meta.lastVideoTitle;
+      meta.lastVideoPublished = rssResult.videos[0]?.published || meta.lastVideoPublished;
+      meta.lastChecked = new Date().toISOString();
+    }
+
+    await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_META + channelId, meta);
+    await putKV(env.TUBEPULSE_KV, KV_PREFIX_CHANNEL_FEED + channelId, feed);
+  }
+
+  // Subscribe to WebSub (async, don't block response)
+  ctx.waitUntil((async () => {
+    const subState = await getKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + channelId);
+    if (!subState) {
+      const secret = crypto.randomUUID();
+      const success = await subscribeToChannel(channelId, callbackUrl, secret);
+      if (success) {
+        await putKV(env.TUBEPULSE_KV, KV_PREFIX_SUBSCRIPTION + channelId, {
+          subscribedAt: Date.now(),
+          leaseExpires: Date.now() + 86400 * 5 * 1000,
+          secret,
+        });
+      }
+    }
+  })());
+
+  const channel = device.channels.find((ch) => ch.channelId === channelId);
+  const handle = channel?.handle || channelId;
+
+  return json({
+    ok: true,
+    channelId,
+    handle,
+    name: meta?.name || handle,
+    avatar: meta?.avatar || null,
+    videos: feed.videos,
+  });
+}
+
 // ─── DND logic ──────────────────────────────────────────────────────────
 
 function isDndActive(dndStart, dndEnd) {
@@ -1069,6 +1233,10 @@ export default {
 
       if (path === '/feed' && request.method === 'GET') {
         return await handleFeed(request, env);
+      }
+
+      if (path === '/bootstrap' && request.method === 'GET') {
+        return await handleBootstrap(request, env, ctx);
       }
 
       if (path === '/' && request.method === 'GET') {
