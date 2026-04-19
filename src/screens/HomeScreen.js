@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
-import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache, getGentleNotifState, saveGentleNotifState } from '../utils/storage';
+import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
 import { fetchFeed, markSeen, getDeviceId } from '../utils/api';
 
 export default function HomeScreen({ navigation }) {
@@ -41,11 +41,10 @@ export default function HomeScreen({ navigation }) {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
+      const deviceId = await getDeviceId();
       if (deviceId) {
-        // Fetch from server
         const result = await fetchFeed(deviceId);
         if (result.ok && result.feeds) {
-          // Merge server feed data into local cache, but don't overwrite avatar with null
           const newCache = {};
           for (const [handle, feed] of Object.entries(result.feeds)) {
             const channel = (await getChannels()).find(ch => ch.handle === handle);
@@ -62,13 +61,11 @@ export default function HomeScreen({ navigation }) {
           await saveChannelCache(newCache);
           setCache(newCache);
 
-          // Also update lastSeen from server if available
           if (result.lastSeen) {
             await saveLastSeen(result.lastSeen);
             setLastSeen(result.lastSeen);
           }
 
-          // Update settings from server
           if (result.settings) {
             const { saveSettings } = require('../utils/storage');
             await saveSettings(result.settings);
@@ -76,25 +73,22 @@ export default function HomeScreen({ navigation }) {
           }
         }
       } else {
-        // Fallback: load from local cache
         const ca = await getChannelCache();
         setCache(ca);
       }
     } catch (e) {
       console.warn('Refresh failed:', e);
-      // Fallback to local cache
       const ca = await getChannelCache();
       setCache(ca);
     }
     setRefreshing(false);
 
-    // Update widget
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
+  }, [cache]);
 
-  // Auto-fetch on first open if cache is empty
   const autoFetch = useCallback(async () => {
     const [ch, ca] = await Promise.all([getChannels(), getChannelCache()]);
     if (Object.keys(ca).length === 0 && ch.length > 0) {
@@ -114,7 +108,6 @@ export default function HomeScreen({ navigation }) {
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         loadData();
-        // Refresh from server when coming back to foreground
         refresh();
         try {
           const { requestWidgetUpdate } = require('react-native-android-widget');
@@ -126,7 +119,6 @@ export default function HomeScreen({ navigation }) {
     return () => sub.remove();
   }, [loadData, refresh, autoFetch]);
 
-  // Returns videos sorted newest-first
   const getVideos = (handle) => {
     const cached = cache[handle];
     if (!cached) return [];
@@ -158,10 +150,8 @@ export default function HomeScreen({ navigation }) {
     await saveLastSeen(updatedLastSeen);
     setLastSeen(updatedLastSeen);
 
-    // Mark seen on server
-    if (deviceId) {
-      markSeen(deviceId, key, allIds).catch(() => {});
-    }
+    const deviceId = await getDeviceId();
+    markSeen(deviceId, key, [], true).catch(() => {});
 
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     try {
@@ -182,9 +172,8 @@ export default function HomeScreen({ navigation }) {
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
 
-      if (deviceId) {
-        markSeen(deviceId, key, allIds).catch(() => {});
-      }
+      const deviceId = await getDeviceId();
+      markSeen(deviceId, key, [], true).catch(() => {});
 
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     } else {
@@ -197,9 +186,8 @@ export default function HomeScreen({ navigation }) {
         await saveLastSeen(updatedLastSeen);
         setLastSeen(updatedLastSeen);
 
-        if (deviceId) {
-          markSeen(deviceId, key, [video.videoId]).catch(() => {});
-        }
+        const deviceId = await getDeviceId();
+        markSeen(deviceId, key, [video.videoId]).catch(() => {});
 
         Linking.openURL(video.link);
       }
@@ -221,9 +209,8 @@ export default function HomeScreen({ navigation }) {
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
 
-      if (deviceId) {
-        markSeen(deviceId, key, [video.videoId]).catch(() => {});
-      }
+      const deviceId = await getDeviceId();
+      markSeen(deviceId, key, [video.videoId]).catch(() => {});
     }
     Linking.openURL(video.link);
     try {
