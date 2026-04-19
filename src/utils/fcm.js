@@ -12,6 +12,18 @@ import { Platform } from 'react-native';
 const API_URL = 'https://tubepulse-api.aaronjoakley55.workers.dev';
 
 /**
+ * Get the current FCM token without requesting permissions.
+ * Returns null if not available.
+ */
+export async function getFCMToken() {
+  try {
+    return await messaging().getToken();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Request notification permissions and get FCM token.
  * Returns the token string, or null if permission denied.
  */
