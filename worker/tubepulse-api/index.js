@@ -531,8 +531,16 @@ async function handleSeen(request, env) {
     const existing = new Set(device.lastSeen[handle].seenIds || []);
     for (const id of videoIds) {
       existing.add(id);
+      // Remove from nagState so cron stops re-nagging this video
+      if (device.lastSeen[handle].nagState?.[id]) {
+        delete device.lastSeen[handle].nagState[id];
+      }
     }
     device.lastSeen[handle].seenIds = [...existing];
+    // If gentle state is for one of these videos, clear it
+    if (device.lastSeen[handle].gentleState && videoIds.includes(device.lastSeen[handle].gentleState.videoId)) {
+      delete device.lastSeen[handle].gentleState;
+    }
   } else {
     return errorResponse('Provide videoIds array or clearAll: true');
   }
@@ -540,6 +548,12 @@ async function handleSeen(request, env) {
   // Clear gentle/nag state for this channel
   if (device.lastSeen[handle].gentleState) {
     delete device.lastSeen[handle].gentleState;
+  }
+  if (device.lastSeen[handle].nagState) {
+    delete device.lastSeen[handle].nagState;
+  }
+  if (device.lastSeen[handle].scheduledState) {
+    delete device.lastSeen[handle].scheduledState;
   }
 
   device.lastActiveAt = Date.now();
