@@ -64,19 +64,26 @@ export default function App() {
 
           await registerDevice(deviceId, fcmToken, channels, settings);
 
-          // Bootstrap default channels on first run (populate feed data + mark as seen)
+          // Bootstrap channels that have no cached videos yet
           if (channels.length > 0) {
             const { bootstrapChannel } = require('./src/utils/api');
             const { getChannelCache, saveChannelCache } = require('./src/utils/storage');
             const { getLastSeen, saveLastSeen } = require('./src/utils/storage');
 
+            const cache = await getChannelCache();
+            let cacheUpdated = false;
+            const lastSeen = await getLastSeen();
+            let lastSeenUpdated = false;
+
             for (const ch of channels) {
               if (!ch.channelId) continue;
+              // Skip channels that already have cached videos
+              if (cache[ch.handle]?.videos?.length > 0) continue;
+
               try {
                 const result = await bootstrapChannel(deviceId, ch.channelId);
                 if (result?.ok && result.videos?.length > 0) {
                   const handle = ch.handle;
-                  const cache = await getChannelCache();
                   cache[handle] = {
                     name: result.name || ch.name || handle,
                     avatar: result.avatar || cache[handle]?.avatar || null,
@@ -85,21 +92,23 @@ export default function App() {
                     channelId: ch.channelId,
                     lastChecked: new Date().toISOString(),
                   };
-                  await saveChannelCache(cache);
+                  cacheUpdated = true;
 
-                  const lastSeen = await getLastSeen();
                   if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
                   const seenIds = new Set(lastSeen[handle].seenIds || []);
                   for (const v of result.videos) {
                     if (v.videoId) seenIds.add(v.videoId);
                   }
                   lastSeen[handle].seenIds = [...seenIds];
-                  await saveLastSeen(lastSeen);
+                  lastSeenUpdated = true;
                 }
               } catch (e) {
                 console.warn(`Bootstrap failed for ${ch.handle}:`, e);
               }
             }
+
+            if (cacheUpdated) await saveChannelCache(cache);
+            if (lastSeenUpdated) await saveLastSeen(lastSeen);
           }
         }
       } catch (e) {

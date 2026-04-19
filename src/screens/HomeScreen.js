@@ -49,11 +49,15 @@ export default function HomeScreen({ navigation }) {
           for (const [handle, feed] of Object.entries(result.feeds)) {
             const channel = (await getChannels()).find(ch => ch.handle === handle);
             const existingEntry = cache[handle] || {};
+            const serverVideos = feed.videos || [];
+            // Don't overwrite local cache if we have more data than the server
+            const localVideos = existingEntry.videos || [];
+            const videos = serverVideos.length >= localVideos.length ? serverVideos : localVideos;
             newCache[handle] = {
               name: feed.name || existingEntry.name,
               avatar: feed.avatar || existingEntry.avatar || null,
-              videos: feed.videos || [],
-              latestVideo: feed.videos?.[0] || null,
+              videos,
+              latestVideo: videos[0] || null,
               channelId: channel?.channelId || null,
               lastChecked: feed.lastChecked,
             };
