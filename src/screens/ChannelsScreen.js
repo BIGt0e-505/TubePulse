@@ -135,6 +135,14 @@ export default function ChannelsScreen() {
         await saveLastSeen(lastSeen);
       }
 
+      // Sync channels with API Worker first (so server knows about the channel)
+      try {
+        const deviceId = await getDeviceId();
+        await updateChannels(deviceId, updated);
+      } catch (e) {
+        console.warn('Failed to sync channels with server:', e);
+      }
+
       // Bootstrap: fetch initial RSS data from server
       try {
         const deviceId = await getDeviceId();
@@ -166,14 +174,6 @@ export default function ChannelsScreen() {
         }
       } catch (e) {
         console.warn('Bootstrap fetch failed:', e);
-      }
-
-      // Sync channels with API Worker
-      try {
-        const deviceId = await getDeviceId();
-        await updateChannels(deviceId, updated);
-      } catch (e) {
-        console.warn('Failed to sync channels with server:', e);
       }
 
       // Update widget
