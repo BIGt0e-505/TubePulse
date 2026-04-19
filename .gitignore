@@ -5,3 +5,4 @@ node_modules/
 worker/tubepulse-fcm-service-account.json
 .firebaserc
 firebase-debug.log
+worker/tubepulse-cron/.wrangler/
