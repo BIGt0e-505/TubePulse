@@ -9,9 +9,12 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 ### 📺 Channel Tracking
 - Add channels by handle (`@handle`) — no URLs, no pasting video links
 - Resolves handles to channel IDs via YouTube Data API v3 (proxied through Cloudflare Worker)
+- **Channel ID is the primary key** — handles can change, but channel IDs don't. Once resolved at add-time, the channel is tracked by ID even if the creator rebrands.
 - Draggable channel list — reorder by priority
 - Per-channel avatars cached locally
-- Pre-seeded with MattO and DND Rebecca AFTG (remove or add your own)
+- Comes with two default channels to get you started — remove or add your own
+
+> **Note:** Each device registers independently. There's no cross-device sync — if you install TubePulse on two phones, each manages its own channel list and settings.
 
 ### ⚡ WebSub Push Detection
 TubePulse doesn't poll YouTube. It uses **WebSub** (PubSubHubbub) — YouTube pushes to us the instant a video drops. This means:
@@ -19,9 +22,11 @@ TubePulse doesn't poll YouTube. It uses **WebSub** (PubSubHubbub) — YouTube pu
 - **Zero polling** — no wasted RSS fetches, no battery drain
 - **Instant detection** — new videos appear within seconds of upload
 - **Infinite scalability** — 1 user or 10,000, same server cost
-- **No YouTube API quota** for video detection — RSS only, API reserved for channel avatars
+- **No YouTube API quota** for video detection — Atom feeds only, API reserved for channel avatars
 
-When a channel is added, TubePulse subscribes to its WebSub feed. YouTube sends a verification handshake, then pushes an Atom XML payload whenever new content is published. The last device to remove a channel triggers an unsubscribe.
+When a channel is added, TubePulse subscribes to its WebSub feed. YouTube sends a verification handshake, then pushes an Atom XML payload whenever new content is published. WebSub leases expire (typically 5 days), so a cron job renews subscriptions 24 hours before expiry. The last device to remove a channel triggers an unsubscribe.
+
+**Known limitation:** YouTube's Atom feed doesn't distinguish Shorts, premieres, or livestreams from regular uploads. TubePulse will notify about all of them. Premieres can appear with a `<published>` time in the future (their scheduled start), so they may trigger a notification before they actually air.
 
 ### 🔔 Smart Notifications
 
