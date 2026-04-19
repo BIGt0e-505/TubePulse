@@ -9,7 +9,7 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
 import { getSettings, getLastSeen, saveLastSeen } from './src/utils/storage';
 import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNotificationOpenedApp, getInitialNotification, setBackgroundMessageHandler } from './src/utils/fcm';
-import { registerDevice, markSeen } from './src/utils/api';
+import { registerDevice, markSeen, getDeviceId } from './src/utils/api';
 import { setupNotificationChannel } from './src/utils/notifications';
 
 const Stack = createNativeStackNavigator();
@@ -33,12 +33,12 @@ function HeaderButton({ title, onPress, style }) {
 
 // Background message handler — must be registered at top level
 setBackgroundMessageHandler(async (remoteMessage) => {
-  // FCM handles displaying the notification. We just log it.
   console.log('Background push received:', remoteMessage.messageId);
 });
 
 export default function App() {
   const fcmTokenRef = useRef(null);
+  const deviceIdRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -46,10 +46,14 @@ export default function App() {
         // Set up Android notification channels
         await setupNotificationChannel();
 
+        // Get persistent device ID
+        const deviceId = await getDeviceId();
+        deviceIdRef.current = deviceId;
+
         // Request permission and get FCM token
-        const token = await requestPermissionAndGetToken();
-        if (token) {
-          fcmTokenRef.current = token;
+        const fcmToken = await requestPermissionAndGetToken();
+        if (fcmToken) {
+          fcmTokenRef.current = fcmToken;
 
           // Register with API Worker
           const { getChannels, getSettings } = require('./src/utils/storage');
@@ -58,33 +62,32 @@ export default function App() {
             getSettings(),
           ]);
 
-          await registerDevice(token, channels, settings);
+          await registerDevice(deviceId, fcmToken, channels, settings);
         }
       } catch (e) {
         console.warn('Init error:', e);
       }
     })();
 
-    // Handle token refresh — re-register with API Worker
+    // Handle token refresh — re-register with updated FCM token
     const tokenUnsubscribe = onTokenRefresh(async (newToken) => {
       fcmTokenRef.current = newToken;
       try {
+        const deviceId = deviceIdRef.current || await getDeviceId();
         const { getChannels, getSettings } = require('./src/utils/storage');
         const [channels, settings] = await Promise.all([
           getChannels(),
           getSettings(),
         ]);
-        await registerDevice(newToken, channels, settings);
+        await registerDevice(deviceId, newToken, channels, settings);
       } catch (e) {
         console.warn('Token refresh re-register failed:', e);
       }
     });
 
-    // Handle foreground messages — update UI if on Home screen
+    // Handle foreground messages
     const foregroundUnsubscribe = onForegroundMessage(async (remoteMessage) => {
       console.log('Foreground push:', remoteMessage?.data?.videoId);
-      // Foreground messages don't auto-display — the notification tray will handle it
-      // for background, but in foreground we just log. The user can pull-to-refresh.
     });
 
     // Handle notification tap (app opened from notification)
@@ -94,23 +97,19 @@ export default function App() {
 
       try {
         const settings = await getSettings();
+        const deviceId = deviceIdRef.current || await getDeviceId();
 
-        if (fcmTokenRef.current) {
-          if (settings.tapAction === 'channel') {
-            // Channel tap: mark all videos for this channel as seen
-            await markSeen(fcmTokenRef.current, data.handle, [], true);
-          } else {
-            // Video tap: mark this specific video as seen
-            await markSeen(fcmTokenRef.current, data.handle, [data.videoId]);
-          }
+        if (settings.tapAction === 'channel') {
+          await markSeen(deviceId, data.handle, [], true);
+        } else {
+          await markSeen(deviceId, data.handle, [data.videoId]);
         }
 
-        // Also update local state
+        // Update local state
         const lastSeen = await getLastSeen();
         if (!lastSeen[data.handle]) lastSeen[data.handle] = { seenIds: [] };
 
         if (settings.tapAction === 'channel') {
-          // Mark all current feed videos as seen locally
           const { getChannels, getChannelCache } = require('./src/utils/storage');
           const channels = await getChannels();
           const ch = channels.find((c) => c.handle === data.handle);
@@ -130,7 +129,6 @@ export default function App() {
           }
         }
 
-        // Clear gentle/nag state for this handle
         delete lastSeen[data.handle]?.gentleState;
         delete lastSeen[data.handle]?.nagState;
         await saveLastSeen(lastSeen);

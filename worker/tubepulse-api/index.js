@@ -44,7 +44,7 @@ function errorResponse(message, status = 400) {
 
 // ─── Auth ───────────────────────────────────────────────────────────────
 
-function getFcmToken(request) {
+function getDeviceId(request) {
   const auth = request.headers.get('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) return null;
   return auth.slice(7).trim();
@@ -185,8 +185,8 @@ function parseWebSubPush(xmlText) {
  * Also ensures WebSub subscriptions exist for all tracked channels.
  */
 async function handleRegister(request, env, ctx) {
-  const token = getFcmToken(request);
-  if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
 
   let body;
   try {
@@ -195,21 +195,23 @@ async function handleRegister(request, env, ctx) {
     return errorResponse('Invalid JSON body');
   }
 
-  const { channels = [], settings = {} } = body;
+  const { fcmToken, channels = [], settings = {} } = body;
 
+  if (!fcmToken) return errorResponse('fcmToken is required');
   if (!Array.isArray(channels)) return errorResponse('channels must be an array');
 
   for (const ch of channels) {
     if (!ch.handle) return errorResponse('Each channel must have a handle');
   }
 
-  const existing = await getDevice(env.TUBEPULSE_KV, token);
+  const existing = await getDevice(env.TUBEPULSE_KV, deviceId);
   const now = Date.now();
 
   const device = {
+    fcmToken, // mutable — updated on token refresh
     channels,
     settings: {
-      notificationMode: settings.notificationMode || 'relentless',
+      notificationMode: settings.notificationMode || 'chill',
       nagInterval: settings.nagInterval || 15,
       includeCommunityPosts: settings.includeCommunityPosts || false,
       dndEnabled: settings.dndEnabled || false,
@@ -224,7 +226,7 @@ async function handleRegister(request, env, ctx) {
     lastActiveAt: now,
   };
 
-  await putDevice(env.TUBEPULSE_KV, token, device);
+  await putDevice(env.TUBEPULSE_KV, deviceId, device);
 
   // Auto-refresh channel avatars on first register + ensure WebSub subscriptions
   const callbackUrl = `${new URL(request.url).origin}/websub`;
@@ -283,8 +285,8 @@ async function handleRegister(request, env, ctx) {
  * Updates the channel list. Handles WebSub subscribe/unsubscribe.
  */
 async function handleChannels(request, env, ctx) {
-  const token = getFcmToken(request);
-  if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
 
   let body;
   try {
@@ -293,21 +295,24 @@ async function handleChannels(request, env, ctx) {
     return errorResponse('Invalid JSON body');
   }
 
-  const { channels = [] } = body;
+  const { channels = [], fcmToken } = body;
   if (!Array.isArray(channels)) return errorResponse('channels must be an array');
   for (const ch of channels) {
     if (!ch.handle) return errorResponse('Each channel must have a handle');
   }
 
-  const device = await getDevice(env.TUBEPULSE_KV, token);
+  const device = await getDevice(env.TUBEPULSE_KV, deviceId);
   if (!device) return errorResponse('Device not registered', 404);
+
+  // Update FCM token if provided (on token refresh)
+  if (fcmToken) device.fcmToken = fcmToken;
 
   const oldChannelIds = new Set((device.channels || []).map((ch) => ch.channelId).filter(Boolean));
   const newChannelIds = new Set(channels.map((ch) => ch.channelId).filter(Boolean));
 
   device.channels = channels;
   device.lastActiveAt = Date.now();
-  await putDevice(env.TUBEPULSE_KV, token, device);
+  await putDevice(env.TUBEPULSE_KV, deviceId, device);
 
   const callbackUrl = `${new URL(request.url).origin}/websub`;
   ctx.waitUntil((async () => {
@@ -374,8 +379,8 @@ async function handleChannels(request, env, ctx) {
  * Body: { settings: {...} }
  */
 async function handleSettings(request, env) {
-  const token = getFcmToken(request);
-  if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
 
   let body;
   try {
@@ -386,12 +391,12 @@ async function handleSettings(request, env) {
 
   const { settings = {} } = body;
 
-  const device = await getDevice(env.TUBEPULSE_KV, token);
+  const device = await getDevice(env.TUBEPULSE_KV, deviceId);
   if (!device) return errorResponse('Device not registered', 404);
 
   device.settings = { ...device.settings, ...settings };
   device.lastActiveAt = Date.now();
-  await putDevice(env.TUBEPULSE_KV, token, device);
+  await putDevice(env.TUBEPULSE_KV, deviceId, device);
 
   return json({ ok: true });
 }
@@ -402,8 +407,8 @@ async function handleSettings(request, env) {
  *    or { handle: string, clearAll: true }         — clear all unwatched for channel (channel tap)
  */
 async function handleSeen(request, env) {
-  const token = getFcmToken(request);
-  if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
 
   let body;
   try {
@@ -415,7 +420,7 @@ async function handleSeen(request, env) {
   const { handle, videoIds, clearAll } = body;
   if (!handle) return errorResponse('handle is required');
 
-  const device = await getDevice(env.TUBEPULSE_KV, token);
+  const device = await getDevice(env.TUBEPULSE_KV, deviceId);
   if (!device) return errorResponse('Device not registered', 404);
 
   if (!device.lastSeen) device.lastSeen = {};
@@ -452,7 +457,7 @@ async function handleSeen(request, env) {
   }
 
   device.lastActiveAt = Date.now();
-  await putDevice(env.TUBEPULSE_KV, token, device);
+  await putDevice(env.TUBEPULSE_KV, deviceId, device);
 
   return json({ ok: true, seenCount: device.lastSeen[handle].seenIds.length });
 }
@@ -462,14 +467,14 @@ async function handleSeen(request, env) {
  * Returns current feed data for all channels the device tracks.
  */
 async function handleFeed(request, env) {
-  const token = getFcmToken(request);
-  if (!token) return errorResponse('Missing Authorization: Bearer <fcm-token>', 401);
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse("Missing Authorization: Bearer <device-id>"', 401);
 
-  const device = await getDevice(env.TUBEPULSE_KV, token);
+  const device = await getDevice(env.TUBEPULSE_KV, deviceId);
   if (!device) return errorResponse('Device not registered', 404);
 
   device.lastActiveAt = Date.now();
-  await putDevice(env.TUBEPULSE_KV, token, device);
+  await putDevice(env.TUBEPULSE_KV, deviceId, device);
 
   const feeds = {};
   const channelIds = device.channels
@@ -509,6 +514,13 @@ async function handleFeed(request, env) {
  * GET /resolve?handle=@mkbhd
  */
 async function handleResolve(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Authentication required', 401);
+
+  // Verify device is registered
+  const device = await getDevice(env.TUBEPULSE_KV, deviceId);
+  if (!device) return errorResponse('Device not registered', 404);
+
   const url = new URL(request.url);
   const handle = url.searchParams.get('handle');
   const channelId = url.searchParams.get('channelId');
@@ -719,7 +731,7 @@ async function handleWebSubPush(request, env, ctx) {
       );
       if (!tracksChannel) continue;
 
-      const fcmToken = key.replace(KV_PREFIX_DEVICE, '');
+      const fcmToken = device.fcmToken;
       const handle = device.channels.find(
         (ch) => ch.channelId === channelId
       )?.handle;
@@ -739,7 +751,7 @@ async function handleWebSubPush(request, env, ctx) {
         ? { ...device.settings, ...channelOverride }
         : device.settings;
 
-      const mode = effectiveSettings?.notificationMode || 'relentless';
+      const mode = effectiveSettings?.notificationMode || 'chill';
 
       if (isScheduled) {
         // Scheduled premiere/live — store as pending, don't notify now
@@ -754,7 +766,7 @@ async function handleWebSubPush(request, env, ctx) {
           notified: false,       // haven't sent "upcoming" yet
           wentLiveNotified: false, // haven't sent "now available" yet
         };
-        await putDevice(env.TUBEPULSE_KV, fcmToken, device);
+        await putDevice(env.TUBEPULSE_KV, key, device);
         console.log(`[WebSub] Stored scheduled event ${newVideoId} for ${handle} (airs ${new Date(publishedTime).toISOString()})`);
         continue;
       }
@@ -787,7 +799,7 @@ async function handleWebSubPush(request, env, ctx) {
           firstNotifiedAt: Date.now(),
           lastRemindedAt: Date.now(),
         };
-        await putDevice(env.TUBEPULSE_KV, fcmToken, device);
+        await putDevice(env.TUBEPULSE_KV, key, device);
       }
 
       if (mode === 'relentless') {
@@ -798,7 +810,7 @@ async function handleWebSubPush(request, env, ctx) {
           firstNotifiedAt: Date.now(),
           lastNotifiedAt: Date.now(),
         };
-        await putDevice(env.TUBEPULSE_KV, fcmToken, device);
+        await putDevice(env.TUBEPULSE_KV, key, device);
       }
 
       // Send push
