@@ -75,24 +75,29 @@ This is the key interaction: video tap for "I've seen this one", channel tap for
 
 ## Architecture
 
-### Overview
+### Overview — v3.0 (channel-first)
 
 ```
 YouTube ──WebSub push──▶ API Worker ──FCM push──▶ Phone
                                 │
                                 ▼
                           Cloudflare KV
-                          (devices, feeds,
-                           subscriptions)
+                          (devices, channels,
+                           subscribers, state,
+                           time buckets)
                                 │
                                 ▼
-                     Cron Worker (5 min)
-                     ┌─────────────────┐
-                     │ 1. Nag cycle    │ ← re-notify unwatched videos
-                     │ 2. WebSub lease │ ← renew expiring subscriptions
-                     │    renewal      │
-                     └─────────────────┘
+                     Cron Worker (*/5)
+                     ┌─────────────────────┐
+                     │ */5  upcoming events  │ ← scheduled livestream reminders
+                     │ */15 nag bucket       │ ← re-notify unwatched videos
+                     │ 0*/6 lease renewal   │ ← renew WebSub subscriptions
+                     └─────────────────────┘
 ```
+
+**Key principle:** Channels are the unit of work. Devices are the unit of subscription.  
+Every operation asks "what's happening to this channel" first, then "who cares about this channel".  
+This inverts the old device-first approach and eliminates `KV.list()` entirely.
 
 ### API Worker (`tubepulse-api`)
 
@@ -100,14 +105,17 @@ The central Cloudflare Worker. Handles:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/register` | POST | Register/update device (FCM token + channels + settings). Triggers WebSub subscribe for new channels and fetches avatars via YouTube API on first add. |
-| `/channels` | PUT | Update channel list. Subscribes to new channels, unsubscribes from removed ones (if no other device tracks them). |
-| `/settings` | PUT | Update notification settings (nag interval, mode, DND, per-channel overrides). |
-| `/seen` | POST | Mark videos as watched. `{ handle, videoIds }` for video tap, `{ handle, clearAll: true }` for channel tap. |
+| `/register` | POST | Register/update device profile (FCM token). Idempotent — safe to call on every launch. |
+| `/subscribe-channel` | POST | Add a channel to this device. Triggers WebSub subscribe + bootstrap for new channels. |
+| `/unsubscribe` | POST | Remove a channel from this device. Triggers WebSub unsubscribe if last subscriber. |
+| `/seen` | POST | Mark videos as watched. `{ channelId, videoIds }` for video tap, `{ channelId, clearAll: true }` for channel tap. |
 | `/feed` | GET | Fetch current video data for all tracked channels (reads from KV cache). |
 | `/resolve` | GET | Resolve `@handle` → channelId + name + avatar (YouTube Data API, key stays server-side). |
+| `/bootstrap` | POST | Fetch RSS + avatar for a newly added channel synchronously. |
+| `/settings` | POST | Update notification settings (full replacement). |
+| `/channel-override` | POST | Set/update per-channel notification override. Empty override deletes it. |
 | `/websub` | GET | WebSub verification handshake — responds with `hub.challenge`. |
-| `/websub` | POST | WebSub push from YouTube — parses Atom XML, updates feed cache, sends immediate FCM notifications to eligible devices. |
+| `/websub` | POST | WebSub push from YouTube — parses Atom XML, updates recent list, sends FCM notifications, schedules nag. |
 
 **WebSub push handling:**
 1. Parse incoming Atom XML for video entries
@@ -147,25 +155,37 @@ WebSub subscriptions expire (typically 4–10 days). The cron renews any subscri
 3. If expiring within 24h, send a subscribe request to the PubSubHubbub hub
 4. The hub sends a GET verification to `/websub`, which updates the lease expiry
 
-### Data Model (Cloudflare KV)
+### Data Model (Cloudflare KV) — v3.0
 
-| Key Prefix | Contents |
-|-----------|----------|
-| `device:<uuid>` | Device record: fcmToken (mutable), channels, settings, lastSeen (seenIds, nagState, gentleState, scheduledState) |
-| `channel:<channelId>` | Channel meta: name, avatar, lastVideoId, lastChecked |
-| `feed:<channelId>` | Cached feed: top 5 videos with thumbnails |
-| `sub:<channelId>` | WebSub subscription: subscribedAt, leaseExpires |
+| Key Pattern | Contents |
+|-------------|----------|
+| `channel:{channelId}:meta` | Channel name, avatarUrl, lastVideoId, addedAt |
+| `channel:{channelId}:subscribers` | Array of deviceIds tracking this channel |
+| `channel:{channelId}:websub` | WebSub state: leaseExpiresAt, hmacSecret, lastVerified |
+| `channel:{channelId}:recent` | Last 15 videos: videoId, title, publishedAt, type, thumbnail, link |
+| `device:{deviceId}:profile` | fcmToken, platform, appVersion, createdAt, lastSeenAt |
+| `device:{deviceId}:settings` | mode, nagInterval, dndStart, dndEnd, tapAction, etc. |
+| `device:{deviceId}:channels` | Array of channelIds this device tracks |
+| `device:{deviceId}:override:{channelId}` | Per-channel overrides: mode?, nagInterval?, dndBypass?, muted? |
+| `device:{deviceId}:state:{channelId}` | Per-device per-channel state: unwatched[], lastNagAt, nagCount |
+| `upcoming:{bucket}` | Scheduled event entries for a 5-min window |
+| `nag:{bucket}` | Nag entries for a 15-min window |
+| `channels:active` | Index of all channels with at least one subscriber |
+| `handle:{lowercase}` | Cached handle→channelId resolution (7-day TTL) |
+
+**Zero `KV.list()` calls.** The `channels:active` index replaces all list operations.
 
 ### App → Server Communication
 
-1. **On launch**: `POST /register` with FCM token, channels, and settings
-2. **On channel add**: `PUT /channels` with updated list → triggers WebSub subscribe
-3. **On channel remove**: `PUT /channels` → triggers WebSub unsubscribe if no other device tracks it
-4. **On settings change**: `PUT /settings` with updated settings
-5. **On notification tap**:
-   - Video tap → `POST /seen { handle, videoIds: [id] }`
-   - Channel tap → `POST /seen { handle, clearAll: true }`
-6. **On feed refresh**: `GET /feed` → returns cached data from KV
+1. **On launch**: `POST /register` with FCM token (profile only)
+2. **On channel add**: `POST /subscribe-channel` with channelId → triggers WebSub subscribe + bootstrap
+3. **On channel remove**: `POST /unsubscribe` with channelId → triggers WebSub unsubscribe if last subscriber
+4. **On settings change**: `POST /settings` with updated settings
+5. **On per-channel override**: `POST /channel-override` with channelId + override
+6. **On notification tap**:
+   - Video tap → `POST /seen { channelId, videoIds: [id] }`
+   - Channel tap → `POST /seen { channelId, clearAll: true }`
+7. **On feed refresh**: `GET /feed` → returns cached data from KV
 
 **Device identity:** Each device generates a persistent UUID on first launch. This UUID is the auth token and primary key — independent of the FCM token, which is stored as a mutable field on the device record and updated on token refresh. This avoids orphan records when FCM tokens rotate.
 
@@ -233,20 +253,22 @@ TubePulse/
 │   │   ├── TubePulseWidget.js     # Android home screen widget
 │   │   └── TimeSpinner.js        # DND time picker
 │   ├── utils/
-│   │   ├── api.js                 # REST client for the Cloudflare Worker
+│   │   ├── api.js                 # REST client for the Cloudflare Worker (v3 endpoints)
 │   │   ├── notifications.js      # Android notification channels
 │   │   ├── fcm.js                # Firebase Cloud Messaging setup + handlers
-│   │   ├── storage.js            # AsyncStorage wrapper + pollInterval→nagInterval migration
+│   │   ├── storage.js            # AsyncStorage wrapper
 │   │   └── constants.js          # Colours, defaults, nag intervals, storage keys
 │   └── App.js                    # Navigation, FCM setup, notification tap handling
 ├── worker/
 │   ├── tubepulse-api/
-│   │   ├── index.js              # API Worker — app endpoints + WebSub callback
+│   │   ├── index.js              # API Worker — v3 channel-first architecture
 │   │   └── wrangler.toml
 │   ├── tubepulse-cron/
-│   │   ├── index.js              # Cron Worker — nag cycle + WebSub lease renewal
+│   │   ├── index.js              # Cron Worker — time-bucket driven (upcoming/nag/lease)
 │   │   └── wrangler.toml
 │   └── tubepulse-fcm-service-account.json
+├── ARCHITECTURE.md                # v3 architecture specification
+├── STATUS.md                      # Project status and version history
 ├── app.json                       # Expo config
 └── package.json
 ```

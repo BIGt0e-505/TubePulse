@@ -24,7 +24,7 @@ import {
   getSettings,
   getChannelNotifSettings, saveChannelNotifSettings,
 } from '../utils/storage';
-import { resolveHandle, updateChannels, registerDevice, getDeviceId } from '../utils/api';
+import { resolveHandle, subscribeChannel, unsubscribeChannel, registerDevice, getDeviceId, setChannelOverride, bootstrapChannel } from '../utils/api';
 import { getFCMToken } from '../utils/fcm';
 import TimeSpinner from '../components/TimeSpinner';
 
@@ -70,6 +70,18 @@ export default function ChannelsScreen() {
     const updated = { ...channelNotifSettings, [editingChannel]: editingNotif };
     setChannelNotifSettings(updated);
     await saveChannelNotifSettings(updated);
+
+    // Sync override with server
+    try {
+      const deviceId = await getDeviceId();
+      const ch = channels.find((c) => c.handle === editingChannel);
+      if (ch?.channelId) {
+        await setChannelOverride(deviceId, ch.channelId, editingNotif);
+      }
+    } catch (e) {
+      console.warn('Failed to sync channel override:', e);
+    }
+
     setEditingChannel(null);
   };
 
@@ -78,6 +90,18 @@ export default function ChannelsScreen() {
     delete updated[editingChannel];
     setChannelNotifSettings(updated);
     await saveChannelNotifSettings(updated);
+
+    // Delete override on server (empty override = inherit from device settings)
+    try {
+      const deviceId = await getDeviceId();
+      const ch = channels.find((c) => c.handle === editingChannel);
+      if (ch?.channelId) {
+        await setChannelOverride(deviceId, ch.channelId, {});
+      }
+    } catch (e) {
+      console.warn('Failed to reset channel override:', e);
+    }
+
     setEditingChannel(null);
   };
 
@@ -103,7 +127,7 @@ export default function ChannelsScreen() {
       const { getChannels, getSettings } = require('../utils/storage');
       const fcmToken = await getFCMToken();
       if (fcmToken) {
-        await registerDevice(deviceId, fcmToken, await getChannels(), await getSettings());
+        await registerDevice(deviceId, fcmToken);
       }
 
       const result = await resolveHandle(deviceId, handle);
@@ -155,12 +179,23 @@ export default function ChannelsScreen() {
         await saveLastSeen(lastSeen);
       }
 
-      // Sync channels with API Worker first (so server knows about the channel)
+      // Subscribe to channel on server (triggers WebSub + bootstrap)
       try {
         const deviceId = await getDeviceId();
-        await updateChannels(deviceId, updated);
+        const subResult = await subscribeChannel(deviceId, channelId);
+        if (subResult?.ok && !subResult.alreadySubscribed && subResult.channel?.meta) {
+          // Server returned channel meta — update cache
+          const updatedCache = await getChannelCache();
+          updatedCache[handle] = {
+            ...updatedCache[handle],
+            name: subResult.channel.meta.name || name,
+            avatar: subResult.channel.meta.avatarUrl || avatar,
+          };
+          await saveChannelCache(updatedCache);
+          setCache({ ...updatedCache });
+        }
       } catch (e) {
-        console.warn('Failed to sync channels with server:', e);
+        console.warn('Failed to subscribe channel on server:', e);
       }
 
       // Bootstrap: fetch initial RSS data from server
@@ -219,16 +254,19 @@ export default function ChannelsScreen() {
           text: 'Remove',
           style: 'destructive',
           onPress: async () => {
+            const removed = channels.find((c) => c.handle === handle);
             const updated = channels.filter((c) => c.handle !== handle);
             await saveChannels(updated);
             setChannels(updated);
 
-            // Sync with API Worker
+            // Unsubscribe from server
             try {
               const deviceId = await getDeviceId();
-              await updateChannels(deviceId, updated);
+              if (removed?.channelId) {
+                await unsubscribeChannel(deviceId, removed.channelId);
+              }
             } catch (e) {
-              console.warn('Failed to sync channel removal with server:', e);
+              console.warn('Failed to unsubscribe from server:', e);
             }
           },
         },
@@ -239,14 +277,7 @@ export default function ChannelsScreen() {
   const onDragEnd = async ({ data }) => {
     setChannels(data);
     await saveChannels(data);
-
-    // Sync with API Worker
-    try {
-      const deviceId = await getDeviceId();
-      await updateChannels(deviceId, data);
-    } catch (e) {
-      console.warn('Failed to sync channel reorder with server:', e);
-    }
+    // Channel order is a local preference — no server sync needed
   };
 
   const renderItem = ({ item, drag, isActive }) => {

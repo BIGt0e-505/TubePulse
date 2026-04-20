@@ -55,61 +55,8 @@ export default function App() {
         if (fcmToken) {
           fcmTokenRef.current = fcmToken;
 
-          // Register with API Worker
-          const { getChannels, getSettings } = require('./src/utils/storage');
-          const [channels, settings] = await Promise.all([
-            getChannels(),
-            getSettings(),
-          ]);
-
-          await registerDevice(deviceId, fcmToken, channels, settings);
-
-          // Bootstrap channels that have no cached videos yet
-          if (channels.length > 0) {
-            const { bootstrapChannel } = require('./src/utils/api');
-            const { getChannelCache, saveChannelCache } = require('./src/utils/storage');
-            const { getLastSeen, saveLastSeen } = require('./src/utils/storage');
-
-            const cache = await getChannelCache();
-            let cacheUpdated = false;
-            const lastSeen = await getLastSeen();
-            let lastSeenUpdated = false;
-
-            for (const ch of channels) {
-              if (!ch.channelId) continue;
-              // Skip channels that already have cached videos
-              if (cache[ch.handle]?.videos?.length > 0) continue;
-
-              try {
-                const result = await bootstrapChannel(deviceId, ch.channelId);
-                if (result?.ok && result.videos?.length > 0) {
-                  const handle = ch.handle;
-                  cache[handle] = {
-                    name: result.name || ch.name || handle,
-                    avatar: result.avatar || cache[handle]?.avatar || null,
-                    videos: result.videos,
-                    latestVideo: result.videos[0] || null,
-                    channelId: ch.channelId,
-                    lastChecked: new Date().toISOString(),
-                  };
-                  cacheUpdated = true;
-
-                  if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
-                  const seenIds = new Set(lastSeen[handle].seenIds || []);
-                  for (const v of result.videos) {
-                    if (v.videoId) seenIds.add(v.videoId);
-                  }
-                  lastSeen[handle].seenIds = [...seenIds];
-                  lastSeenUpdated = true;
-                }
-              } catch (e) {
-                console.warn(`Bootstrap failed for ${ch.handle}:`, e);
-              }
-            }
-
-            if (cacheUpdated) await saveChannelCache(cache);
-            if (lastSeenUpdated) await saveLastSeen(lastSeen);
-          }
+          // Register device profile with API Worker (profile only — channels/settings are separate)
+          await registerDevice(deviceId, fcmToken);
         }
       } catch (e) {
         console.warn('Init error:', e);
@@ -121,12 +68,7 @@ export default function App() {
       fcmTokenRef.current = newToken;
       try {
         const deviceId = deviceIdRef.current || await getDeviceId();
-        const { getChannels, getSettings } = require('./src/utils/storage');
-        const [channels, settings] = await Promise.all([
-          getChannels(),
-          getSettings(),
-        ]);
-        await registerDevice(deviceId, newToken, channels, settings);
+        await registerDevice(deviceId, newToken);
       } catch (e) {
         console.warn('Token refresh re-register failed:', e);
       }
@@ -140,61 +82,73 @@ export default function App() {
     // Handle notification tap (app opened from notification)
     const handleNotificationTap = async (remoteMessage) => {
       const data = remoteMessage?.data;
-      if (!data?.videoId || !data?.handle) return;
+      if (!data?.videoId && !data?.channelId) return;
 
       try {
         const settings = await getSettings();
         const deviceId = deviceIdRef.current || await getDeviceId();
 
-        if (settings.tapAction === 'channel') {
+        if (data.type === 'batch' || settings.tapAction === 'channel') {
+          // Channel tap or batch — mark all unwatched for this channel
           await markSeen(deviceId, data.channelId, [], true);
-        } else {
-          await markSeen(deviceId, data.channelId, [data.videoId]);
-        }
 
-        // Update local state
-        const lastSeen = await getLastSeen();
-        if (!lastSeen[data.handle]) lastSeen[data.handle] = { seenIds: [] };
-
-        if (settings.tapAction === 'channel') {
+          // Update local state
+          const lastSeen = await getLastSeen();
           const { getChannels, getChannelCache } = require('./src/utils/storage');
           const channels = await getChannels();
-          const ch = channels.find((c) => c.handle === data.handle);
-          if (ch?.channelId) {
+          const ch = channels.find((c) => c.channelId === data.channelId);
+          const handle = ch?.handle;
+
+          if (handle) {
+            if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
             const cache = await getChannelCache();
-            const channelVideos = cache[data.handle]?.videos || [];
-            const existing = new Set(lastSeen[data.handle].seenIds || []);
+            const channelVideos = cache[handle]?.videos || [];
+            const existing = new Set(lastSeen[handle].seenIds || []);
             for (const v of channelVideos) {
               if (v.videoId) existing.add(v.videoId);
             }
-            lastSeen[data.handle].seenIds = [...existing];
+            lastSeen[handle].seenIds = [...existing];
+            await saveLastSeen(lastSeen);
+          }
+
+          // Open channel page
+          if (handle) {
+            Linking.openURL(`https://www.youtube.com/@${handle}`);
           }
         } else {
-          const seenIds = lastSeen[data.handle].seenIds || [];
-          if (!seenIds.includes(data.videoId)) {
-            lastSeen[data.handle].seenIds = [...seenIds, data.videoId];
+          // Video tap — mark single video
+          await markSeen(deviceId, data.channelId, [data.videoId]);
+
+          // Update local state
+          const lastSeen = await getLastSeen();
+          const { getChannels } = require('./src/utils/storage');
+          const channels = await getChannels();
+          const ch = channels.find((c) => c.channelId === data.channelId);
+          const handle = ch?.handle;
+
+          if (handle) {
+            if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
+            const seenIds = lastSeen[handle].seenIds || [];
+            if (!seenIds.includes(data.videoId)) {
+              lastSeen[handle].seenIds = [...seenIds, data.videoId];
+              await saveLastSeen(lastSeen);
+            }
+          }
+
+          // Open video
+          if (data.videoLink) {
+            Linking.openURL(data.videoLink);
           }
         }
-
-        delete lastSeen[data.handle]?.gentleState;
-        delete lastSeen[data.handle]?.nagState;
-        await saveLastSeen(lastSeen);
 
         // Update widget
         try {
           const { requestWidgetUpdate } = require('react-native-android-widget');
           await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
         } catch {}
-      } catch {}
-
-      // Open the video or channel based on settings
-      try {
-        const settings = await getSettings();
-        const url = settings.tapAction === 'channel'
-          ? `https://www.youtube.com/@${data.handle}`
-          : data.videoLink;
-        if (url) Linking.openURL(url);
-      } catch {}
+      } catch (e) {
+        console.warn('Notification tap error:', e);
+      }
     };
 
     // Check if app was opened from a notification (cold start)
