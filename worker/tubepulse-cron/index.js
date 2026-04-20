@@ -1,10 +1,10 @@
 /**
- * TubePulse Cron Worker — v3.0 (channel-first architecture)
+ * TubePulse Cron Worker - v3.0 (channel-first architecture)
  *
  * Three scheduled jobs:
- *   */5  — Upcoming events: check time buckets for scheduled livestreams
- *   */15 — Nag cycle: check nag buckets, re-notify unwatched videos
- *   0 */6 — Lease renewal: renew WebSub subscriptions expiring within 24h
+ *   - Every 5 min: Upcoming events (check time buckets for scheduled livestreams)
+ *   - Every 15 min: Nag cycle (check nag buckets, re-notify unwatched videos)
+ *   - Every 6h on the hour: Lease renewal (renew WebSub subscriptions expiring within 24h)
  *
  * Architecture: time-bucket driven. No KV.list() calls anywhere.
  * Each job reads the bucket for "now" and processes entries.
@@ -393,14 +393,14 @@ async function runNagCron(env) {
   for (const entry of entries) {
     const { deviceId, channelId, videoIds: scheduledVideoIds } = entry;
 
-    // Re-check state — videos may have been marked seen since bucket was written
+    // Re-check state - videos may have been marked seen since bucket was written
     const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
     const stillUnwatched = scheduledVideoIds.filter(
       (id) => state?.unwatched?.includes(id)
     );
 
     if (stillUnwatched.length === 0) {
-      continue; // All seen — skip
+      continue; // All seen - skip
     }
 
     // Read device profile + settings + override
@@ -454,7 +454,7 @@ async function runNagCron(env) {
       const videoId = stillUnwatched[0];
       const video = recent?.find((v) => v.videoId === videoId);
       notifPayload = {
-        title: `${channelName} — reminder`,
+        title: `${channelName} - reminder`,
         body: video?.title || 'Unwatched video',
         data: {
           videoId,
@@ -467,7 +467,7 @@ async function runNagCron(env) {
       };
     } else {
       notifPayload = {
-        title: `${channelName} — ${stillUnwatched.length} unwatched`,
+        title: `${channelName} - ${stillUnwatched.length} unwatched`,
         body: 'You have videos waiting',
         data: {
           type: 'batch',
@@ -509,7 +509,7 @@ async function runNagCron(env) {
   for (const deviceId of deadTokens) {
     console.log(`[Nag] Pruning dead device: ${deviceId}`);
     await env.TUBEPULSE_KV.delete(key.deviceProfile(deviceId));
-    // Remove from all subscriber lists — we don't know which channels,
+    // Remove from all subscriber lists - we don't know which channels,
     // but the next push to any channel they were on will skip them
     // A weekly consistency check should fully clean up
   }
