@@ -88,7 +88,7 @@ export default function App() {
                 if (ch.channelId) {
                   try {
                     const subResult = await subscribeChannel(deviceId, ch.channelId);
-                    // Write subscribe result directly to local cache so HomeScreen sees it
+                    // Write subscribe result to local cache
                     if (subResult?.ok && subResult.channel) {
                       const { getChannelCache, saveChannelCache } = require('./src/utils/storage');
                       const cache = await getChannelCache();
@@ -114,6 +114,40 @@ export default function App() {
                     }
                   } catch (e) {
                     console.warn(`[Init] Failed to subscribe ${ch.handle}:`, e);
+                  }
+
+                  // Bootstrap channel — fetches RSS + avatar from server
+                  // This ensures videos are populated even if subscribeChannel didn't return them
+                  try {
+                    const bootResult = await bootstrapChannel(deviceId, ch.channelId);
+                    if (bootResult?.ok && bootResult.videos?.length > 0) {
+                      const { getChannelCache, saveChannelCache, getLastSeen, saveLastSeen } = require('./src/utils/storage');
+                      const cache = await getChannelCache();
+                      const handle = ch.handle;
+                      const existingEntry = cache[handle] || {};
+
+                      cache[handle] = {
+                        name: bootResult.name || existingEntry.name || ch.name || handle,
+                        avatar: bootResult.avatar || existingEntry.avatar || null,
+                        videos: bootResult.videos,
+                        latestVideo: bootResult.videos[0] || null,
+                        channelId: ch.channelId,
+                        lastChecked: new Date().toISOString(),
+                      };
+                      await saveChannelCache(cache);
+
+                      // Mark all bootstrapped videos as seen so user isn't spammed about old content
+                      const lastSeen = await getLastSeen();
+                      if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
+                      const seenIds = new Set(lastSeen[handle].seenIds || []);
+                      for (const v of bootResult.videos) {
+                        if (v.videoId) seenIds.add(v.videoId);
+                      }
+                      lastSeen[handle].seenIds = [...seenIds];
+                      await saveLastSeen(lastSeen);
+                    }
+                  } catch (e) {
+                    console.warn(`[Init] Bootstrap failed for ${ch.handle}:`, e);
                   }
                 }
               }
