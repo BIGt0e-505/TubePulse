@@ -5,19 +5,13 @@ import {
   FlatList,
   TouchableOpacity,
   Image,
-  Linking,
-  AppState,
-  ActivityIndicator,
-} from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-  TouchableOpacity,
-  Image,
   StyleSheet,
   RefreshControl,
   Linking,
   ActivityIndicator,
   AppState,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
