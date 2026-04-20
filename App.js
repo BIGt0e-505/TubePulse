@@ -58,41 +58,73 @@ export default function App() {
           // Register device profile with API Worker (profile only — channels/settings are separate)
           await registerDevice(deviceId, fcmToken);
 
-          // v2→v3 migration: if server has no channels for this device, subscribe the local ones
+          // Clear init flag from previous session
+          const { AsyncStorage: ASInit } = require('react-native');
+          await ASInit.removeItem('tubepulse_init_done');
+
+          // After registering, ensure local channels are subscribed on the server
+          // This handles both fresh install and v2→v3 migration
           try {
+            const { getChannels, getSettings } = require('./src/utils/storage');
+            const localChannels = await getChannels();
+            const localSettings = await getSettings();
+
+            // Push settings to server
+            try { await updateSettings(deviceId, localSettings); } catch (e) {}
+
+            // Subscribe any local channels that aren't on the server yet
             const feedResult = await fetchFeed(deviceId);
-            const serverChannels = feedResult.ok ? (feedResult.channels || []) : [];
-            const needsMigration = feedResult.status === 404
-              || feedResult.error?.includes('not registered')
-              || serverChannels.length === 0;
+            const serverChannelIds = (feedResult.ok && feedResult.channels)
+              ? feedResult.channels.map((c) => c.channelId)
+              : [];
 
-            if (needsMigration) {
-              console.log('[Init] Subscribing local channels to server');
-              const { getChannels, getSettings } = require('./src/utils/storage');
-              const localChannels = await getChannels();
-              const localSettings = await getSettings();
+            const missingChannels = localChannels.filter(
+              (ch) => ch.channelId && !serverChannelIds.includes(ch.channelId)
+            );
 
-              // Ensure registered
-              await registerDevice(deviceId, fcmToken);
-
-              // Push settings to server
-              await updateSettings(deviceId, localSettings);
-
-              // Subscribe each channel (triggers synchronous bootstrap)
-              for (const ch of localChannels) {
+            if (missingChannels.length > 0) {
+              console.log(`[Init] Subscribing ${missingChannels.length} channels to server`);
+              for (const ch of missingChannels) {
                 if (ch.channelId) {
                   try {
-                    await subscribeChannel(deviceId, ch.channelId);
+                    const subResult = await subscribeChannel(deviceId, ch.channelId);
+                    // Write subscribe result directly to local cache so HomeScreen sees it
+                    if (subResult?.ok && subResult.channel) {
+                      const { getChannelCache, saveChannelCache } = require('./src/utils/storage');
+                      const cache = await getChannelCache();
+                      const handle = ch.handle;
+                      const videos = (subResult.channel.recent || []).map((v) => ({
+                        videoId: v.videoId,
+                        title: v.title,
+                        published: v.publishedAt,
+                        thumbnail: v.thumbnail,
+                        link: v.link,
+                        type: v.type,
+                        unwatched: false,
+                      }));
+                      cache[handle] = {
+                        name: subResult.channel.meta?.name || ch.name || handle,
+                        avatar: subResult.channel.meta?.avatarUrl || null,
+                        videos,
+                        latestVideo: videos[0] || null,
+                        channelId: ch.channelId,
+                        lastChecked: new Date().toISOString(),
+                      };
+                      await saveChannelCache(cache);
+                    }
                   } catch (e) {
                     console.warn(`[Init] Failed to subscribe ${ch.handle}:`, e);
                   }
                 }
               }
-              console.log(`[Init] Subscribed ${localChannels.length} channels`);
+              console.log(`[Init] Subscribed ${missingChannels.length} channels`);
             }
           } catch (e) {
             console.warn('[Init] Channel subscription failed:', e);
           }
+          // Signal that init is complete (whether or not migration ran)
+          const { AsyncStorage: AS } = require('react-native');
+          await AS.setItem('tubepulse_init_done', String(Date.now()));
         }
       } catch (e) {
         console.warn('Init error:', e);

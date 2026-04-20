@@ -5,6 +5,13 @@ import {
   FlatList,
   TouchableOpacity,
   Image,
+  Linking,
+  AppState,
+  ActivityIndicator,
+} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+  TouchableOpacity,
+  Image,
   StyleSheet,
   RefreshControl,
   Linking,
@@ -129,7 +136,22 @@ export default function HomeScreen({ navigation }) {
 
   const autoFetch = useCallback(async () => {
     const [ch, ca] = await Promise.all([getChannels(), getChannelCache()]);
-    if (Object.keys(ca).length === 0 && ch.length > 0) {
+    // Wait for App.js migration to finish (sets flag when done)
+    const initDone = await AsyncStorage.getItem('tubepulse_init_done');
+    if (!initDone) {
+      // Poll until migration completes (max 10s)
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        const done = await AsyncStorage.getItem('tubepulse_init_done');
+        if (done) break;
+      }
+    }
+    // Now read fresh cache and refresh from server
+    const updatedCache = await getChannelCache();
+    if (Object.keys(updatedCache).length > 0) {
+      setCache(updatedCache);
+    }
+    if (ch.length > 0) {
       await refresh();
     }
   }, [refresh]);
