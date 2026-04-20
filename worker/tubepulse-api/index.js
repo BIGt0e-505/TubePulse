@@ -496,71 +496,70 @@ async function handleSubscribeChannel(request, env, ctx) {
   const callbackUrl = `${new URL(request.url).origin}/websub`;
   const isFirstSubscriber = subs.length === 1;
 
-  // Bootstrap channel data + WebSub subscribe (async)
-  ctx.waitUntil((async () => {
-    // Bootstrap: fetch RSS + avatar if channel meta doesn't exist
-    let meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
-    if (!meta) {
-      // Fetch avatar via YouTube API
-      if (env.YOUTUBE_API_KEY) {
-        try {
-          const resolved = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
-          if (resolved) {
-            meta = {
-              name: resolved.name || channelId,
-              avatarUrl: resolved.avatar || null,
-              lastVideoId: null,
-              addedAt: Date.now(),
-            };
-            await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
-          }
-        } catch (e) {
-          console.warn(`[API] Avatar fetch failed for ${channelId}:`, e.message);
-        }
-      }
+  // Bootstrap channel data SYNCHRONOUSLY so /feed works immediately
+  let meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
+  let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
 
-      // Fetch RSS for recent videos
+  if (!meta) {
+    // Fetch avatar via YouTube API
+    if (env.YOUTUBE_API_KEY) {
       try {
-        const rssResult = await fetchYouTubeRSS(channelId);
-        if (rssResult?.videos?.length > 0) {
-          const recent = rssResult.videos.slice(0, 15).map((v) => ({
-            videoId: v.videoId,
-            title: v.title,
-            publishedAt: v.published,
-            thumbnail: v.thumbnail,
-            type: classifyVideo(v),
-            link: v.link,
-          }));
-
-          if (!meta) {
-            meta = {
-              name: rssResult.channel?.name || channelId,
-              avatarUrl: null,
-              lastVideoId: rssResult.videos[0]?.videoId || null,
-              addedAt: Date.now(),
-            };
-          } else {
-            meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
-          }
-
+        const resolved = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (resolved) {
+          meta = {
+            name: resolved.name || channelId,
+            avatarUrl: resolved.avatar || null,
+            lastVideoId: null,
+            addedAt: Date.now(),
+          };
           await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
-          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
         }
       } catch (e) {
-        console.warn(`[API] RSS bootstrap failed for ${channelId}:`, e.message);
+        console.warn(`[API] Avatar fetch failed for ${channelId}:`, e.message);
       }
     }
 
-    // If first subscriber, add to active index and subscribe to WebSub
+    // Fetch RSS for recent videos
+    try {
+      const rssResult = await fetchYouTubeRSS(channelId);
+      if (rssResult?.videos?.length > 0) {
+        recent = rssResult.videos.slice(0, 15).map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+          publishedAt: v.published,
+          thumbnail: v.thumbnail,
+          type: classifyVideo(v),
+          link: v.link,
+        }));
+
+        if (!meta) {
+          meta = {
+            name: rssResult.channel?.name || channelId,
+            avatarUrl: null,
+            lastVideoId: rssResult.videos[0]?.videoId || null,
+            addedAt: Date.now(),
+          };
+        } else {
+          meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+        }
+
+        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+        await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+      }
+    } catch (e) {
+      console.warn(`[API] RSS bootstrap failed for ${channelId}:`, e.message);
+    }
+  }
+
+  // WebSub subscription + channels:active index (async — not blocking the response)
+  ctx.waitUntil((async () => {
     if (isFirstSubscriber) {
-      // Add to channels:active index
       const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
       if (!active.includes(channelId)) {
         active.push(channelId);
         await putKV(env.TUBEPULSE_KV, key.channelsActive(), active);
       }
 
-      // Subscribe to WebSub
       const subState = await getKV(env.TUBEPULSE_KV, key.channelWebsub(channelId));
       if (!subState) {
         const secret = crypto.randomUUID();
@@ -576,8 +575,7 @@ async function handleSubscribeChannel(request, env, ctx) {
     }
   })());
 
-  const finalMeta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
-  return json({ ok: true, alreadySubscribed: false, channel: { channelId, meta: finalMeta } });
+  return json({ ok: true, alreadySubscribed: false, channel: { channelId, meta, recent } });
 }
 
 // ─── POST /unsubscribe ─────────────────────────────────────────────────
