@@ -9,7 +9,7 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
 import { getSettings, getLastSeen, saveLastSeen } from './src/utils/storage';
 import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNotificationOpenedApp, getInitialNotification, setBackgroundMessageHandler } from './src/utils/fcm';
-import { registerDevice, markSeen, getDeviceId } from './src/utils/api';
+import { registerDevice, markSeen, getDeviceId, fetchFeed, subscribeChannel, updateSettings } from './src/utils/api';
 import { setupNotificationChannel } from './src/utils/notifications';
 
 const Stack = createNativeStackNavigator();
@@ -57,6 +57,37 @@ export default function App() {
 
           // Register device profile with API Worker (profile only — channels/settings are separate)
           await registerDevice(deviceId, fcmToken);
+
+          // v2→v3 migration: if server doesn't know about this device's channels, re-subscribe them
+          try {
+            const feedResult = await fetchFeed(deviceId);
+            if (feedResult.status === 404 || feedResult.error?.includes('not registered')) {
+              console.log('[Migration] Server has no record — re-subscribing local channels');
+              const { getChannels, getSettings } = require('./src/utils/storage');
+              const localChannels = await getChannels();
+              const localSettings = await getSettings();
+
+              // Re-register with full profile
+              await registerDevice(deviceId, fcmToken);
+
+              // Push settings to server
+              await updateSettings(deviceId, localSettings);
+
+              // Re-subscribe each channel
+              for (const ch of localChannels) {
+                if (ch.channelId) {
+                  try {
+                    await subscribeChannel(deviceId, ch.channelId);
+                  } catch (e) {
+                    console.warn(`[Migration] Failed to subscribe ${ch.handle}:`, e);
+                  }
+                }
+              }
+              console.log(`[Migration] Re-subscribed ${localChannels.length} channels`);
+            }
+          } catch (e) {
+            console.warn('[Migration] Migration check failed:', e);
+          }
         }
       } catch (e) {
         console.warn('Init error:', e);
