@@ -58,38 +58,40 @@ export default function App() {
           // Register device profile with API Worker (profile only — channels/settings are separate)
           await registerDevice(deviceId, fcmToken);
 
-          // v2→v3 migration: if server doesn't know about this device's channels, re-subscribe them
+          // v2→v3 migration: if server has no channels for this device, subscribe the local ones
           try {
             const feedResult = await fetchFeed(deviceId);
-            if (feedResult.status === 404 || feedResult.error?.includes('not registered')) {
-              console.log('[Migration] Server has no record — re-subscribing local channels');
+            const serverChannels = feedResult.ok ? (feedResult.channels || []) : [];
+            const needsMigration = feedResult.status === 404
+              || feedResult.error?.includes('not registered')
+              || serverChannels.length === 0;
+
+            if (needsMigration) {
+              console.log('[Init] Subscribing local channels to server');
               const { getChannels, getSettings } = require('./src/utils/storage');
               const localChannels = await getChannels();
               const localSettings = await getSettings();
 
-              // Re-register with full profile
+              // Ensure registered
               await registerDevice(deviceId, fcmToken);
 
               // Push settings to server
               await updateSettings(deviceId, localSettings);
 
-              // Re-subscribe each channel and bootstrap
+              // Subscribe each channel (triggers synchronous bootstrap)
               for (const ch of localChannels) {
                 if (ch.channelId) {
                   try {
                     await subscribeChannel(deviceId, ch.channelId);
-                    // Bootstrap fetches RSS + avatar synchronously
-                    const { bootstrapChannel } = require('./src/utils/api');
-                    await bootstrapChannel(deviceId, ch.channelId);
                   } catch (e) {
-                    console.warn(`[Migration] Failed to subscribe ${ch.handle}:`, e);
+                    console.warn(`[Init] Failed to subscribe ${ch.handle}:`, e);
                   }
                 }
               }
-              console.log(`[Migration] Re-subscribed ${localChannels.length} channels`);
+              console.log(`[Init] Subscribed ${localChannels.length} channels`);
             }
           } catch (e) {
-            console.warn('[Migration] Migration check failed:', e);
+            console.warn('[Init] Channel subscription failed:', e);
           }
         }
       } catch (e) {

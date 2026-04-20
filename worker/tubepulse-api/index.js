@@ -235,7 +235,40 @@ async function fetchYouTubeRSS(channelId) {
   }
 }
 
-// ─── YouTube Data API (avatars + resolve) ───────────────────────────────
+// ─── YouTube Data API (avatars + resolve + recent videos) ──────────────
+
+async function fetchRecentVideosViaAPI(apiKey, channelId, maxResults = 15) {
+  const apiUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(channelId)}&maxResults=${maxResults}&order=date&type=video&key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const resp = await fetch(apiUrl, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (!data.items?.length) return null;
+
+    const videos = data.items.map((item) => {
+      const s = item.snippet;
+      const thumbs = s.thumbnails || {};
+      return {
+        videoId: item.id?.videoId,
+        title: s.title,
+        publishedAt: s.publishedAt,
+        thumbnail: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+        type: classifyVideo({ title: s.title, published: s.publishedAt }),
+        link: `https://www.youtube.com/watch?v=${item.id?.videoId}`,
+      };
+    }).filter((v) => v.videoId);
+
+    return videos;
+  } catch (err) {
+    console.error(`Search API error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function resolveChannelViaAPI(apiKey, channelId) {
   const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${encodeURIComponent(channelId)}&key=${apiKey}`;
@@ -500,9 +533,9 @@ async function handleSubscribeChannel(request, env, ctx) {
   let meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
   let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
 
-  if (!meta) {
-    // Fetch avatar via YouTube API
-    if (env.YOUTUBE_API_KEY) {
+  if (!meta || !recent) {
+    // Step 1: Fetch avatar + channel name via YouTube Data API
+    if (env.YOUTUBE_API_KEY && !meta) {
       try {
         const resolved = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
         if (resolved) {
@@ -519,35 +552,57 @@ async function handleSubscribeChannel(request, env, ctx) {
       }
     }
 
-    // Fetch RSS for recent videos
-    try {
-      const rssResult = await fetchYouTubeRSS(channelId);
-      if (rssResult?.videos?.length > 0) {
-        recent = rssResult.videos.slice(0, 15).map((v) => ({
-          videoId: v.videoId,
-          title: v.title,
-          publishedAt: v.published,
-          thumbnail: v.thumbnail,
-          type: classifyVideo(v),
-          link: v.link,
-        }));
-
-        if (!meta) {
-          meta = {
-            name: rssResult.channel?.name || channelId,
+    // Step 2: Fetch recent videos - try YouTube Data API first, then RSS fallback
+    if (!recent && env.YOUTUBE_API_KEY) {
+      try {
+        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (apiVideos && apiVideos.length > 0) {
+          recent = apiVideos;
+          if (meta) meta.lastVideoId = apiVideos[0].videoId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
+            name: channelId,
             avatarUrl: null,
-            lastVideoId: rssResult.videos[0]?.videoId || null,
+            lastVideoId: apiVideos[0].videoId,
             addedAt: Date.now(),
-          };
-        } else {
-          meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+          });
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
         }
-
-        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
-        await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+      } catch (e) {
+        console.warn(`[API] Video search failed for ${channelId}:`, e.message);
       }
-    } catch (e) {
-      console.warn(`[API] RSS bootstrap failed for ${channelId}:`, e.message);
+    }
+
+    // Step 3: RSS fallback (if API didn't work)
+    if (!recent) {
+      try {
+        const rssResult = await fetchYouTubeRSS(channelId);
+        if (rssResult?.videos?.length > 0) {
+          recent = rssResult.videos.slice(0, 15).map((v) => ({
+            videoId: v.videoId,
+            title: v.title,
+            publishedAt: v.published,
+            thumbnail: v.thumbnail,
+            type: classifyVideo(v),
+            link: v.link,
+          }));
+
+          if (!meta) {
+            meta = {
+              name: rssResult.channel?.name || channelId,
+              avatarUrl: null,
+              lastVideoId: rssResult.videos[0]?.videoId || null,
+              addedAt: Date.now(),
+            };
+          } else {
+            meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+          }
+
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+        }
+      } catch (e) {
+        console.warn(`[API] RSS bootstrap failed for ${channelId}:`, e.message);
+      }
     }
   }
 
@@ -782,33 +837,56 @@ async function handleBootstrap(request, env, ctx) {
     }
   }
 
-  // Fetch RSS feed
+  // Fetch recent videos - YouTube Data API first, RSS fallback
   let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
   if (!recent) {
-    const rssResult = await fetchYouTubeRSS(channelId);
-    if (rssResult?.videos?.length > 0) {
-      recent = rssResult.videos.slice(0, 15).map((v) => ({
-        videoId: v.videoId,
-        title: v.title,
-        publishedAt: v.published,
-        thumbnail: v.thumbnail,
-        type: classifyVideo(v),
-        link: v.link,
-      }));
-
-      if (!meta) {
-        meta = {
-          name: rssResult.channel?.name || channelId,
-          avatarUrl: null,
-          lastVideoId: rssResult.videos[0]?.videoId || null,
-          addedAt: Date.now(),
-        };
-      } else {
-        meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+    // Try YouTube Data API search
+    if (env.YOUTUBE_API_KEY) {
+      try {
+        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (apiVideos && apiVideos.length > 0) {
+          recent = apiVideos;
+          if (meta) meta.lastVideoId = apiVideos[0].videoId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
+            name: channelId,
+            avatarUrl: null,
+            lastVideoId: apiVideos[0].videoId,
+            addedAt: Date.now(),
+          });
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+        }
+      } catch (e) {
+        console.warn(`[Bootstrap] Video search failed for ${channelId}:`, e.message);
       }
+    }
 
-      await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
-      await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+    // RSS fallback
+    if (!recent) {
+      const rssResult = await fetchYouTubeRSS(channelId);
+      if (rssResult?.videos?.length > 0) {
+        recent = rssResult.videos.slice(0, 15).map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+          publishedAt: v.published,
+          thumbnail: v.thumbnail,
+          type: classifyVideo(v),
+          link: v.link,
+        }));
+
+        if (!meta) {
+          meta = {
+            name: rssResult.channel?.name || channelId,
+            avatarUrl: null,
+            lastVideoId: rssResult.videos[0]?.videoId || null,
+            addedAt: Date.now(),
+          };
+        } else {
+          meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+        }
+
+        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+        await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+      }
     }
   }
 
