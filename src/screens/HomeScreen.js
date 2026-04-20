@@ -129,23 +129,32 @@ export default function HomeScreen({ navigation }) {
   }, [cache]);
 
   const autoFetch = useCallback(async () => {
-    const [ch, ca] = await Promise.all([getChannels(), getChannelCache()]);
-    // Wait for App.js migration to finish (sets flag when done)
+    const [ch] = await Promise.all([getChannels()]);
+    // Wait for App.js init to finish (sets flag when done)
     const initDone = await AsyncStorage.getItem('tubepulse_init_done');
     if (!initDone) {
-      // Poll until migration completes (max 10s)
-      for (let i = 0; i < 20; i++) {
+      // Poll until init completes (max 15s)
+      for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 500));
         const done = await AsyncStorage.getItem('tubepulse_init_done');
         if (done) break;
       }
     }
-    // Now read fresh cache and refresh from server
-    const updatedCache = await getChannelCache();
-    if (Object.keys(updatedCache).length > 0) {
-      setCache(updatedCache);
-    }
-    if (ch.length > 0) {
+    // Init has written cache data — re-read everything before refreshing
+    const [freshChannels, freshCache, freshLastSeen, freshSettings] = await Promise.all([
+      getChannels(),
+      getChannelCache(),
+      getLastSeen(),
+      getSettings(),
+    ]);
+    setChannels(freshChannels);
+    setCache(freshCache);
+    setLastSeen(freshLastSeen);
+    setSettings(freshSettings);
+    setLoading(false);
+
+    // Now refresh from server (supplements local cache with live data)
+    if (freshChannels.length > 0) {
       await refresh();
     }
   }, [refresh]);
