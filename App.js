@@ -9,7 +9,7 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
 import { getSettings, getLastSeen, saveLastSeen } from './src/utils/storage';
 import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNotificationOpenedApp, getInitialNotification, setBackgroundMessageHandler } from './src/utils/fcm';
-import { registerDevice, markSeen, getDeviceId, fetchFeed, subscribeChannel, updateSettings } from './src/utils/api';
+import { registerDevice, markSeen, getDeviceId, fetchFeed, subscribeChannel, updateSettings, bootstrapChannel } from './src/utils/api';
 import { setupNotificationChannel } from './src/utils/notifications';
 
 const Stack = createNativeStackNavigator();
