@@ -1,9 +1,15 @@
 /**
- * TubePulse API Client
+ * TubePulse API Client — v3.0 (channel-first architecture)
  *
  * REST client for the tubepulse-api Cloudflare Worker.
- * Uses a persistent device UUID as authentication (not FCM token).
- * The FCM token is sent as a field in /register and updated on refresh.
+ * Uses a persistent device UUID as authentication.
+ *
+ * Key changes from v2:
+ * - POST /subscribe-channel + POST /unsubscribe replace PUT /channels
+ * - POST /bootstrap replaces GET /bootstrap
+ * - POST /settings replaces PUT /settings
+ * - POST /channel-override (new)
+ * - GET /feed returns { channels: [{ channelId, meta, videos, unwatchedCount }] }
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -18,7 +24,6 @@ const DEVICE_ID_KEY = 'tubepulse_device_id';
 export async function getDeviceId() {
   let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
   if (!id) {
-    // Generate UUID v4
     id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
       const r = (Math.random() * 16) | 0;
       const v = c === 'x' ? r : (r & 0x3) | 0x8;
@@ -69,43 +74,65 @@ async function apiFetch(path, options = {}) {
 /**
  * Register device with the API Worker.
  * Called on app launch and token refresh.
- * Uses device UUID as auth, FCM token as a field.
+ * Only sends profile data (FCM token) — channels and settings are separate.
  */
-export async function registerDevice(deviceId, fcmToken, channels, settings) {
+export async function registerDevice(deviceId, fcmToken, platform = 'android', appVersion = null) {
   return await apiFetch('/register', {
     method: 'POST',
     deviceId,
-    body: { fcmToken, channels, settings },
+    body: { fcmToken, platform, appVersion },
   });
 }
 
 /**
- * Update tracked channels.
+ * Subscribe to a channel.
+ * Replaces the old PUT /channels (full list replacement) with per-channel subscribe.
  */
-export async function updateChannels(deviceId, channels, fcmToken) {
-  return await apiFetch('/channels', {
-    method: 'PUT',
+export async function subscribeChannel(deviceId, channelId) {
+  return await apiFetch('/subscribe-channel', {
+    method: 'POST',
     deviceId,
-    body: { channels, fcmToken },
+    body: { channelId },
   });
 }
 
 /**
- * Update notification settings.
+ * Unsubscribe from a channel.
+ * Replaces the old PUT /channels with per-channel unsubscribe.
+ */
+export async function unsubscribeChannel(deviceId, channelId) {
+  return await apiFetch('/unsubscribe', {
+    method: 'POST',
+    deviceId,
+    body: { channelId },
+  });
+}
+
+/**
+ * Update notification settings (full replacement).
  */
 export async function updateSettings(deviceId, settings) {
   return await apiFetch('/settings', {
-    method: 'PUT',
+    method: 'POST',
     deviceId,
     body: { settings },
   });
 }
 
 /**
+ * Set or update per-channel notification override.
+ * Empty override deletes the override (inherits from device-level).
+ */
+export async function setChannelOverride(deviceId, channelId, override) {
+  return await apiFetch('/channel-override', {
+    method: 'POST',
+    deviceId,
+    body: { channelId, override },
+  });
+}
+
+/**
  * Mark video(s) as seen.
- * channelId: the stable channel ID (handles can change)
- * videoIds: mark specific videos as seen (video tap)
- * clearAll: mark all current feed videos as seen (channel tap)
  */
 export async function markSeen(deviceId, channelId, videoIds = [], clearAll = false) {
   const body = { channelId };
@@ -123,6 +150,7 @@ export async function markSeen(deviceId, channelId, videoIds = [], clearAll = fa
 
 /**
  * Fetch current feed data from the server.
+ * Returns { channels: [{ channelId, meta, videos, unwatchedCount }] }
  */
 export async function fetchFeed(deviceId) {
   return await apiFetch('/feed', {
@@ -132,18 +160,19 @@ export async function fetchFeed(deviceId) {
 }
 
 /**
- * Bootstrap a newly added channel — fetches RSS + avatar from server.
- * Returns video data so the app can populate immediately.
+ * Bootstrap a newly added channel — fetches RSS + avatar from server synchronously.
+ * Now POST instead of GET.
  */
 export async function bootstrapChannel(deviceId, channelId) {
-  return await apiFetch(`/bootstrap?channelId=${encodeURIComponent(channelId)}`, {
+  return await apiFetch('/bootstrap', {
+    method: 'POST',
     deviceId,
+    body: { channelId },
   });
 }
 
 /**
  * Resolve a YouTube handle to channelId + name + avatar.
- * Requires authentication — gated to registered devices.
  */
 export async function resolveHandle(deviceId, handle) {
   const clean = handle.replace(/^@/, '');

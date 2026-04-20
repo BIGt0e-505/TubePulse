@@ -44,48 +44,71 @@ export default function HomeScreen({ navigation }) {
       const deviceId = await getDeviceId();
       if (deviceId) {
         const result = await fetchFeed(deviceId);
-        if (result.ok && result.feeds) {
-          // Always read fresh from storage to avoid race with bootstrap
-          const [localCache, channels] = await Promise.all([
-            getChannelCache(),
-            getChannels(),
-          ]);
+        if (result.ok && result.channels) {
+          // v3 /feed returns { channels: [{ channelId, meta, videos, unwatchedCount }] }
+          const [localChannels] = await Promise.all([getChannels()]);
           const newCache = {};
-          for (const [handle, feed] of Object.entries(result.feeds)) {
-            const channel = channels.find(ch => ch.handle === handle);
-            const existingEntry = localCache[handle] || {};
-            const serverVideos = feed.videos || [];
-            // Don't overwrite local cache if we have more data than the server
+
+          for (const serverChannel of result.channels) {
+            const ch = localChannels.find((c) => c.channelId === serverChannel.channelId);
+            const handle = ch?.handle || serverChannel.channelId;
+
+            const videos = (serverChannel.videos || []).map((v) => ({
+              videoId: v.videoId,
+              title: v.title,
+              published: v.publishedAt,
+              thumbnail: v.thumbnail,
+              link: v.link,
+              type: v.type,
+              unwatched: v.unwatched,
+            }));
+
+            const existingEntry = (await getChannelCache())[handle] || {};
             const localVideos = existingEntry.videos || [];
-            const videos = serverVideos.length >= localVideos.length ? serverVideos : localVideos;
+            // Use server data when available, preserve local-only channels
+            const mergedVideos = videos.length >= localVideos.length ? videos : localVideos;
+
             newCache[handle] = {
-              name: feed.name || existingEntry.name,
-              avatar: feed.avatar || existingEntry.avatar || null,
-              videos,
-              latestVideo: videos[0] || null,
-              channelId: channel?.channelId || null,
-              lastChecked: feed.lastChecked,
+              name: serverChannel.meta?.name || existingEntry.name,
+              avatar: serverChannel.meta?.avatarUrl || existingEntry.avatar || null,
+              videos: mergedVideos,
+              latestVideo: mergedVideos[0] || null,
+              channelId: serverChannel.channelId,
+              lastChecked: serverChannel.meta?.addedAt ? new Date(serverChannel.meta.addedAt).toISOString() : existingEntry.lastChecked,
             };
           }
+
           // Preserve channels that exist locally but weren't in server response
-          for (const ch of channels) {
+          const localCache = await getChannelCache();
+          for (const ch of localChannels) {
             if (!newCache[ch.handle] && localCache[ch.handle]) {
               newCache[ch.handle] = localCache[ch.handle];
             }
           }
+
           await saveChannelCache(newCache);
           setCache(newCache);
 
-          if (result.lastSeen) {
-            await saveLastSeen(result.lastSeen);
-            setLastSeen(result.lastSeen);
-          }
+          // Update local lastSeen from server's unwatched data
+          const lastSeen = await getLastSeen();
+          for (const serverChannel of result.channels) {
+            const ch = localChannels.find((c) => c.channelId === serverChannel.channelId);
+            const handle = ch?.handle;
+            if (!handle) continue;
 
-          if (result.settings) {
-            const { saveSettings } = require('../utils/storage');
-            await saveSettings(result.settings);
-            setSettings(result.settings);
+            if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
+            const seenIds = new Set(lastSeen[handle].seenIds || []);
+
+            // Videos NOT in unwatched are seen
+            for (const v of (serverChannel.videos || [])) {
+              if (!v.unwatched && v.videoId) {
+                seenIds.add(v.videoId);
+              }
+            }
+            lastSeen[handle].seenIds = [...seenIds];
           }
+          await saveLastSeen(lastSeen);
+          setLastSeen(lastSeen);
         }
       } else {
         const ca = await getChannelCache();

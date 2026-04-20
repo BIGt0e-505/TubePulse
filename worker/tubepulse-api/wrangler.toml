@@ -7,5 +7,8 @@ account_id = "93e62acb204fe695139d8441880ed4a3"
 binding = "TUBEPULSE_KV"
 id = "f2ac3fd3ae9c457287074e7e32c66c64"
 
+# No HTTP routes — worker disabled
+# routes = []
+
 [observability]
 enabled = true
