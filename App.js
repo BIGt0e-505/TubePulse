@@ -73,11 +73,14 @@ export default function App() {
               // Push settings to server
               await updateSettings(deviceId, localSettings);
 
-              // Re-subscribe each channel
+              // Re-subscribe each channel and bootstrap
               for (const ch of localChannels) {
                 if (ch.channelId) {
                   try {
                     await subscribeChannel(deviceId, ch.channelId);
+                    // Bootstrap fetches RSS + avatar synchronously
+                    const { bootstrapChannel } = require('./src/utils/api');
+                    await bootstrapChannel(deviceId, ch.channelId);
                   } catch (e) {
                     console.warn(`[Migration] Failed to subscribe ${ch.handle}:`, e);
                   }
