@@ -1,3 +1,25 @@
+# Dependencies
 node_modules/
+
+# Expo
 .expo/
+
+# Build artefacts
 *.apk
+
+# Cloudflare / wrangler
+# .dev.vars is read by wrangler dev and deploy --dry-run; never commit
+.dev.vars
+.dev.vars.*
+worker/*/.dev.vars
+
+# Local secrets and credentials (do not commit ANY file under secrets/)
+/secrets/
+**/secrets/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
