@@ -1,0 +1,1316 @@
+/**
+ * TubePulse API Worker — v3.0 (channel-first architecture)
+ *
+ * REST API for the TubePulse app + WebSub callback endpoint.
+ *
+ * Architecture: channel-first. Every operation starts from the channel,
+ * then fans out to subscribers. No KV.list() calls anywhere.
+ *
+ * Endpoints:
+ *   POST /register          — Register/update device profile (FCM token)
+ *   POST /subscribe-channel — Add a channel to this device
+ *   POST /unsubscribe       — Remove a channel from this device
+ *   POST /seen              — Mark video(s) as watched
+ *   GET  /feed              — Get current feed data for all tracked channels
+ *   GET  /resolve           — Handle → channelId resolution
+ *   POST /bootstrap         — Fetch RSS + avatar for a new channel (sync)
+ *   POST /settings          — Update device-level notification settings
+ *   POST /channel-override  — Set/update per-channel notification override
+ *   GET  /websub            — WebSub verification handshake
+ *   POST /websub            — WebSub push from YouTube
+ */
+
+// ─── Helpers ────────────────────────────────────────────────────────────
+
+function json(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      ...extraHeaders,
+    },
+  });
+}
+
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+function errorResponse(message, status = 400) {
+  return json({ error: message }, status);
+}
+
+// ─── Auth ───────────────────────────────────────────────────────────────
+
+function getDeviceId(request) {
+  const auth = request.headers.get('Authorization');
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  return auth.slice(7).trim();
+}
+
+// ─── KV helpers ─────────────────────────────────────────────────────────
+
+// Key builders — single source of truth for key schema
+const key = {
+  channelMeta:      (channelId) => `channel:${channelId}:meta`,
+  channelSubs:      (channelId) => `channel:${channelId}:subscribers`,
+  channelWebsub:    (channelId) => `channel:${channelId}:websub`,
+  channelRecent:    (channelId) => `channel:${channelId}:recent`,
+  deviceProfile:    (deviceId)  => `device:${deviceId}:profile`,
+  deviceSettings:   (deviceId)  => `device:${deviceId}:settings`,
+  deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
+  deviceOverride:   (deviceId, channelId) => `device:${deviceId}:override:${channelId}`,
+  deviceState:      (deviceId, channelId) => `device:${deviceId}:state:${channelId}`,
+  upcoming:         (bucket)    => `upcoming:${bucket}`,
+  nag:              (bucket)    => `nag:${bucket}`,
+  channelsActive:   ()          => `channels:active`,
+  handle:           (lc)        => `handle:${lc}`,
+};
+
+async function getKV(kv, k) { return await kv.get(k, 'json'); }
+async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
+
+// ─── DND logic ──────────────────────────────────────────────────────────
+
+function isDndActive(dndStart, dndEnd) {
+  const now = new Date();
+  const [sh, sm] = dndStart.split(':').map(Number);
+  const [eh, em] = dndEnd.split(':').map(Number);
+  const nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const startMins = sh * 60 + sm;
+  const endMins = eh * 60 + em;
+
+  if (startMins <= endMins) {
+    return nowMins >= startMins && nowMins < endMins;
+  } else {
+    return nowMins >= startMins || nowMins < endMins;
+  }
+}
+
+// ─── WebSub subscription management ────────────────────────────────────
+
+const HUB_URL = 'https://pubsubhubbub.appspot.com/';
+const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';
+
+async function subscribeToChannel(channelId, callbackUrl, secret) {
+  const feedUrl = `${FEED_TEMPLATE}${channelId}`;
+  const body = new URLSearchParams({
+    'hub.callback': callbackUrl,
+    'hub.mode': 'subscribe',
+    'hub.topic': feedUrl,
+    'hub.verify': 'sync',
+    'hub.lease_seconds': String(86400 * 5),
+    'hub.secret': secret,
+  });
+
+  try {
+    const resp = await fetch(HUB_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    console.log(`[WebSub] Subscribe for ${channelId}: ${resp.status}`);
+    return resp.ok || resp.status === 202 || resp.status === 204;
+  } catch (err) {
+    console.error(`[WebSub] Subscribe failed for ${channelId}:`, err.message);
+    return false;
+  }
+}
+
+async function unsubscribeFromChannel(channelId, callbackUrl) {
+  const feedUrl = `${FEED_TEMPLATE}${channelId}`;
+  const body = new URLSearchParams({
+    'hub.callback': callbackUrl,
+    'hub.mode': 'unsubscribe',
+    'hub.topic': feedUrl,
+    'hub.verify': 'sync',
+  });
+
+  try {
+    await fetch(HUB_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    console.log(`[WebSub] Unsubscribe request for ${channelId}`);
+  } catch (err) {
+    console.error(`[WebSub] Unsubscribe failed for ${channelId}:`, err.message);
+  }
+}
+
+// ─── WebSub HMAC verification ────────────────────────────────────────────
+
+async function verifyWebSubSignature(payload, signatureHeader, secret) {
+  if (!signatureHeader || !secret) return false;
+
+  const match = signatureHeader.match(/^sha256=(.+)$/i);
+  if (!match) return false;
+
+  const expectedHex = match[1];
+  const encoder = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw', encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+
+  const sig = await crypto.subtle.sign('HMAC', cryptoKey, encoder.encode(payload));
+  const sigHex = Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  return sigHex === expectedHex;
+}
+
+// ─── XML Parser ─────────────────────────────────────────────────────────
+
+function parseWebSubPush(xmlText) {
+  const entries = [];
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+  let m;
+
+  while ((m = entryRegex.exec(xmlText)) !== null) {
+    const e = m[1];
+    const videoId = e.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1];
+    const title = e.match(/<title>([^<]+)<\/title>/)?.[1];
+    const link = e.match(/<link[^>]*rel="alternate"[^>]*href="([^"]+)"/)?.[1]
+      || e.match(/<link[^>]*href="([^"]+)"[^>]*rel="alternate"/)?.[1]
+      || `https://www.youtube.com/watch?v=${videoId}`;
+    const published = e.match(/<published>([^<]+)<\/published>/)?.[1];
+    const updated = e.match(/<updated>([^<]+)<\/updated>/)?.[1];
+    const thumbMatch = e.match(/<media:thumbnail[^>]*url="([^"]+)"/);
+    const thumbnail = thumbMatch ? thumbMatch[1] : null;
+    const descMatch = e.match(/<media:description>([^<]*)<\/media:description>/);
+    const description = descMatch ? descMatch[1] : '';
+
+    if (videoId) {
+      entries.push({ videoId, title, link, published, updated, thumbnail, description });
+    }
+  }
+
+  const channelId = xmlText.match(/<yt:channelId>([^<]+)<\/yt:channelId>/)?.[1];
+  const channelName = xmlText.match(/<name>([^<]+)<\/name>/)?.[1];
+
+  return { channelId, channelName, entries };
+}
+
+// ─── YouTube RSS fetch ─────────────────────────────────────────────────
+
+async function fetchYouTubeRSS(channelId) {
+  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const resp = await fetch(feedUrl, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const xml = await resp.text();
+
+    // Parse with our lightweight parser
+    const parsed = parseWebSubPush(xml);
+    if (!parsed.channelId || parsed.entries.length === 0) return { channel: null, videos: [] };
+
+    const channel = { name: parsed.channelName || '', uri: '' };
+    const videos = parsed.entries.map((e) => ({
+      videoId: e.videoId,
+      title: e.title,
+      published: e.published,
+      updated: e.updated,
+      link: e.link,
+      thumbnail: e.thumbnail,
+      description: e.description,
+    }));
+
+    return { channel, videos };
+  } catch (err) {
+    console.error(`RSS fetch error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── YouTube Data API (avatars + resolve + recent videos) ──────────────
+
+async function fetchRecentVideosViaAPI(apiKey, channelId, maxResults = 15) {
+  const apiUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(channelId)}&maxResults=${maxResults}&order=date&type=video&key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const resp = await fetch(apiUrl, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (!data.items?.length) return null;
+
+    const videos = data.items.map((item) => {
+      const s = item.snippet;
+      const thumbs = s.thumbnails || {};
+      return {
+        videoId: item.id?.videoId,
+        title: s.title,
+        publishedAt: s.publishedAt,
+        thumbnail: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+        type: classifyVideo({ title: s.title, published: s.publishedAt }),
+        link: `https://www.youtube.com/watch?v=${item.id?.videoId}`,
+      };
+    }).filter((v) => v.videoId);
+
+    return videos;
+  } catch (err) {
+    console.error(`Search API error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveChannelViaAPI(apiKey, channelId) {
+  const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${encodeURIComponent(channelId)}&key=${apiKey}`;
+  const resp = await fetch(apiUrl);
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  if (!data.items?.[0]) return null;
+  const ch = data.items[0];
+  const thumbs = ch.snippet?.thumbnails || {};
+  return {
+    channelId: ch.id,
+    name: ch.snippet?.title || null,
+    avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+  };
+}
+
+async function resolveHandleViaAPI(apiKey, handle) {
+  const clean = handle.replace(/^@/, '');
+
+  // Attempt 1: forHandle
+  let apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&forHandle=${encodeURIComponent(clean)}&key=${apiKey}`;
+  let resp = await fetch(apiUrl);
+  if (resp.ok) {
+    const data = await resp.json();
+    if (data.items?.length) {
+      const ch = data.items[0];
+      const thumbs = ch.snippet?.thumbnails || {};
+      return {
+        channelId: ch.id,
+        name: ch.snippet?.title || null,
+        avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+      };
+    }
+  }
+
+  // Attempt 2: forUsername fallback
+  apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet&forUsername=${encodeURIComponent(clean)}&key=${apiKey}`;
+  resp = await fetch(apiUrl);
+  if (resp.ok) {
+    const data = await resp.json();
+    if (data.items?.length) {
+      const ch = data.items[0];
+      const thumbs = ch.snippet?.thumbnails || {};
+      return {
+        channelId: ch.id,
+        name: ch.snippet?.title || null,
+        avatar: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+      };
+    }
+  }
+
+  return null;
+}
+
+// ─── FCM helpers ────────────────────────────────────────────────────────
+
+async function getGoogleAccessToken(serviceAccountJson) {
+  const sa = JSON.parse(serviceAccountJson);
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/firebase.messaging',
+    aud: sa.token_uri,
+    iat: now,
+    exp: now + 3600,
+  };
+
+  const base64url = (obj) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const headerB64 = base64url(header);
+  const payloadB64 = base64url(payload);
+  const input = `${headerB64}.${payloadB64}`;
+
+  const pemKey = sa.private_key;
+  const pemBody = pemKey
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s/g, '');
+
+  const binaryStr = atob(pemBody);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8', bytes.buffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']
+  );
+
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5', cryptoKey,
+    new TextEncoder().encode(input)
+  );
+
+  const signatureB64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  const jwt = `${input}.${signatureB64}`;
+
+  const tokenResp = await fetch(sa.token_uri, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  });
+
+  const tokenData = await tokenResp.json();
+  if (!tokenData.access_token) {
+    throw new Error(`Token exchange failed: ${JSON.stringify(tokenData)}`);
+  }
+
+  return tokenData.access_token;
+}
+
+async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
+  const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      message: {
+        token: fcmToken,
+        notification: {
+          title: payload.title,
+          body: payload.body,
+        },
+        data: payload.data,
+        android: {
+          priority: 'high',
+          notification: {
+            channel_id: payload.silent ? 'new-videos-silent' : 'new-videos',
+            sound: payload.silent ? null : 'default',
+            tag: payload.tag || 'tubepulse',
+          },
+        },
+      },
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.error(`FCM push failed for token ${fcmToken.slice(0, 10)}...: ${resp.status} ${errText}`);
+    if (resp.status === 404 || errText.includes('UNREGISTERED') || errText.includes('NotRegistered')) {
+      return { sent: false, deadToken: true };
+    }
+    return { sent: false, deadToken: false };
+  }
+
+  return { sent: true, deadToken: false };
+}
+
+// ─── Time bucket helpers ────────────────────────────────────────────────
+
+// Align to the nearest 5-minute boundary for upcoming buckets
+function upcomingBucket(isoDate) {
+  const d = new Date(isoDate);
+  d.setMinutes(Math.floor(d.getMinutes() / 5) * 5, 0, 0);
+  return d.toISOString().slice(0, 16); // "2026-04-20T15:30"
+}
+
+// Align to the nearest 15-minute boundary for nag buckets
+function nagBucket(timestampMs) {
+  const d = new Date(timestampMs);
+  d.setMinutes(Math.floor(d.getMinutes() / 15) * 15, 0, 0);
+  return d.toISOString().slice(0, 16); // "2026-04-20T15:15"
+}
+
+// ─── Video type classification ──────────────────────────────────────────
+
+function classifyVideo(entry) {
+  const publishedTime = entry.published ? new Date(entry.published).getTime() : 0;
+  if (publishedTime > Date.now() + 5 * 60 * 1000) return 'live_scheduled';
+  if (entry.title?.startsWith('🔴') || /\bLIVE\b/i.test(entry.title || '')) return 'live';
+  return 'video';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Route handlers
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── POST /register ─────────────────────────────────────────────────────
+
+async function handleRegister(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { fcmToken, platform, appVersion } = body;
+  if (!fcmToken) return errorResponse('fcmToken is required');
+
+  const now = Date.now();
+  const existing = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+
+  const profile = {
+    fcmToken,
+    platform: platform || existing?.platform || 'android',
+    appVersion: appVersion || existing?.appVersion || null,
+    createdAt: existing?.createdAt || now,
+    lastSeenAt: now,
+  };
+
+  await putKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId), profile);
+  return json({ ok: true, createdAt: profile.createdAt });
+}
+
+// ─── POST /subscribe-channel ────────────────────────────────────────────
+
+const MAX_CHANNELS = 100;
+
+async function handleSubscribeChannel(request, env, ctx) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { channelId } = body;
+  if (!channelId) return errorResponse('channelId is required');
+
+  // Check device exists
+  const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+  if (!profile) return errorResponse('Device not registered', 404);
+
+  // Read device channels, enforce cap
+  const channels = await getKV(env.TUBEPULSE_KV, key.deviceChannels(deviceId)) || [];
+  if (channels.length >= MAX_CHANNELS) {
+    return errorResponse(`Channel limit reached (${MAX_CHANNELS})`, 400);
+  }
+
+  const alreadySubscribed = channels.includes(channelId);
+  if (alreadySubscribed) {
+    // Return channel info even if already subscribed
+    const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
+    const recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
+    return json({ ok: true, alreadySubscribed: true, channel: { channelId, meta, recent } });
+  }
+
+  // Add to device channels
+  channels.push(channelId);
+  await putKV(env.TUBEPULSE_KV, key.deviceChannels(deviceId), channels);
+
+  // Add device to channel subscribers
+  const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+  if (!subs.includes(deviceId)) subs.push(deviceId);
+  await putKV(env.TUBEPULSE_KV, key.channelSubs(channelId), subs);
+
+  const callbackUrl = `${new URL(request.url).origin}/websub`;
+  const isFirstSubscriber = subs.length === 1;
+
+  // Bootstrap channel data SYNCHRONOUSLY so /feed works immediately
+  let meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
+  let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
+
+  if (!meta || !recent) {
+    // Step 1: Fetch avatar + channel name via YouTube Data API
+    if (env.YOUTUBE_API_KEY && !meta) {
+      try {
+        const resolved = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (resolved) {
+          meta = {
+            name: resolved.name || channelId,
+            avatarUrl: resolved.avatar || null,
+            lastVideoId: null,
+            addedAt: Date.now(),
+          };
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+        }
+      } catch (e) {
+        console.warn(`[API] Avatar fetch failed for ${channelId}:`, e.message);
+      }
+    }
+
+    // Step 2: Fetch recent videos - try YouTube Data API first, then RSS fallback
+    if (!recent && env.YOUTUBE_API_KEY) {
+      try {
+        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (apiVideos && apiVideos.length > 0) {
+          recent = apiVideos;
+          if (meta) meta.lastVideoId = apiVideos[0].videoId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
+            name: channelId,
+            avatarUrl: null,
+            lastVideoId: apiVideos[0].videoId,
+            addedAt: Date.now(),
+          });
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+        }
+      } catch (e) {
+        console.warn(`[API] Video search failed for ${channelId}:`, e.message);
+      }
+    }
+
+    // Step 3: RSS fallback (if API didn't work)
+    if (!recent) {
+      try {
+        const rssResult = await fetchYouTubeRSS(channelId);
+        if (rssResult?.videos?.length > 0) {
+          recent = rssResult.videos.slice(0, 15).map((v) => ({
+            videoId: v.videoId,
+            title: v.title,
+            publishedAt: v.published,
+            thumbnail: v.thumbnail,
+            type: classifyVideo(v),
+            link: v.link,
+          }));
+
+          if (!meta) {
+            meta = {
+              name: rssResult.channel?.name || channelId,
+              avatarUrl: null,
+              lastVideoId: rssResult.videos[0]?.videoId || null,
+              addedAt: Date.now(),
+            };
+          } else {
+            meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+          }
+
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+        }
+      } catch (e) {
+        console.warn(`[API] RSS bootstrap failed for ${channelId}:`, e.message);
+      }
+    }
+  }
+
+  // WebSub subscription + channels:active index (async — not blocking the response)
+  ctx.waitUntil((async () => {
+    if (isFirstSubscriber) {
+      const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
+      if (!active.includes(channelId)) {
+        active.push(channelId);
+        await putKV(env.TUBEPULSE_KV, key.channelsActive(), active);
+      }
+
+      const subState = await getKV(env.TUBEPULSE_KV, key.channelWebsub(channelId));
+      if (!subState) {
+        const secret = crypto.randomUUID();
+        const success = await subscribeToChannel(channelId, callbackUrl, secret);
+        if (success) {
+          await putKV(env.TUBEPULSE_KV, key.channelWebsub(channelId), {
+            leaseExpiresAt: Date.now() + 86400 * 5 * 1000,
+            hmacSecret: secret,
+            lastVerified: Date.now(),
+          });
+        }
+      }
+    }
+  })());
+
+  return json({ ok: true, alreadySubscribed: false, channel: { channelId, meta, recent } });
+}
+
+// ─── POST /unsubscribe ─────────────────────────────────────────────────
+
+async function handleUnsubscribe(request, env, ctx) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { channelId } = body;
+  if (!channelId) return errorResponse('channelId is required');
+
+  // Remove from device channels
+  const channels = await getKV(env.TUBEPULSE_KV, key.deviceChannels(deviceId)) || [];
+  const updated = channels.filter((id) => id !== channelId);
+  await putKV(env.TUBEPULSE_KV, key.deviceChannels(deviceId), updated);
+
+  // Remove device from channel subscribers
+  const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+  const updatedSubs = subs.filter((id) => id !== deviceId);
+  await putKV(env.TUBEPULSE_KV, key.channelSubs(channelId), updatedSubs);
+
+  // Clean up device state + override for this channel
+  await env.TUBEPULSE_KV.delete(key.deviceState(deviceId, channelId));
+  await env.TUBEPULSE_KV.delete(key.deviceOverride(deviceId, channelId));
+
+  // If last subscriber, unsubscribe from WebSub and remove from active index
+  const isLastSubscriber = updatedSubs.length === 0;
+
+  if (isLastSubscriber) {
+    const callbackUrl = `${new URL(request.url).origin}/websub`;
+    ctx.waitUntil((async () => {
+      await unsubscribeFromChannel(channelId, callbackUrl);
+      await env.TUBEPULSE_KV.delete(key.channelWebsub(channelId));
+      // Remove from channels:active
+      const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
+      const newActive = active.filter((id) => id !== channelId);
+      await putKV(env.TUBEPULSE_KV, key.channelsActive(), newActive);
+    })());
+  }
+
+  return json({ ok: true });
+}
+
+// ─── POST /seen ─────────────────────────────────────────────────────────
+
+async function handleSeen(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { channelId, videoIds, clearAll } = body;
+  if (!channelId) return errorResponse('channelId is required');
+  if (!clearAll && !Array.isArray(videoIds)) return errorResponse('Provide videoIds array or clearAll: true');
+
+  const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
+    unwatched: [],
+    lastNagAt: null,
+    nagCount: 0,
+  };
+
+  if (clearAll) {
+    state.unwatched = [];
+  } else {
+    const removeSet = new Set(videoIds);
+    state.unwatched = (state.unwatched || []).filter((id) => !removeSet.has(id));
+  }
+
+  await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+
+  // Note: nag bucket entries are NOT actively cleaned up.
+  // When the nag cron fires, it re-checks state and skips already-seen videos.
+
+  return json({ ok: true, unwatchedCount: state.unwatched.length });
+}
+
+// ─── GET /feed ──────────────────────────────────────────────────────────
+
+async function handleFeed(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+  if (!profile) return errorResponse('Device not registered', 404);
+
+  const channels = await getKV(env.TUBEPULSE_KV, key.deviceChannels(deviceId)) || [];
+
+  // Fetch meta, recent, and per-device state for each channel
+  const channelData = await Promise.all(channels.map(async (channelId) => {
+    const [meta, recent, state] = await Promise.all([
+      getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)),
+      getKV(env.TUBEPULSE_KV, key.channelRecent(channelId)),
+      getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)),
+    ]);
+
+    const unwatched = state?.unwatched || [];
+    const videos = (recent || []).map((v) => ({
+      ...v,
+      unwatched: unwatched.includes(v.videoId),
+    }));
+
+    return {
+      channelId,
+      meta: meta || { name: channelId },
+      videos,
+      unwatchedCount: unwatched.length,
+    };
+  }));
+
+  return json({ channels: channelData });
+}
+
+// ─── GET /resolve ───────────────────────────────────────────────────────
+
+async function handleResolve(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Authentication required', 401);
+
+  const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+  if (!profile) return errorResponse('Device not registered', 404);
+
+  const url = new URL(request.url);
+  const handle = url.searchParams.get('handle');
+  const channelId = url.searchParams.get('channelId');
+
+  if (!handle && !channelId) return errorResponse('Provide ?handle=@handle or ?channelId=UC...', 400);
+  if (!env.YOUTUBE_API_KEY) return errorResponse('Server misconfigured — missing API key', 500);
+
+  // Check handle cache first (7-day TTL)
+  if (handle) {
+    const cached = await getKV(env.TUBEPULSE_KV, key.handle(handle.toLowerCase()));
+    if (cached && cached.cachedAt > Date.now() - 7 * 86400 * 1000) {
+      return json(cached, 200, { 'Cache-Control': 'public, max-age=3600' });
+    }
+  }
+
+  try {
+    let result;
+    if (channelId) {
+      result = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
+    } else {
+      result = await resolveHandleViaAPI(env.YOUTUBE_API_KEY, handle);
+    }
+
+    if (!result) return errorResponse('Channel not found', 404);
+
+    // Cache handle resolution
+    if (handle && result.channelId) {
+      await putKV(env.TUBEPULSE_KV, key.handle(handle.toLowerCase()), {
+        ...result,
+        cachedAt: Date.now(),
+      });
+    }
+
+    return json(result, 200, { 'Cache-Control': 'public, max-age=3600' });
+  } catch (err) {
+    console.error('Resolver error:', err);
+    return errorResponse('Internal error', 500);
+  }
+}
+
+// ─── POST /bootstrap ────────────────────────────────────────────────────
+
+async function handleBootstrap(request, env, ctx) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Authentication required', 401);
+
+  const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+  if (!profile) return errorResponse('Device not registered', 404);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { channelId } = body;
+  if (!channelId) return errorResponse('channelId is required');
+
+  // Verify this device tracks this channel
+  const channels = await getKV(env.TUBEPULSE_KV, key.deviceChannels(deviceId)) || [];
+  if (!channels.includes(channelId)) return errorResponse('Channel not tracked by this device', 404);
+
+  const callbackUrl = `${new URL(request.url).origin}/websub`;
+
+  // Fetch avatar if missing
+  let meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId));
+
+  if (!meta && env.YOUTUBE_API_KEY) {
+    try {
+      const resolved = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
+      if (resolved) {
+        meta = {
+          name: resolved.name || channelId,
+          avatarUrl: resolved.avatar || null,
+          lastVideoId: null,
+          addedAt: Date.now(),
+        };
+        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+      }
+    } catch (e) {
+      console.warn(`[Bootstrap] Avatar fetch failed for ${channelId}:`, e.message);
+    }
+  }
+
+  // Fetch recent videos - YouTube Data API first, RSS fallback
+  let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
+  if (!recent) {
+    // Try YouTube Data API search
+    if (env.YOUTUBE_API_KEY) {
+      try {
+        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (apiVideos && apiVideos.length > 0) {
+          recent = apiVideos;
+          if (meta) meta.lastVideoId = apiVideos[0].videoId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
+            name: channelId,
+            avatarUrl: null,
+            lastVideoId: apiVideos[0].videoId,
+            addedAt: Date.now(),
+          });
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+        }
+      } catch (e) {
+        console.warn(`[Bootstrap] Video search failed for ${channelId}:`, e.message);
+      }
+    }
+
+    // RSS fallback
+    if (!recent) {
+      const rssResult = await fetchYouTubeRSS(channelId);
+      if (rssResult?.videos?.length > 0) {
+        recent = rssResult.videos.slice(0, 15).map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+          publishedAt: v.published,
+          thumbnail: v.thumbnail,
+          type: classifyVideo(v),
+          link: v.link,
+        }));
+
+        if (!meta) {
+          meta = {
+            name: rssResult.channel?.name || channelId,
+            avatarUrl: null,
+            lastVideoId: rssResult.videos[0]?.videoId || null,
+            addedAt: Date.now(),
+          };
+        } else {
+          meta.lastVideoId = rssResult.videos[0]?.videoId || meta.lastVideoId;
+        }
+
+        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+        await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+      }
+    }
+  }
+
+  // Subscribe to WebSub (async)
+  ctx.waitUntil((async () => {
+    const subState = await getKV(env.TUBEPULSE_KV, key.channelWebsub(channelId));
+    if (!subState) {
+      const secret = crypto.randomUUID();
+      const success = await subscribeToChannel(channelId, callbackUrl, secret);
+      if (success) {
+        await putKV(env.TUBEPULSE_KV, key.channelWebsub(channelId), {
+          leaseExpiresAt: Date.now() + 86400 * 5 * 1000,
+          hmacSecret: secret,
+          lastVerified: Date.now(),
+        });
+
+        // Ensure in active index
+        const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
+        if (!active.includes(channelId)) {
+          active.push(channelId);
+          await putKV(env.TUBEPULSE_KV, key.channelsActive(), active);
+        }
+      }
+    }
+  })());
+
+  return json({
+    ok: true,
+    channelId,
+    name: meta?.name || channelId,
+    avatar: meta?.avatarUrl || null,
+    videos: recent || [],
+  });
+}
+
+// ─── POST /settings ─────────────────────────────────────────────────────
+
+async function handleSettings(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { settings } = body;
+  if (!settings) return errorResponse('settings is required');
+
+  // Full replacement write
+  await putKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId), settings);
+  return json({ ok: true });
+}
+
+// ─── POST /channel-override ─────────────────────────────────────────────
+
+async function handleChannelOverride(request, env) {
+  const deviceId = getDeviceId(request);
+  if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  let body;
+  try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
+
+  const { channelId, override } = body;
+  if (!channelId) return errorResponse('channelId is required');
+
+  const overrideKey = key.deviceOverride(deviceId, channelId);
+
+  // Empty override → delete the key (inherit from device-level settings)
+  if (!override || Object.keys(override).length === 0) {
+    await env.TUBEPULSE_KV.delete(overrideKey);
+    return json({ ok: true, deleted: true });
+  }
+
+  await putKV(env.TUBEPULSE_KV, overrideKey, override);
+  return json({ ok: true });
+}
+
+// ─── GET /websub — Verification handshake ──────────────────────────────
+
+async function handleWebSubVerification(request, env) {
+  const url = new URL(request.url);
+  const mode = url.searchParams.get('hub.mode');
+  const topic = url.searchParams.get('hub.topic');
+  const challenge = url.searchParams.get('hub.challenge');
+  const leaseSeconds = url.searchParams.get('hub.lease_seconds');
+
+  if (!mode || !topic || !challenge) {
+    return new Response('Missing parameters', { status: 400 });
+  }
+
+  const channelIdMatch = topic.match(/channel_id=([A-Za-z0-9_-]+)/);
+  const channelId = channelIdMatch ? channelIdMatch[1] : null;
+
+  if (!channelId) return new Response('Invalid topic', { status: 400 });
+
+  // Verify we have a subscription for this channel
+  const subState = await getKV(env.TUBEPULSE_KV, key.channelWebsub(channelId));
+  if (!subState) {
+    console.warn(`[WebSub] Verification for unknown channel: ${channelId}`);
+    return new Response('Unknown subscription', { status: 404 });
+  }
+
+  if (mode === 'subscribe') {
+    const leaseMs = leaseSeconds ? parseInt(leaseSeconds) * 1000 : 86400 * 5 * 1000;
+    subState.leaseExpiresAt = Date.now() + leaseMs;
+    subState.lastVerified = Date.now();
+    await putKV(env.TUBEPULSE_KV, key.channelWebsub(channelId), subState);
+    console.log(`[WebSub] Subscribed to ${channelId}, lease: ${leaseSeconds}s`);
+  } else if (mode === 'unsubscribe') {
+    await env.TUBEPULSE_KV.delete(key.channelWebsub(channelId));
+    console.log(`[WebSub] Unsubscribed from ${channelId}`);
+  }
+
+  return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+}
+
+// ─── POST /websub — Push from YouTube ──────────────────────────────────
+
+async function handleWebSubPush(request, env, ctx) {
+  const signature = request.headers.get('X-Hub-Signature');
+
+  let xmlText;
+  try { xmlText = await request.text(); } catch { return new Response('Bad request', { status: 400 }); }
+
+  // Quick-extract channelId for HMAC verification
+  const quickChannelId = xmlText.match(/<yt:channelId>([^<]+)<\/yt:channelId>/)?.[1];
+
+  if (quickChannelId && signature) {
+    const subState = await getKV(env.TUBEPULSE_KV, key.channelWebsub(quickChannelId));
+    if (subState?.hmacSecret) {
+      const valid = await verifyWebSubSignature(xmlText, signature, subState.hmacSecret);
+      if (!valid) {
+        console.warn(`[WebSub] Invalid signature for ${quickChannelId} — rejecting`);
+        return new Response('Forbidden', { status: 403 });
+      }
+    }
+  }
+
+  const parsed = parseWebSubPush(xmlText);
+  if (!parsed.channelId || parsed.entries.length === 0) {
+    return new Response('OK', { status: 200 });
+  }
+
+  const channelId = parsed.channelId;
+  const channelName = parsed.channelName;
+
+  // Process in background
+  ctx.waitUntil((async () => {
+    // Step 1: Update channel recent list
+    const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId)) || [];
+    const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
+
+    const newEntries = [];
+    for (const entry of parsed.entries) {
+      if (!prevVideoIds.has(entry.videoId)) {
+        newEntries.push({
+          videoId: entry.videoId,
+          title: entry.title,
+          publishedAt: entry.published,
+          thumbnail: entry.thumbnail,
+          type: classifyVideo(entry),
+          link: entry.link,
+        });
+      }
+    }
+
+    if (newEntries.length > 0) {
+      // Prepend new entries, trim to 15
+      const updatedRecent = [...newEntries, ...prevRecent].slice(0, 15);
+      await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent);
+
+      // Update meta
+      const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
+      meta.name = channelName || meta.name || channelId;
+      meta.lastVideoId = newEntries[0].videoId;
+      await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+    } else {
+      // Duplicate push — update meta name only if we didn't have it
+      const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
+      if (!meta.name && channelName) {
+        meta.name = channelName;
+        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+      }
+      return; // No new videos
+    }
+
+    // Step 2: Get subscribers
+    const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+    if (subs.length === 0) return;
+
+    // Step 3: Get FCM access token
+    let accessToken;
+    try {
+      accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+    } catch (err) {
+      console.error('[WebSub] Failed to get FCM access token:', err);
+      return;
+    }
+
+    const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+    const projectId = sa.project_id;
+
+    // Step 4: For each subscriber, send notification + update state + schedule nag
+    for (const deviceId of subs) {
+      // Read profile + settings + override
+      const [deviceProfile, deviceSettings, deviceOverride] = await Promise.all([
+        getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId)),
+        getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)),
+        getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId)),
+      ]);
+
+      if (!deviceProfile?.fcmToken) continue;
+
+      // Resolve effective settings
+      const effective = {
+        mode: deviceOverride?.mode || deviceSettings?.mode || 'chill',
+        nagInterval: deviceOverride?.nagInterval || deviceSettings?.nagInterval || 15,
+        dndEnabled: deviceSettings?.dndEnabled || false,
+        dndStart: deviceSettings?.dndStart || '22:00',
+        dndEnd: deviceSettings?.dndEnd || '07:00',
+        dndBypass: deviceOverride?.dndBypass || false,
+        muted: deviceOverride?.muted || false,
+        tapAction: deviceSettings?.tapAction || 'video',
+      };
+
+      if (effective.muted) continue;
+
+      // Get current per-device state for this channel
+      const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
+        unwatched: [],
+        lastNagAt: null,
+        nagCount: 0,
+      };
+
+      const fcmToken = deviceProfile.fcmToken;
+      let shouldNotify = true;
+
+      for (const entry of newEntries) {
+        // Add to unwatched
+        if (!state.unwatched.includes(entry.videoId)) {
+          state.unwatched.push(entry.videoId);
+        }
+
+        if (entry.type === 'live_scheduled') {
+          // Schedule upcoming bucket entries
+          const publishedTime = new Date(entry.publishedAt).getTime();
+
+          // 30-min heads-up
+          const headsUpTime = publishedTime - 30 * 60 * 1000;
+          if (headsUpTime > Date.now()) {
+            const bucket = upcomingBucket(new Date(headsUpTime).toISOString());
+            const bucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(bucket)) || [];
+            bucketData.push({
+              channelId,
+              videoId: entry.videoId,
+              type: 'live_scheduled',
+              scheduledFor: publishedTime,
+              headsUp: true,
+            });
+            await putKV(env.TUBEPULSE_KV, key.upcoming(bucket), bucketData);
+          }
+
+          // Live-now detection at scheduled time
+          const liveBucket = upcomingBucket(new Date(publishedTime).toISOString());
+          const liveBucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(liveBucket)) || [];
+          liveBucketData.push({
+            channelId,
+            videoId: entry.videoId,
+            type: 'live_scheduled',
+            scheduledFor: publishedTime,
+            headsUp: false,
+          });
+          await putKV(env.TUBEPULSE_KV, key.upcoming(liveBucket), liveBucketData);
+
+          // Don't send immediate notification for scheduled events
+          continue;
+        }
+
+        // Non-scheduled: check DND
+        const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd);
+        const isLivestream = entry.type === 'live';
+        const bypassesDnd = effective.dndBypass || isLivestream;
+
+        if (dndActive && !bypassesDnd) {
+          // Schedule a nag for when DND ends
+          shouldNotify = false;
+          // We'll rely on the nag cycle to deliver when DND lifts
+        }
+      }
+
+      // Save updated state
+      await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+
+      // Send FCM notification for non-scheduled, non-DND-blocked new videos
+      const notifyEntries = newEntries.filter((e) =>
+        e.type !== 'live_scheduled' && shouldNotify
+      );
+
+      if (notifyEntries.length > 0) {
+        // Compose notification
+        let notifPayload;
+        if (notifyEntries.length === 1) {
+          const entry = notifyEntries[0];
+          notifPayload = {
+            title: `${channelName || channelId} uploaded`,
+            body: entry.title,
+            data: {
+              videoId: entry.videoId,
+              channelId,
+              channelName: channelName || channelId,
+              videoLink: entry.link,
+              type: entry.type,
+            },
+            tag: `video-${entry.videoId}`,
+          };
+        } else {
+          // Multiple new videos — batch
+          notifPayload = {
+            title: `${channelName || channelId} — ${notifyEntries.length} new videos`,
+            body: notifyEntries.map((e) => e.title).join('\n'),
+            data: {
+              type: 'batch',
+              count: String(notifyEntries.length),
+              channelId,
+            },
+            tag: 'tubepulse-batch',
+          };
+        }
+
+        const result = await sendFCMPush(accessToken, projectId, fcmToken, notifPayload);
+
+        if (result.deadToken) {
+          // Clean up dead device
+          console.log(`[WebSub] Pruning dead token: ${deviceId}`);
+          // Remove device profile and from all subscriber lists
+          await env.TUBEPULSE_KV.delete(key.deviceProfile(deviceId));
+          // Remove from this channel's subscribers (others handled by cron or next push)
+          const currentSubs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+          await putKV(env.TUBEPULSE_KV, key.channelSubs(channelId), currentSubs.filter((id) => id !== deviceId));
+        }
+      }
+
+      // Schedule nag for unwatched videos
+      if (state.unwatched.length > 0 && shouldNotify) {
+        const nagIntervalMs = effective.nagInterval * 60 * 1000;
+        const nextNagTime = effective.mode === 'chill'
+          ? Date.now() + 4 * 60 * 60 * 1000  // 4 hours
+          : Date.now() + nagIntervalMs;
+
+        const bucket = nagBucket(nextNagTime);
+        const bucketData = await getKV(env.TUBEPULSE_KV, key.nag(bucket)) || [];
+        // Avoid duplicate entries
+        const exists = bucketData.some((e) => e.deviceId === deviceId && e.channelId === channelId);
+        if (!exists) {
+          bucketData.push({
+            deviceId,
+            channelId,
+            videoIds: [...state.unwatched],
+          });
+          await putKV(env.TUBEPULSE_KV, key.nag(bucket), bucketData);
+        }
+      }
+    }
+  })());
+
+  return new Response('OK', { status: 200 });
+}
+
+// ─── Main handler ───────────────────────────────────────────────────────
+
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders() });
+    }
+
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    try {
+      // WebSub
+      if (path === '/websub' && request.method === 'GET') {
+        return await handleWebSubVerification(request, env);
+      }
+      if (path === '/websub' && request.method === 'POST') {
+        return await handleWebSubPush(request, env, ctx);
+      }
+
+      // App routes
+      if (path === '/register' && request.method === 'POST') {
+        return await handleRegister(request, env);
+      }
+      if (path === '/subscribe-channel' && request.method === 'POST') {
+        return await handleSubscribeChannel(request, env, ctx);
+      }
+      if (path === '/unsubscribe' && request.method === 'POST') {
+        return await handleUnsubscribe(request, env, ctx);
+      }
+      if (path === '/seen' && request.method === 'POST') {
+        return await handleSeen(request, env);
+      }
+      if (path === '/feed' && request.method === 'GET') {
+        return await handleFeed(request, env);
+      }
+      if (path === '/resolve' && request.method === 'GET') {
+        return await handleResolve(request, env);
+      }
+      if (path === '/bootstrap' && request.method === 'POST') {
+        return await handleBootstrap(request, env, ctx);
+      }
+      if (path === '/settings' && request.method === 'POST') {
+        return await handleSettings(request, env);
+      }
+      if (path === '/channel-override' && request.method === 'POST') {
+        return await handleChannelOverride(request, env);
+      }
+
+      if (path === '/' && request.method === 'GET') {
+        return json({ status: 'ok', version: '3.0.0', worker: 'tubepulse-api', architecture: 'channel-first' });
+      }
+
+      return errorResponse('Not found', 404);
+    } catch (err) {
+      console.error('Unhandled error:', err);
+      return errorResponse('Internal server error', 500);
+    }
+  },
+};
