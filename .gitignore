@@ -1,8 +1,43 @@
+# Dependencies
 node_modules/
+
+# Expo
 .expo/
+
+# Build artefacts
 *.apk
-.aider*
+*.aab
+
+# Wrangler local secrets
+# .dev.vars is read by wrangler dev and deploy --dry-run; never commit
+.dev.vars
+.dev.vars.*
+worker/*/.dev.vars
+worker/*/.wrangler/
+
+# Local secrets and credentials
+# CRITICAL: anything under secrets/ is live credentials — NEVER commit
+/secrets/
+**/secrets/
+secrets/cloudflare.env
+secrets/youtube.env
+secrets/fcm-service-account.json
+secrets/*.env
+secrets/*.json
+secrets/*.key
+secrets/*.pem
+
+# Service-account / Firebase artefacts
 worker/tubepulse-fcm-service-account.json
 .firebaserc
 firebase-debug.log
-worker/tubepulse-cron/.wrangler/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Aider
+.aider*

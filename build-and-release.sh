@@ -4,15 +4,20 @@ set -euo pipefail
 # ============================================================
 # TubePulse — Local APK Build & GitHub Release
 # ============================================================
-# Usage: ./build-and-release.sh <version>
-#   e.g. ./build-and-release.sh 1.0.0
+# Usage: ./build-and-release.sh <version> [<branch>]
+#   e.g., ./build-and-release.sh 3.0.13
+#   e.g., ./build-and-release.sh 3.0.13 v3-restored
+#
+# If no branch is given, the current branch is used.
+# Secrets must be loaded first:
+#   source secrets/load-secrets.sh
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="/mnt/d/Dev/TubePulse"
+REPO_DIR="$SCRIPT_DIR"
 REPO="Undert0e-505/TubePulse"
 APP_NAME="TubePulse"
-GH="$HOME/bin/gh"
+GH="$(command -v gh || echo "$HOME/bin/gh")"
 ENV_SCRIPT="$HOME/.openclaw/workspace/android-env.sh"
 
 # --- Source environment ---
@@ -24,12 +29,14 @@ export TEMP="/mnt/d/tmp"
 export TMP="/mnt/d/tmp"
 mkdir -p "$TMPDIR"
 
-# --- Parse version arg ---
-VERSION="${1:?Usage: build-and-release.sh <version> (e.g., 1.0.0)}"
+# --- Parse args ---
+VERSION="${1:?Usage: build-and-release.sh <version> [<branch>]}"
+BRANCH="${2:-$(git rev-parse --abbrev-ref HEAD)}"
 TAG="v${VERSION}"
 
 echo "======================================"
 echo "  ${APP_NAME} — Build & Release ${TAG}"
+echo "  Branch: ${BRANCH}"
 echo "======================================"
 
 # --- Check if tag already exists ---
@@ -55,6 +62,18 @@ node -e "
 echo ""
 echo "[2/5] Installing dependencies..."
 npm install --silent 2>&1 | tail -3
+
+# --- Step 2b: Pre-build native android project ---
+# (Only needed if Expo plugins/native deps changed since last build.
+# The first time, or after changing google-services.json etc., this is
+# essential — otherwise eas local will use stale native code.)
+echo ""
+echo "[2b/5] Pre-building native android project..."
+if npx expo prebuild --clean --no-install 2>&1 | tail -5; then
+  echo "  prebuild OK"
+else
+  echo "  prebuild failed or skipped, continuing anyway"
+fi
 
 # --- Step 3: Build APK locally ---
 echo ""
@@ -84,10 +103,10 @@ echo "  APK built: ${APK_OUTPUT} (${APK_SIZE})"
 
 # --- Step 4: Commit and push ---
 echo ""
-echo "[4/5] Committing version bump and pushing..."
+echo "[4/5] Committing version bump and pushing to ${BRANCH}..."
 git add app.json
 git commit -m "Bump version to ${VERSION}" || echo "  No changes to commit"
-git push origin master
+git push origin "${BRANCH}"
 
 # --- Step 5: Create GitHub release ---
 echo ""
