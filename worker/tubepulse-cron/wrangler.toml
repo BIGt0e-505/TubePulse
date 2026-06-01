@@ -1,11 +1,11 @@
 name = "tubepulse-cron"
 main = "index.js"
 compatibility_date = "2025-04-01"
-account_id = "93e62acb204fe695139d8441880ed4a3"
+account_id = "77bb7769185bbfeb53feef16b9f72803"
 
 [[kv_namespaces]]
 binding = "TUBEPULSE_KV"
-id = "f2ac3fd3ae9c457287074e7e32c66c64"
+id = "52e77ca9f5f6493e89d2478c8d3055ec"
 
 [triggers]
 crons = ["*/5 * * * *"]

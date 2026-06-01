@@ -2,7 +2,7 @@ import React from 'react';
 import { Linking } from 'react-native';
 import { TubePulseWidget } from './TubePulseWidget';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
-import { fetchFeed } from '../utils/api';
+import { fetchFeed, getDeviceId } from '../utils/api';
 
 const nameToWidget = {
   TubePulseWidget: TubePulseWidget,
@@ -34,26 +34,31 @@ async function buildWidgetData(fetchFresh = false) {
     const cacheEmpty = Object.keys(cache).length === 0;
     if ((cacheEmpty || fetchFresh) && channels.length > 0) {
       try {
-        const messaging = require('@react-native-firebase/messaging').default;
-        const fcmToken = await messaging().getToken();
-        if (fcmToken) {
-          const result = await fetchFeed(fcmToken);
-          if (result.ok && result.feeds) {
+        const deviceId = await getDeviceId();
+        if (deviceId) {
+          const result = await fetchFeed(deviceId);
+          // Server returns { channels: [{ channelId, meta, videos, unwatchedCount }] }
+          if (result.ok && Array.isArray(result.channels)) {
             const newCache = {};
-            for (const [handle, feed] of Object.entries(result.feeds)) {
-              const channel = channels.find(ch => ch.handle === handle);
+            // Build a map of channelId → channel (local) for handle lookup
+            const channelById = Object.fromEntries(
+              channels.filter(c => c.channelId).map(c => [c.channelId, c])
+            );
+            for (const feed of result.channels) {
+              const local = channelById[feed.channelId];
+              const handle = local?.handle;
+              if (!handle) continue;
               newCache[handle] = {
-                name: feed.name,
-                avatar: feed.avatar,
+                name: feed.meta?.name || local?.name || handle,
+                avatar: feed.meta?.avatarUrl || null,
                 videos: feed.videos || [],
                 latestVideo: feed.videos?.[0] || null,
-                channelId: channel?.channelId || null,
-                lastChecked: feed.lastChecked,
+                channelId: feed.channelId,
+                lastChecked: new Date().toISOString(),
               };
             }
             if (Object.keys(newCache).length > 0) {
               await saveChannelCache(newCache);
-              if (result.lastSeen) await saveLastSeen(result.lastSeen);
               activeCache = newCache;
             }
           }

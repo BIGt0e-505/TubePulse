@@ -109,13 +109,42 @@ export async function unsubscribeChannel(deviceId, channelId) {
 }
 
 /**
+ * Get the device's IANA timezone (e.g. "Europe/London").
+ * Falls back to "UTC" if Intl is unavailable (very old runtimes).
+ */
+export function getLocalTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+/**
+ * Convert local settings shape to the server-expected shape.
+ * Local uses `notificationMode` (UX-friendly); server uses `mode` (compact).
+ * Also stamps the current device timezone so DND works regardless of the
+ * worker's UTC clock.
+ */
+function toServerSettings(local) {
+  if (!local) return local;
+  const { notificationMode, ...rest } = local;
+  return {
+    ...rest,
+    mode: notificationMode ?? 'chill',
+    dndTimezone: getLocalTimezone(),
+  };
+}
+
+/**
  * Update notification settings (full replacement).
+ * The local settings shape is automatically converted to the server shape.
  */
 export async function updateSettings(deviceId, settings) {
   return await apiFetch('/settings', {
     method: 'POST',
     deviceId,
-    body: { settings },
+    body: { settings: toServerSettings(settings) },
   });
 }
 
