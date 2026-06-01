@@ -31,13 +31,30 @@ async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
 
 // ─── DND logic ──────────────────────────────────────────────────────────
 
-function isDndActive(dndStart, dndEnd) {
-  const now = new Date();
+function isDndActive(dndStart, dndEnd, timezone = 'UTC') {
   const [sh, sm] = dndStart.split(':').map(Number);
   const [eh, em] = dndEnd.split(':').map(Number);
-  const nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
   const startMins = sh * 60 + sm;
   const endMins = eh * 60 + em;
+
+  // Get the current hour/minute in the device's timezone (Intl is available in
+  // the Workers JS runtime). Falls back to UTC if the tz string is invalid.
+  let nowMins;
+  try {
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(new Date());
+    const hh = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+    const mm = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+    nowMins = hh * 60 + mm;
+  } catch {
+    const now = new Date();
+    nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  }
 
   if (startMins <= endMins) {
     return nowMins >= startMins && nowMins < endMins;
@@ -274,13 +291,14 @@ async function runUpcomingCron(env) {
         dndEnabled: settings?.dndEnabled || false,
         dndStart: settings?.dndStart || '22:00',
         dndEnd: settings?.dndEnd || '07:00',
+        dndTimezone: settings?.dndTimezone || 'UTC',
         dndBypass: override?.dndBypass || false,
         muted: override?.muted || false,
       };
 
       if (effective.muted) continue;
 
-      const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd);
+      const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
       if (dndActive && !effective.dndBypass) continue;
 
       let title, body;
@@ -418,6 +436,7 @@ async function runNagCron(env) {
       dndEnabled: settings?.dndEnabled || false,
       dndStart: settings?.dndStart || '22:00',
       dndEnd: settings?.dndEnd || '07:00',
+      dndTimezone: settings?.dndTimezone || 'UTC',
       dndBypass: override?.dndBypass || false,
       muted: override?.muted || false,
       tapAction: settings?.tapAction || 'video',
@@ -426,7 +445,7 @@ async function runNagCron(env) {
     if (effective.muted) continue;
 
     // DND check
-    const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd);
+    const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
     if (dndActive && !effective.dndBypass) {
       // Re-schedule nag for next bucket after DND ends
       // (approximation: just try again in 15 min)

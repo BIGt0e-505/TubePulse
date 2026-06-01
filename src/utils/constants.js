@@ -38,6 +38,7 @@ export const DEFAULT_SETTINGS = {
   dndStart: '22:00',
   dndEnd: '07:00',
   perChannelNotifications: false,  // enable per-channel notification overrides
+  dndTimezone: 'UTC',              // IANA tz string; overridden at runtime via Intl.DateTimeFormat
 };
 
 export const COLORS = {

@@ -78,13 +78,30 @@ async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
 
 // ─── DND logic ──────────────────────────────────────────────────────────
 
-function isDndActive(dndStart, dndEnd) {
-  const now = new Date();
+function isDndActive(dndStart, dndEnd, timezone = 'UTC') {
   const [sh, sm] = dndStart.split(':').map(Number);
   const [eh, em] = dndEnd.split(':').map(Number);
-  const nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
   const startMins = sh * 60 + sm;
   const endMins = eh * 60 + em;
+
+  // Get the current hour/minute in the device's timezone (Intl is available in
+  // the Workers JS runtime). Falls back to UTC if the tz string is invalid.
+  let nowMins;
+  try {
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(new Date());
+    const hh = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+    const mm = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+    nowMins = hh * 60 + mm;
+  } catch {
+    const now = new Date();
+    nowMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  }
 
   if (startMins <= endMins) {
     return nowMins >= startMins && nowMins < endMins;
@@ -1106,6 +1123,7 @@ async function handleWebSubPush(request, env, ctx) {
         dndEnabled: deviceSettings?.dndEnabled || false,
         dndStart: deviceSettings?.dndStart || '22:00',
         dndEnd: deviceSettings?.dndEnd || '07:00',
+        dndTimezone: deviceSettings?.dndTimezone || 'UTC',
         dndBypass: deviceOverride?.dndBypass || false,
         muted: deviceOverride?.muted || false,
         tapAction: deviceSettings?.tapAction || 'video',
@@ -1165,7 +1183,7 @@ async function handleWebSubPush(request, env, ctx) {
         }
 
         // Non-scheduled: check DND
-        const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd);
+        const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
         const isLivestream = entry.type === 'live';
         const bypassesDnd = effective.dndBypass || isLivestream;
 
