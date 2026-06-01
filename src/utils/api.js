@@ -14,7 +14,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_URL = 'https://tubepulse-api.aaronjoakley55.workers.dev';
+const API_URL = 'https://tubepulse-api.jimothyoakley55.workers.dev';
 const DEVICE_ID_KEY = 'tubepulse_device_id';
 
 /**

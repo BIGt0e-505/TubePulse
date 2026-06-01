@@ -542,7 +542,7 @@ async function runNagCron(env) {
 // ─── Job 3: Lease renewal (every 6 hours) ──────────────────────────────
 
 async function runLeaseCron(env) {
-  const callbackUrl = 'https://tubepulse-api.aaronjoakley55.workers.dev/websub';
+  const callbackUrl = 'https://tubepulse-api.jimothyoakley55.workers.dev/websub';
   const renewed = await renewSubscriptions(env, callbackUrl);
   return { renewed };
 }
