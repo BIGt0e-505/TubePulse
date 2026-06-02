@@ -1239,6 +1239,7 @@ async function handleWebSubPush(request, env, ctx) {
 
   // Process in background
   ctx.waitUntil((async () => {
+    try {
     // Step 1: Update channel recent list
     const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId)) || [];
     const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
@@ -1454,6 +1455,9 @@ async function handleWebSubPush(request, env, ctx) {
           await putKV(env.TUBEPULSE_KV, key.nag(bucket), bucketData);
         }
       }
+    }
+    } catch (err) {
+      console.error('[WebSub] waitUntil CRASHED:', err && err.stack || err);
     }
   })());
 
