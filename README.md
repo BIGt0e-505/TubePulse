@@ -17,13 +17,14 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 > **Note:** Each device registers independently. There's no cross-device sync — if you install TubePulse on two phones, each manages its own channel list and settings.
 
 ### ⚡ New-Video Detection
-TubePulse detects new uploads via a **YouTube Data API poller** running on a Cloudflare Worker cron (every 5 min). Originally it used **WebSub** (PubSubHubbub) for push-style detection, but Google's `pubsubhubbub.appspot.com` hub was shut down in 2024, so the cron polls `videos.list?channelId=...&order=date` for each tracked channel and diffs against the cached recent list.
+TubePulse detects new uploads via a **YouTube RSS feed poller** running on a Cloudflare Worker cron (every 5 min). Originally it used **WebSub** (PubSubHubbub) for push-style detection, but Google's `pubsubhubbub.appspot.com` hub was shut down in 2024, and the v3.0.18 build abandoned the YouTube Data API poller because RSS provides the same data at zero quota cost.
 
-**Active path (since 2024):**
-- **Polling-based** — cron hits the YouTube Data API every 5 min for every channel with at least one subscriber
-- **Cheap to operate** — 1 quota unit per channel per tick (~28,800/day at 100 channels, free tier is 10,000/day)
+**Active path (since v3.0.18):**
+- **RSS-based polling** — cron hits `https://www.youtube.com/feeds/videos.xml?channel_id=...` every 5 min for every channel with at least one subscriber
+- **Zero YouTube Data API quota cost** — RSS is a free public feed
 - **Latency** — up to 5 min between upload and detection
-- **Quota-aware** — at scale beyond ~35 channels, the bound becomes API quota, not architecture
+- **Includes view counts** — RSS carries `media:community/media:statistics/@_views` so we don't need a separate API call
+- **The YouTube Data API is reserved for subscribe-time only** — handle→channelId resolve (1 unit, cached 7 days) and avatar fetch (1 unit per new channel, cached forever)
 
 **WebSub (dormant):** the `/websub` endpoints and handler code remain in the workers for:
 - Manual testing
@@ -32,7 +33,7 @@ TubePulse detects new uploads via a **YouTube Data API poller** running on a Clo
 
 When a new video is detected, the worker pushes it to all eligible devices via FCM. New videos appear within 5 minutes of upload. WebSub leases would expire (typically 5 days), so a cron job would renew subscriptions 24 hours before expiry if the hub were active. The last device to remove a channel would trigger an unsubscribe.
 
-**Scheduled event detection:** YouTube Data API entries with a future `publishedAt` are treated as scheduled livestreams/premieres:
+**Scheduled event detection:** RSS entries with a future `publishedAt` are treated as scheduled livestreams/premieres:
 - Stored silently when detected — no immediate notification
 - **"Going live soon"** notification sent 1 nag interval before the scheduled start
 - **"Is live"** notification sent when the scheduled time passes
@@ -84,18 +85,17 @@ This is the key interaction: video tap for "I've seen this one", channel tap for
 ### Overview — v3.0 (channel-first)
 
 ```
-YouTube Data API ──poll every 5 min──▶ Cron Worker ──new videos──▶ API Worker ──FCM push──▶ Phone
-                                                      │                                       │
-                                                      ▼                                       │
-                                                Cloudflare KV                                  │
-                                                (channels:active,                              │
-                                                 channel meta/recent/subs,                     │
-                                                 device profile/settings/state/override)       │
-                                                                                               │
-                                                                                               ▼
-                                                                                          Phone
-                                                                          (also: scheduled events,
-                                                                           nag cycle, WebSub dormant)
+YouTube RSS feed ──poll every 5 min──▶ Cron Worker ──new videos──▶ API Worker ──FCM push──▶ Phone
+  (free, no auth)        │                                       │                       │
+                          ▼                                       ▼                       │
+                    Cloudflare KV                           YouTube Data API             │
+                    (channels:active,                       (subscribe-time only:        │
+                     channel meta/recent/subs,               handle→channelId,           │
+                     device profile/settings/state/override) avatar fetch — 1-2 units    │
+                                                                                       ▼
+                                                                                   Phone
+                                                                  (also: scheduled events,
+                                                                   nag cycle, WebSub dormant)
 ```
 
 **Key principle:** Channels are the unit of work. Devices are the unit of subscription.  
@@ -103,8 +103,9 @@ Every operation asks "what's happening to this channel" first, then "who cares a
 This inverts the old device-first approach and eliminates `KV.list()` entirely.
 
 **Detection paths in v3:**
-- **Active:** Cron Worker polls YouTube Data API every 5 min, diffs results against `channel:{id}:recent.lastVideoId`, fans out new videos to API Worker
+- **Active:** Cron Worker polls YouTube's public RSS feed (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) every 5 min, diffs results against `channel:{id}:recent.lastVideoId`, fans out new videos to API Worker. Zero YouTube Data API quota cost.
 - **Dormant:** WebSub handlers in both workers exist but the hub is shut down; `/websub` endpoint still works for manual testing or future hub revival
+- **YouTube Data API:** reserved for one-time, on-subscribe operations (handle resolve + avatar fetch). ~2 units per new channel added, then 0 forever for that channel.
 
 ### API Worker (`tubepulse-api`)
 
@@ -142,11 +143,11 @@ Runs every 5 minutes. Four jobs:
 
 Scans time-bucketed `upcoming:` keys for scheduled livestreams going live in the next 30 min.
 
-#### Job 2: YouTube Data API Polling — **active new-video detection**
+#### Job 2: YouTube RSS Polling — **active new-video detection**
 
-Iterates `channels:active` and calls `videos.list?part=snippet&channelId=...&order=date&maxResults=15` for each. Diffs the response against `channel:{channelId}:recent` to find new videoIds. For each new video, looks up subscribers and writes an entry to the API Worker for fan-out to FCM.
+Iterates `channels:active` and fetches `https://www.youtube.com/feeds/videos.xml?channel_id=...` for each. Parses the Atom feed (videoId, title, publishedAt, thumbnail, link, **and views** from `media:community/media:statistics/@_views`). Diffs against `channel:{channelId}:recent` to find new videoIds. For each new video, looks up subscribers and writes an entry to the API Worker for fan-out to FCM.
 
-Cost: 1 YouTube Data API quota unit per channel per 5-min tick. Fits in the 10K free tier up to ~35 channels.
+Cost: 0 YouTube Data API quota units. RSS is a free, public feed (no auth, no key). Cloudflare KV cost: ~1 read per channel per tick, with writes only when view counts change or a new video is detected.
 
 #### Job 3: Nag Cycle
 
@@ -245,7 +246,7 @@ Repeat until user watches
 | Framework | React Native + Expo |
 | Navigation | React Navigation (native stack) |
 | Storage | AsyncStorage (channels, settings, cache) |
-| Push Detection | YouTube Data API poller (cron-driven, 5 min). WebSub handler dormant (hub shut down 2024) |
+| Push Detection | YouTube RSS feed poller (cron-driven, 5 min). YouTube Data API is reserved for subscribe-time only (handle resolve + avatar fetch). |
 | Video Data | YouTube RSS/Atom feeds (parsed from WebSub pushes) |
 | API | YouTube Data API v3 (handle resolution + avatars only) |
 | Backend | Cloudflare Workers (API + Cron) |
