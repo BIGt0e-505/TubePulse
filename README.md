@@ -330,6 +330,8 @@ cd worker/tubepulse-api && npx wrangler deploy
 cd worker/tubepulse-cron && npx wrangler deploy
 ```
 
+For the full cloud architecture — KV schema, endpoint reference, FCM details, cost analysis, free tier budget — see **[worker/README.md](worker/README.md)**.
+
 Required Cloudflare secrets:
 - `YOUTUBE_API_KEY` — YouTube Data API key (for handle resolution + avatars)
 - `FIREBASE_SERVICE_ACCOUNT` — Firebase service account JSON (for FCM)
