@@ -759,19 +759,57 @@ async function runRssPollCron(env) {
       const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
       const newVideos = uploads.filter((v) => !prevVideoIds.has(v.videoId));
 
-      // 3. Re-stamp view counts on existing recent entries from the same
-      // RSS response. RSS gives us view counts for the latest 15 videos
-      // (which is exactly the size of the recent list), so this is free.
-      // Only write if a count actually changed.
+      // 3. Hourly view-count refresh for the LATEST video only.
+      //
+      // The RSS response gives us fresh view counts for all 15 videos
+      // for free, but we don't want to write every tick — that would
+      // burn ~576 writes/day for 4 channels. So:
+      //
+      //   - Only the latest video's view count is considered for writes
+      //   - The "latest video" is the first entry in prevRecent (newest first)
+      //   - We only consider refreshing on the top of a new hour
+      //   - We only write if the count changed by more than 5% from the
+      //     last value we stored (so small tick-by-tick fluctuations
+      //     don't trigger writes)
+      //   - View counts on prior videos (index 1-14) are read into the
+      //     local `refreshedPrev` but NOT persisted — they're ignored
+      //     for the write decision and stay at their last stored value
+      //   - When a new video is detected, we still write the new list
+      //     (which includes the new video's view count) — that path
+      //     is handled below
+      //
+      // Net effect: cron writes drop from ~576/day to ~96/day for 4
+      // channels (at most one hourly write per channel, often zero
+      // when the 5% threshold isn't met).
       const rssByVideoId = new Map(uploads.map((u) => [u.videoId, u]));
-      const refreshedPrev = prevRecent.map((v) => {
-        const fromRss = rssByVideoId.get(v.videoId);
-        if (fromRss && fromRss.views && fromRss.views !== v.views) {
-          return { ...v, views: fromRss.views };
+      const refreshedPrev = prevRecent.map((v) => v); // start with originals
+      let recentChanged = false;
+
+      const latest = prevRecent[0];
+      const latestFromRss = latest && rssByVideoId.get(latest.videoId);
+      const currentHour = Math.floor(Date.now() / 3600000);
+
+      if (latest && latestFromRss && latestFromRss.views) {
+        const oldViews = parseInt(latest.views || '0', 10);
+        const newViews = parseInt(latestFromRss.views, 10);
+        // Only consider refreshing on the top of a new hour, AND only
+        // if the count changed by more than 5% (or it's a new video
+        // we haven't counted yet).
+        if (
+          !isNaN(oldViews) && !isNaN(newViews) &&
+          currentHour !== latest.viewsLastCheckedHour &&
+          (oldViews === 0 || Math.abs(newViews - oldViews) / Math.max(oldViews, 1) > 0.05)
+        ) {
+          refreshedPrev[0] = { ...latest, views: String(newViews), viewsLastCheckedHour: currentHour };
+          recentChanged = true;
+        } else if (latest.viewsLastCheckedHour === undefined) {
+          // First time we see this video — record the hour so we don't
+          // re-check on the next tick. Don't write yet; wait for an
+          // actual change.
+          refreshedPrev[0] = { ...latest, viewsLastCheckedHour: currentHour };
+          recentChanged = true;
         }
-        return v;
-      });
-      const recentChanged = refreshedPrev.some((v, i) => v !== prevRecent[i]);
+      }
 
       if (newVideos.length === 0) {
         if (recentChanged) {
@@ -781,6 +819,10 @@ async function runRssPollCron(env) {
       }
 
       // 4. New videos detected — build the updated recent list
+      // The newest video's view count is fresh from this RSS response.
+      // Prior videos keep their last-stored view counts (we don't bother
+      // refreshing them in this path either, even on new-video ticks,
+      // because the new video is the one that matters for the user).
       const enrichedNew = newVideos.map((v) => ({
         videoId: v.videoId,
         title: v.title,
