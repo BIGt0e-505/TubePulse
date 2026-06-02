@@ -59,6 +59,14 @@ export default function HomeScreen({ navigation }) {
             const ch = localChannels.find((c) => c.channelId === serverChannel.channelId);
             const handle = ch?.handle || serverChannel.channelId;
 
+            // Build a lookup of existing local videos by id so we can fall
+            // back to locally-cached views if the server response is missing
+            // the field (e.g. for a server response that was prepared by an
+            // older worker build, or any other transient gap).
+            const existingByVideoId = new Map(
+              ((cacheRef.current[handle] || {}).videos || []).map((v) => [v.videoId, v])
+            );
+
             const videos = (serverChannel.videos || []).map((v) => ({
               videoId: v.videoId,
               title: v.title,
@@ -67,6 +75,7 @@ export default function HomeScreen({ navigation }) {
               link: v.link,
               type: v.type,
               unwatched: v.unwatched,
+              views: v.views || existingByVideoId.get(v.videoId)?.views || '0',
             }));
 
             // Use the ref so this callback stays stable across renders
