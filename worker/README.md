@@ -175,6 +175,8 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 
 **`channels:active` is the secret sauce.** It replaces a `KV.list()` call — the only way to know "which channels have at least one subscriber" without scanning the entire namespace. The cron reads this list, processes each channel, done. No `list()`.
 
+**Key lifecycle (cleanup):** channel and device keys are deleted by two helpers, `cleanupDeadChannel()` and `cleanupDeadDevice()` — see §11. Channel keys (`meta`/`recent`/`websub` + the `channels:active` membership) are deleted when the last subscriber leaves or is detected as dead. Device keys (`profile`/`settings`/`channels`/`state:*`/`override:*`) are deleted only when the FCM token is reported dead.
+
 ---
 
 ## 6. Cost analysis (1 user, 4 channels)
@@ -210,6 +212,8 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 - **Total: ~200 writes/day = 20% of free tier**
 
 **`KV.list()` calls: 0.** Replaced by the `channels:active` index.
+
+**Deletes per day (cleanup):** dead-device cleanup is event-driven, not scheduled — it only fires when FCM reports a token as `UNREGISTERED`. Steady-state cost is ~0 deletes/day. A single cleanup of a device subscribed to N channels costs roughly `1 + 5N + 3N` KV ops (1 read of `device:{id}:channels` + N reads + N writes of subscriber lists + 3 + 2N deletes). In practice this is one user uninstalling every few months, well under free tier. See §11.
 
 ### 6.4 View-count write throttle (since v3.0.18)
 
@@ -254,6 +258,8 @@ The API worker uses FCM v1 HTTP API to push notifications. The cron worker does 
 
 **Background push handler** (Android side, in `App.js`): when a push arrives while the app is in the background or killed, the handler re-fetches `/feed` and updates the local channel cache, then calls `requestWidgetUpdate` so the home-screen widget re-renders. Without this, the widget stays stale until the user opens the app.
 
+**Dead-token detection and cleanup:** FCM returns a structured error when a token is no longer valid (user uninstalled, app data cleared, token rotated without our knowledge). The error code is `UNREGISTERED` (HTTP 404) or `NotRegistered` in the body. When `sendFCMPush` sees this, it returns `{ sent: false, deadToken: true }` to the caller, which then calls `cleanupDeadDevice()` to remove the device's full state. Other error codes (`INVALID_ARGUMENT`, `INTERNAL`, `UNAVAILABLE`, `SENDER_ID_MISMATCH`) are transient or config errors and do **not** trigger cleanup — see §11 for the full policy.
+
 ---
 
 ## 8. Local development
@@ -267,6 +273,8 @@ npx wrangler dev                       # starts local miniflare on port 8787
 ```
 
 The local miniflare has its own KV simulator. The state is cached in `worker/*/.wrangler/state/v3/kv/...` — gitignored.
+
+**Secrets permissions:** the `secrets/` directory contains live credentials. The whole directory is gitignored (see `.gitignore` line 23), so perms are not enforced by git. After copying or creating the files, run `chmod 600 secrets/*.env secrets/*.json` and `chmod 700 secrets/*.sh` to make them private to your user. On Windows-native or NTFS-mounted filesystems (e.g. `/mnt/d/...` in WSL) the POSIX mode bits are ignored — security is then controlled by Windows ACLs.
 
 ### 8.2 Deploying to production
 
@@ -304,7 +312,7 @@ Live-streamed logs from the deployed worker. Useful for watching a cron tick fir
 ### Adding a new endpoint to the API worker
 
 1. Add the handler function in `worker/tubepulse-api/index.js` (use the existing `handleX(request, env, ctx)` pattern)
-2. Add a route entry in the main router near line 1367 (look for `path === '/...'` blocks)
+2. Add a route entry in the main router near line 1490 (look for `path === '/...'` blocks)
 3. Test with `npx wrangler dev` and curl
 4. Deploy with `npx wrangler deploy`
 
@@ -330,6 +338,17 @@ The KV namespace is shared and not directly inspectable from the CLI. To see wha
 - Or write a one-shot debug endpoint that returns specific keys
 - For a quick check, the API worker's `/feed` returns the current state for a given device
 
+### Manually forcing a dead-device cleanup (for testing)
+
+1. Get a real FCM token from a device (e.g. by tailing the API worker's logs while the app registers)
+2. Kill the token via FCM: `curl -X POST -H "Authorization: Bearer <oauth-token>" -H "Content-Type: application/json" -d '{"tokens":["<fcm-token>"]}' "https://fcm.googleapis.com/v1/projects/tubepulse-470a1/tokens:batchDelete"`
+3. Plant the test token on a test device via `POST /register` with that token
+4. Subscribe the test device to a real channel via `POST /subscribe-channel`
+5. Trigger a WebSub push for that channel (curl a fake `<feed>` XML to `POST /websub`)
+6. Tail the API worker's logs — you should see `[Cleanup] device ...` and `[Cleanup] channel ...` lines within ~5 seconds
+
+The cleanup helpers are also unit-testable by adding a temp `POST /_test_cleanup` endpoint that takes a deviceId in the body — verified this way during the v3.0.18 deploy, then the endpoint was removed.
+
 ### Monitoring free tier usage
 
 Cloudflare's dashboard shows daily usage: `https://dash.cloudflare.com/<account_id>/workers/overview`. KV usage is at `https://dash.cloudflare.com/<account_id>/storage/kv`. YouTube Data API quota is at `https://console.cloud.google.com/apis/api/youtube.googleapis.com/quotas`.
@@ -343,10 +362,10 @@ worker/
 ├── README.md                  ← you are here
 ├── index.js                   ← legacy/older single-worker file (not deployed)
 ├── tubepulse-api/
-│   ├── index.js               ← API worker source (~1400 lines)
+│   ├── index.js               ← API worker source (~1525 lines)
 │   └── wrangler.toml          ← deployment config
 └── tubepulse-cron/
-    ├── index.js               ← cron worker source (~1000 lines)
+    ├── index.js               ← cron worker source (~1166 lines)
     └── wrangler.toml          ← deployment config
 
 secrets/                       ← live credentials, ALL gitignored
@@ -359,3 +378,56 @@ secrets/                       ← live credentials, ALL gitignored
 ```
 
 The actual KV namespace, Firebase project, and Cloudflare account are not in this repo — they're configured in the workers' `wrangler.toml` (account ID) and the secrets/ directory.
+
+---
+
+## 11. Dead-device cleanup
+
+Both workers implement the same two helpers to remove state for channels and devices that no longer need it:
+
+```js
+async function cleanupDeadChannel(channelId, env, reason)
+// Deletes channel:{id}:meta, channel:{id}:recent, channel:{id}:websub
+// Removes channelId from channels:active
+// Idempotent. Safe to call on a never-cached channel.
+
+async function cleanupDeadDevice(deviceId, env, reason)
+// Reads device:{id}:channels to find every channel the device was on
+// For each: removes the device from that channel's subscribers list
+//   - if the list goes empty, also calls cleanupDeadChannel
+// Deletes device:{id}:profile, :settings, :channels
+// Deletes device:{id}:state:{channelId} + :override:{channelId} for each channel
+// Idempotent. Safe to call on a never-registered device.
+```
+
+**Trigger policy:**
+
+| Trigger | Action | Deletes device profile? |
+|---------|--------|-------------------------|
+| FCM returns `UNREGISTERED` (HTTP 404) on a push to a device's token | `cleanupDeadDevice(deviceId, env, 'fcm_unregistered')` | **Yes** |
+| `/unsubscribe` and the device was the last subscriber on that channel | `cleanupDeadChannel(channelId, env, 'unsubscribe_last')` | **No** — the device profile is preserved so the user can re-subscribe |
+| Any other FCM error (`INVALID_ARGUMENT`, `INTERNAL`, `UNAVAILABLE`, `SENDER_ID_MISMATCH`) | No cleanup | n/a — these are transient or config errors, not dead devices |
+| App opens with no FCM token (user denied permission) | No cleanup | n/a — the device profile is intentionally retained for `/feed` and `/subscribe-channel` to work |
+| Time-based / scheduled cleanup | **None** | n/a — cleanup is purely event-driven |
+
+**Why so conservative?** FCM holds messages for up to 28 days for offline devices. If a phone is off / out of credit / has Do Not Disturb blocking background data, the push will still be delivered when the device comes back. We only cleanup when FCM explicitly tells us the token is gone, which is the only unambiguous signal that the device is unrecoverable.
+
+**Why no time-based expiry for unused channels?** Same reason — the user might be on holiday, between projects, or temporarily using a different device. The KV cost of a few hundred cached channels is negligible; the user-experience cost of "I came back and my watch list is empty" is high.
+
+**Where the helpers live:** `cleanupDeadChannel` and `cleanupDeadDevice` are defined in **both** `worker/tubepulse-api/index.js` and `worker/tubepulse-cron/index.js`. The API-worker copy is for the WebSub push path; the cron-worker copy is for the three scheduled jobs (`runRssPollCron`, `runNagCron`, `runUpcomingCron`). The cron copy uses the `deleteKV` wrapper so deletes count toward the worker's `kvOps` totals (§6.3).
+
+**Idempotency and races:** `kv.delete()` is a no-op on missing keys. If both workers detect the same dead device in the same window (e.g. WebSub push and a 5-min cron tick both call `cleanupDeadDevice` for the same `deviceId`), the second call is essentially free — a few extra reads, a few no-op deletes, no data corruption. The worst case is a small amount of double-counted KV ops in the wrangler tail.
+
+**Log format:** every cleanup emits a single structured line. Watch for sudden spikes — >5 cleanups in a day usually means an app-version bug, a mass uninstall, or someone manually nuking test devices:
+
+```
+[Cleanup] channel <id>: reason=<reason> deletedKeys=3 removedFromActive=true
+[Cleanup] device <id>: reason=<reason> channelsAffected=<n> channelsCleaned=<n> devicesDeleted=<n>
+```
+
+Reason values you may see:
+- `fcm_unregistered` — FCM told us the token is dead
+- `unsubscribe_last` — the user removed a channel they were the only one watching
+- `last_subscriber_dead` — fired inside `cleanupDeadDevice` when removing a dead device empties a channel
+
+**Manually triggering cleanup for testing:** neither worker exposes a public endpoint for this (we don't want arbitrary callers able to nuke device state). For dev/test, use a one-shot script that reads a real FCM token, calls the FCM `tokens:batchDelete` API to kill it, then triggers a WebSub push. The `v3.0.18` release verified the helper end-to-end via a temporary `/_test_cleanup` endpoint that was removed before final deploy.
