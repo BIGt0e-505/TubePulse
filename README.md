@@ -35,7 +35,7 @@ When a new video is detected, the worker pushes it to all eligible devices via F
 
 **Scheduled event detection:** RSS entries with a future `publishedAt` are treated as scheduled livestreams/premieres:
 - Stored silently when detected — no immediate notification
-- **"Going live soon"** notification sent 1 nag interval before the scheduled start
+- **"Going live soon"** notification sent **30 minutes** before the scheduled start (hard-coded, not nag-interval based)
 - **"Is live"** notification sent when the scheduled time passes
 - Then nagged like any other unwatched video until you watch it
 
@@ -50,9 +50,9 @@ TubePulse's notification system is built around **nagging**, not polling. You co
 - **Relentless mode** — re-nag every nag interval until you watch the video
 - **Per-channel overrides** — set different notification modes and DND per creator
 - **DND scheduling** — blocks all pushes during custom silent hours (default 22:00–07:00). Videos that arrive during DND are held and delivered when DND ends by the nag cycle.
-- **DND batching** — when DND ends and multiple videos are pending, TubePulse sends a single batched summary (e.g. "3 new videos from 2 channels") instead of flooding you with individual notifications.
+- **DND batching** — when DND ends and multiple unwatched videos are pending for the same channel, TubePulse sends a single per-channel summary (e.g. `ChannelName - 3 unwatched`) instead of flooding you with individual notifications. The batch groups by channel — you'll get one notification per channel with its unwatched count, not one per video.
 
-When a WebSub push arrives, TubePulse immediately notifies all eligible devices (unless DND is active). The nag cycle then handles re-notifications on the user's chosen schedule.
+When the RSS poller detects a new video (every 5 min), TubePulse immediately notifies all eligible devices (unless DND is active). The nag cycle then handles re-notifications on the user's chosen schedule.
 
 ### 👆 Tap Actions — Video vs Channel
 
@@ -113,27 +113,28 @@ The central Cloudflare Worker. Handles:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/register` | POST | Register/update device profile (FCM token). Idempotent — safe to call on every launch. |
-| `/subscribe-channel` | POST | Add a channel to this device. Triggers WebSub subscribe + bootstrap for new channels. |
-| `/unsubscribe` | POST | Remove a channel from this device. Triggers WebSub unsubscribe if last subscriber. |
+| `/register` | POST | Register/update device profile. `fcmToken` is optional (null accepted since v3.0.14.1, so a user who denied notification permission can still subscribe channels and use the app). Idempotent — safe to call on every launch and on FCM token refresh. |
+| `/subscribe-channel` | POST | Add a channel to this device. Triggers Data API avatar fetch (one-time, cached forever) + RSS bootstrap for the recent list. |
+| `/unsubscribe` | POST | Remove a channel from this device. Removes the device from the channel's subscriber list; if the subscriber list goes empty, the channel is removed from the `channels:active` index. |
 | `/seen` | POST | Mark videos as watched. `{ channelId, videoIds }` for video tap, `{ channelId, clearAll: true }` for channel tap. |
 | `/feed` | GET | Fetch current video data for all tracked channels (reads from KV cache). |
-| `/resolve` | GET | Resolve `@handle` → channelId + name + avatar (YouTube Data API, key stays server-side). |
-| `/bootstrap` | POST | Fetch RSS + avatar for a newly added channel synchronously. |
+| `/resolve` | GET | Resolve `@handle` → channelId + name + avatar (YouTube Data API, key stays server-side). Result cached 7 days in `handle:{lowercase}`. |
+| `/bootstrap` | POST | Fetch RSS + avatar for a newly added channel synchronously. RSS is the primary path; Data API is the fallback for the rare case where RSS is unreachable. |
 | `/settings` | POST | Update notification settings (full replacement). |
 | `/channel-override` | POST | Set/update per-channel notification override. Empty override deletes it. |
-| `/websub` | GET | WebSub verification handshake — responds with `hub.challenge`. |
-| `/websub` | POST | WebSub push from YouTube — parses Atom XML, updates recent list, sends FCM notifications, schedules nag. |
+| `/websub` | GET | WebSub verification handshake — **dormant**, responds with `hub.challenge` if any verification request ever arrives. |
+| `/websub` | POST | WebSub push from YouTube — **dormant**, code path intact for future hub revival or self-hosted hub integration. |
 
-**WebSub push handling:**
-1. Parse incoming Atom XML for video entries
-2. Compare latest video ID against stored state to detect truly new videos
-3. Update channel meta and feed cache in KV
-4. Scan all registered devices for those tracking this channel
-5. For each device: check if video is already seen, check DND, check notification mode
-6. Send FCM push to eligible devices, store nag/gentle state for re-notification
+**Per-request flow (`/subscribe-channel` example):**
+1. Look up the device profile (from `Authorization: Bearer <deviceId>`) — must exist
+2. Read channel meta from KV; if missing, fetch avatar via YouTube Data API (1 quota unit, cached forever)
+3. Read channel recent from KV; if missing, fetch RSS feed (0 quota cost, cached with view counts)
+4. Add `deviceId` to the channel's `subscribers` list (if not already there)
+5. Add `channelId` to the device's `channels` list (if not already there)
+6. Add `channelId` to `channels:active` (if this is the first subscriber)
+7. Return the channel meta + recent videos to the app
 
-**YouTube API usage:** Only for channel avatar fetch at add time (`/register` and `/channels` when a new channel is added). One API call per channel, ever. All video detection is via WebSub/RSS.
+**YouTube Data API usage:** Only for one-time operations on add: handle→channelId resolve (cached 7 days) and avatar fetch (cached forever). All video detection is via RSS polling in the cron worker. Zero Data API calls from the cron, zero from the FCM push path.
 
 ### Cron Worker (`tubepulse-cron`)
 
@@ -155,10 +156,11 @@ Scans time-bucketed `nag:` keys for unwatched videos that need re-notifying:
 
 1. For each nag entry, read device profile + settings + per-channel override
 2. Skip if DND is active (global or per-channel)
-3. Send FCM push, update nag state in KV
-4. Schedule next nag into the appropriate bucket
+3. Re-validate against current `device:{id}:state:{channelId}.unwatched` — if the user has since marked videos as seen, drop them from the batch
+4. Send FCM push, update nag state in KV
+5. Schedule the next nag into the appropriate bucket (chill: +4h, relentless: +nagInterval)
 
-Also acts as a safety net — if the YouTube poller missed a new video, the nag cycle will eventually notify the device when it checks the feed.
+Also acts as a safety net — if the RSS poller missed a new video (RSS unreachable, network error), the nag cycle will eventually surface it once a future tick successfully re-stamps the recent list. The nag cycle itself is bucket-driven from the `nag:` keys scheduled by the RSS poller and the upcoming-events cron, not by re-reading `/feed`.
 
 #### Job 4: WebSub Lease Renewal (DORMANT)
 
@@ -170,14 +172,14 @@ WebSub subscriptions would expire (typically 4–10 days) if active. Currently a
 |-------------|----------|
 | `channel:{channelId}:meta` | Channel name, avatarUrl, lastVideoId, addedAt |
 | `channel:{channelId}:subscribers` | Array of deviceIds tracking this channel |
-| `channel:{channelId}:websub` | WebSub state: leaseExpiresAt, hmacSecret, lastVerified |
-| `channel:{channelId}:recent` | Last 15 videos: videoId, title, publishedAt, type, thumbnail, link |
-| `device:{deviceId}:profile` | fcmToken, platform, appVersion, createdAt, lastSeenAt |
-| `device:{deviceId}:settings` | mode, nagInterval, dndStart, dndEnd, tapAction, etc. |
+| `channel:{channelId}:websub` | WebSub state: leaseExpiresAt, hmacSecret, lastVerified (dormant — no longer used) |
+| `channel:{channelId}:recent` | Last 15 videos: videoId, title, publishedAt, type, thumbnail, link, **views** (from RSS `media:statistics`), **viewsLastCheckedHour** (wall-clock hour of last view-count refresh) |
+| `device:{deviceId}:profile` | fcmToken (nullable), platform, appVersion, createdAt, lastSeenAt |
+| `device:{deviceId}:settings` | mode, nagInterval, dndEnabled, dndStart, dndEnd, dndTimezone, tapAction, etc. |
 | `device:{deviceId}:channels` | Array of channelIds this device tracks |
 | `device:{deviceId}:override:{channelId}` | Per-channel overrides: mode?, nagInterval?, dndBypass?, muted? |
 | `device:{deviceId}:state:{channelId}` | Per-device per-channel state: unwatched[], lastNagAt, nagCount |
-| `upcoming:{bucket}` | Scheduled event entries for a 5-min window |
+| `upcoming:{bucket}` | Scheduled event entries for a 5-min window (heads-up + live-now entries) |
 | `nag:{bucket}` | Nag entries for a 15-min window |
 | `channels:active` | Index of all channels with at least one subscriber |
 | `handle:{lowercase}` | Cached handle→channelId resolution (7-day TTL) |
@@ -186,15 +188,16 @@ WebSub subscriptions would expire (typically 4–10 days) if active. Currently a
 
 ### App → Server Communication
 
-1. **On launch**: `POST /register` with FCM token (profile only)
-2. **On channel add**: `POST /subscribe-channel` with channelId → triggers WebSub subscribe + bootstrap
-3. **On channel remove**: `POST /unsubscribe` with channelId → triggers WebSub unsubscribe if last subscriber
-4. **On settings change**: `POST /settings` with updated settings
-5. **On per-channel override**: `POST /channel-override` with channelId + override
+1. **On launch**: `POST /register` with FCM token (null if notification permission denied) — creates/updates device profile
+2. **On channel add**: `POST /subscribe-channel` with channelId → Data API avatar fetch (one-time) + RSS bootstrap
+3. **On channel remove**: `POST /unsubscribe` with channelId → device removed from channel's subscriber list
+4. **On settings change**: `POST /settings` with updated settings (app uses `notificationMode` UX name, server stores as `mode`)
+5. **On per-channel override**: `POST /channel-override` with channelId + override (or empty to clear)
 6. **On notification tap**:
    - Video tap → `POST /seen { channelId, videoIds: [id] }`
    - Channel tap → `POST /seen { channelId, clearAll: true }`
-7. **On feed refresh**: `GET /feed` → returns cached data from KV
+7. **On feed refresh**: `GET /feed` → returns cached data from KV, merged with per-device `lastSeen` to compute which videos are `unwatched`
+8. **On FCM token refresh**: `POST /register` with the new token (handled by `onTokenRefresh` in App.js)
 
 **Device identity:** Each device generates a persistent UUID on first launch. This UUID is the auth token and primary key — independent of the FCM token, which is stored as a mutable field on the device record and updated on token refresh. This avoids orphan records when FCM tokens rotate.
 
@@ -204,19 +207,22 @@ WebSub subscriptions would expire (typically 4–10 days) if active. Currently a
 Video uploaded on YouTube
          │
          ▼
-Cron Worker polls YouTube Data API every 5 min
-(via videos.list?channelId=...&order=date)
+Cron Worker polls YouTube RSS feed every 5 min
+(via https://www.youtube.com/feeds/videos.xml?channel_id=...)
          │
          ▼
 Diff against channel:{id}:recent → new videoIds found
          │
          ▼
-Cron Worker calls API Worker's fan-out with new videos
+For each new video, look up channel:{id}:subscribers
          │
-         ├─ DND active? → skip, nag cycle catches later
+         ├─ Video type is 'live_scheduled' (future publishedAt)?
+         │     → schedule into upcoming:{bucket} (heads-up at -30min, live-now at +0)
+         │     → DO NOT push immediately
          │
-         ▼
-API Worker sends FCM push to all eligible devices
+         ├─ DND active for this device?
+         │     → New videos: livestreams bypass DND by default
+         │     → Upcoming-event heads-up + nag cycle: only bypass if dndBypass is set
          │
          ▼
 Device receives notification
@@ -226,18 +232,18 @@ Device receives notification
          ├─ User ignores → nag cycle re-notifies on schedule
          │
          ▼
-Nag Cycle (every 5 min, scheduled into time buckets)
+Nag Cycle (every 15 min, scheduled into nag:{bucket} keys)
          │
          ├─ Relentless: re-nag if nagInterval elapsed
          ├─ Chill: nudge if 4h elapsed
-         ├─ DND active? → skip
-         ├─ Video seen? → stop nagging
+         ├─ DND active (no dndBypass)? → skip
+         ├─ Video seen? → drop from batch
          │
          ▼
 Repeat until user watches
 ```
 
-**Note:** The notification flow's WebSub push trigger has been replaced by the cron-based YouTube Data API poller. WebSub handlers in the workers are dormant but intact.
+The RSS poller is the active new-video detection path since the WebSub hub shutdown in 2024. The WebSub handlers in the workers are dormant but intact.
 
 ## Tech Stack
 
@@ -247,7 +253,7 @@ Repeat until user watches
 | Navigation | React Navigation (native stack) |
 | Storage | AsyncStorage (channels, settings, cache) |
 | Push Detection | YouTube RSS feed poller (cron-driven, 5 min). YouTube Data API is reserved for subscribe-time only (handle resolve + avatar fetch). |
-| Video Data | YouTube RSS/Atom feeds (parsed from WebSub pushes) |
+| Video Data | YouTube RSS/Atom feeds (parsed from RSS poll in the cron worker every 5 min) |
 | API | YouTube Data API v3 (handle resolution + avatars only) |
 | Backend | Cloudflare Workers (API + Cron) |
 | Database | Cloudflare KV (devices, feeds, subscriptions) |
@@ -266,26 +272,39 @@ TubePulse/
 │   │   └── SettingsScreen.js      # Nag interval, notification mode, DND, tap action
 │   ├── components/
 │   │   ├── TubePulseWidget.js     # Android home screen widget
-│   │   └── TimeSpinner.js        # DND time picker
+│   │   ├── widgetTaskHandler.js   # Widget render handler — reads from AsyncStorage
+│   │   └── TimeSpinner.js         # DND time picker
 │   ├── utils/
 │   │   ├── api.js                 # REST client for the Cloudflare Worker (v3 endpoints)
-│   │   ├── notifications.js      # Android notification channels
-│   │   ├── fcm.js                # Firebase Cloud Messaging setup + handlers
-│   │   ├── storage.js            # AsyncStorage wrapper
-│   │   └── constants.js          # Colours, defaults, nag intervals, storage keys
-│   └── App.js                    # Navigation, FCM setup, notification tap handling
+│   │   ├── notifications.js       # Android notification channels
+│   │   ├── fcm.js                 # Firebase Cloud Messaging setup + handlers
+│   │   ├── storage.js             # AsyncStorage wrapper
+│   │   └── constants.js           # Colours, defaults, nag intervals, storage keys, preseeded channels
+│   └── App.js                     # Navigation, FCM setup, notification tap handling, init
 ├── worker/
+│   ├── README.md                  # Cloud architecture — KV schema, endpoints, cost analysis
+│   ├── index.js                   # Legacy single-worker file (not deployed)
+│   ├── wrangler.toml              # Legacy wrangler config
 │   ├── tubepulse-api/
-│   │   ├── index.js              # API Worker — v3 channel-first architecture
+│   │   ├── index.js               # API Worker — v3 channel-first architecture
 │   │   └── wrangler.toml
-│   ├── tubepulse-cron/
-│   │   ├── index.js              # Cron Worker — time-bucket driven (upcoming/nag/lease)
-│   │   └── wrangler.toml
-│   └── tubepulse-fcm-service-account.json
+│   └── tubepulse-cron/
+│       ├── index.js               # Cron Worker — time-bucket driven (upcoming/nag/lease)
+│       └── wrangler.toml
+├── secrets/                       # All gitignored — live credentials only
+│   ├── README.md                  # Operator docs for secrets
+│   ├── cloudflare.env             # CF account ID + API token
+│   ├── youtube.env                # YouTube Data API key
+│   ├── fcm-service-account.json   # Firebase service account (1217-byte PKCS8)
+│   ├── load-secrets.sh            # Sources env + generates per-worker .dev.vars
+│   └── set-worker-secrets.sh      # Pushes secrets to workers via wrangler
 ├── ARCHITECTURE.md                # v3 architecture specification
 ├── STATUS.md                      # Project status and version history
+├── MIGRATION_PLAN.md              # v1→v2→v3 migration plan (historical record)
+├── build-and-release.sh           # WSL-native build: gradle + commit + push + GitHub release
 ├── app.json                       # Expo config
-└── package.json
+├── package.json
+└── .gitignore
 ```
 
 ## Settings Reference
@@ -298,6 +317,7 @@ TubePulse/
 | `dndEnabled` | boolean | false | Block all notifications during DND hours |
 | `dndStart` | HH:MM | 22:00 | DND start time |
 | `dndEnd` | HH:MM | 07:00 | DND end time |
+| `dndTimezone` | IANA tz string | device's local tz | IANA timezone used to evaluate DND (e.g. `Europe/London`). Without this, the worker would evaluate DND in UTC and notifications would fire at the wrong local time. Sent automatically by the app via `getLocalTimezone()`. |
 | `perChannelNotifications` | boolean | false | Enable per-channel notification overrides |
 | `includeCommunityPosts` | boolean | false | Placeholder — not detectable via RSS/WebSub yet |
 
@@ -323,10 +343,10 @@ npx expo run:android
 ## Deploying Workers
 
 ```bash
-# Deploy API worker (handles app traffic + WebSub callbacks)
+# Deploy API worker (handles app traffic + dormant WebSub endpoints)
 cd worker/tubepulse-api && npx wrangler deploy
 
-# Deploy cron worker (nag cycle + WebSub lease renewal)
+# Deploy cron worker (upcoming events, RSS poll, nag cycle, lease renewal no-op)
 cd worker/tubepulse-cron && npx wrangler deploy
 ```
 
