@@ -83,58 +83,119 @@ function nagBucket(timestampMs) {
   return d.toISOString().slice(0, 16);
 }
 
-// ─── WebSub lease renewal ──────────────────────────────────────────────
+function upcomingBucket(isoDate) {
+  const d = new Date(isoDate);
+  d.setMinutes(Math.floor(d.getMinutes() / 5) * 5, 0, 0);
+  return d.toISOString().slice(0, 16);
+}
 
-const HUB_URL = 'https://pubsubhubbub.appspot.com/';
-const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';
+function classifyVideo(entry) {
+  if (!entry.published) return 'video';
+  const publishedTime = new Date(entry.published).getTime();
+  const now = Date.now();
+  // Future-dated → live_scheduled (premieres / scheduled livestreams)
+  if (publishedTime > now + 5 * 60 * 1000) return 'live_scheduled';
+  const title = (entry.title || '').toLowerCase();
+  if (title.startsWith('🔴') || title.includes(' live')) return 'live';
+  return 'video';
+}
+
+// ─── YouTube Data API helpers (RSS feeds are 404 as of 2024-2025) ──────
+// PubSubHubbub (WebSub) hub was also shut down by Google.
+// Fallback: poll YouTube Data API for each active channel every 5 minutes.
+// Cost: 1 unit per channels.list (once per channel to get uploads playlist ID,
+//       result cached in channel meta) + 1 unit per playlistItems.list call.
+// Default daily quota is 10,000 units, so 5,000 channel-polls/day on a fresh
+// install; 16,000+ once playlist IDs are cached.
+
+async function getUploadsPlaylistId(apiKey, channelId) {
+  const url = `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${encodeURIComponent(channelId)}&key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const uploads = data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+    return uploads || null;
+  } catch (err) {
+    console.error(`[YTData] channels.list error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getRecentUploadsFromPlaylist(apiKey, playlistId, maxResults = 10) {
+  const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${encodeURIComponent(playlistId)}&maxResults=${maxResults}&key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (!data.items?.length) return [];
+
+    return data.items.map((item) => {
+      const s = item.snippet || {};
+      const thumbs = s.thumbnails || {};
+      const videoId = s.resourceId?.videoId;
+      return {
+        videoId,
+        title: s.title,
+        published: s.publishedAt,
+        thumbnail: thumbs.high?.url || thumbs.medium?.url || thumbs.default?.url || null,
+        link: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
+        channelTitle: s.channelTitle,
+      };
+    }).filter((v) => v.videoId);
+  } catch (err) {
+    console.error(`[YTData] playlistItems error:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Batched view-count lookup. Returns { [videoId]: "12345" } string view counts.
+// Costs 1 quota unit per call (up to 50 video IDs at once).
+// Returns null on quota/connection error so the caller can degrade gracefully.
+async function fetchViewCounts(apiKey, videoIds) {
+  if (!videoIds || videoIds.length === 0) return {};
+  const ids = videoIds.filter(Boolean).slice(0, 50);
+  if (ids.length === 0) return {};
+  const url = `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${ids.map(encodeURIComponent).join(',')}&key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const out = {};
+    for (const item of data.items || []) {
+      out[item.id] = String(item.statistics?.viewCount ?? '0');
+    }
+    return out;
+  } catch (err) {
+    console.error(`[YTData] viewCounts error:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── WebSub lease renewal (DISABLED — PubSubHubbub hub is dead) ───────
+// Google's pubsubhubbub.appspot.com hub was shut down in 2024.
+// WebSub subscriptions can no longer be established or renewed for YouTube.
+// The YTData poller replaces push notifications entirely.
+// Keep this function for archival; runLeaseCron is now a no-op.
+
+const HUB_URL = 'https://pubsubhubbub.appspot.com/';  // defunct
+const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';  // also 404
 
 async function renewSubscriptions(env, callbackUrl) {
-  const now = Date.now();
-  const renewThreshold = now + 24 * 60 * 60 * 1000; // 24h ahead
-
-  const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
-  let renewed = 0;
-
-  for (const channelId of active) {
-    const subState = await getKV(env.TUBEPULSE_KV, key.channelWebsub(channelId));
-    if (!subState) continue;
-
-    const expiresAt = subState.leaseExpiresAt || 0;
-    if (expiresAt > renewThreshold) continue; // Not expiring soon
-
-    console.log(`[Lease] Renewing ${channelId} (expires ${new Date(expiresAt).toISOString()})`);
-
-    const feedUrl = `${FEED_TEMPLATE}${channelId}`;
-    const body = new URLSearchParams({
-      'hub.callback': callbackUrl,
-      'hub.mode': 'subscribe',
-      'hub.topic': feedUrl,
-      'hub.verify': 'sync',
-      'hub.lease_seconds': String(86400 * 5),
-    });
-
-    if (subState.hmacSecret) {
-      body.set('hub.secret', subState.hmacSecret);
-    }
-
-    try {
-      const resp = await fetch(HUB_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
-      });
-      if (resp.ok || resp.status === 202 || resp.status === 204) {
-        console.log(`[Lease] Renewal accepted for ${channelId}`);
-        renewed++;
-      } else {
-        console.error(`[Lease] Renewal failed for ${channelId}: ${resp.status}`);
-      }
-    } catch (err) {
-      console.error(`[Lease] Renewal error for ${channelId}:`, err.message);
-    }
-  }
-
-  return renewed;
+  // No-op: WebSub hub is dead, polling is the active path
+  return 0;
 }
 
 // ─── FCM Push ───────────────────────────────────────────────────────────
@@ -160,10 +221,21 @@ async function getGoogleAccessToken(serviceAccountJson) {
   const input = `${headerB64}.${payloadB64}`;
 
   const pemKey = sa.private_key;
-  const pemBody = pemKey
+  // The Cloudflare secret manager may store the file with literal "\n"
+  // two-character sequences (escape sequences) rather than actual newlines.
+  // Convert literal "\n" to real newlines first, then strip headers/whitespace.
+  let pemBody = pemKey
+    .replace(/\\n/g, '\n')
     .replace(/-----BEGIN PRIVATE KEY-----/, '')
     .replace(/-----END PRIVATE KEY-----/, '')
     .replace(/\s/g, '');
+
+  // Fix base64 padding. Google service account JSON sometimes ships with the
+  // wrong number of trailing '=' signs because JSON encoding strips them
+  // inconsistently. Body length must be divisible by 4 to decode.
+  while (pemBody.length % 4 !== 0) {
+    pemBody += '=';
+  }
 
   const binaryStr = atob(pemBody);
   const bytes = new Uint8Array(binaryStr.length);
@@ -539,6 +611,274 @@ async function runNagCron(env) {
   return { fired };
 }
 
+// ─── Job 2.5: YouTube Data API polling (every 5 min) ────────────────
+// WebSub push was the preferred path, but Google's pubsubhubbub.appspot.com
+// hub was shut down (2024), and YouTube's public RSS feeds now 404 (2024-2025).
+// Polling the YouTube Data API is the only reliable way to detect new uploads.
+// The notification path is identical to what a WebSub push would have done —
+// the same FCM + nag scheduling runs whether a video was detected via push
+// or poll. This means the rest of the system doesn't notice the swap.
+//
+// Cost: 1 unit per channels.list (one-time, then playlistId cached in meta)
+//       + 1 unit per playlistItems.list. ~16,000 polls/day for 50 channels
+//       with cached playlist IDs (under the 10,000 default quota on fresh).
+
+async function runRssPollCron(env) {
+  const apiKey = env.YOUTUBE_API_KEY;
+  if (!apiKey) {
+    console.error('[YTData] YOUTUBE_API_KEY not set — cannot poll');
+    return { channels: 0, newVideos: 0, error: 'no_api_key' };
+  }
+
+  const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
+  if (active.length === 0) {
+    return { channels: 0, newVideos: 0 };
+  }
+
+  console.log(`[YTData] Polling ${active.length} channel(s)`);
+
+  let totalNew = 0;
+  let quotaErrors = 0;
+
+  for (const channelId of active) {
+    try {
+      // 1. Ensure we have the uploads playlist ID (cached in meta)
+      const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
+      let playlistId = meta.uploadsPlaylistId;
+      if (!playlistId) {
+        playlistId = await getUploadsPlaylistId(apiKey, channelId);
+        if (playlistId) {
+          meta.uploadsPlaylistId = playlistId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+        } else {
+          console.warn(`[YTData] No uploads playlist for ${channelId} — skipping`);
+          continue;
+        }
+      }
+
+      // 2. Fetch the latest uploads (top 10)
+      const uploads = await getRecentUploadsFromPlaylist(apiKey, playlistId, 10);
+      if (!uploads) {
+        quotaErrors++;
+        if (quotaErrors > 3) {
+          console.error('[YTData] Multiple quota/connection errors — aborting poll');
+          break;
+        }
+        continue;
+      }
+      if (uploads.length === 0) continue;
+
+      // 3. Find new videos (not already in `recent`)
+      const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId)) || [];
+      const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
+      const newVideos = uploads.filter((v) => !prevVideoIds.has(v.videoId));
+      if (newVideos.length === 0) {
+        // No new videos this tick, but refresh view counts on the existing
+        // recent list so the views don't go stale. Cheap: 1 quota unit per
+        // channel per 5-min tick.
+        const recentVideoIds = prevRecent.map((v) => v.videoId).filter(Boolean);
+        if (recentVideoIds.length > 0) {
+          const viewCounts = await fetchViewCounts(apiKey, recentVideoIds);
+          if (viewCounts) {
+            let recentChanged = false;
+            const refreshedRecent = prevRecent.map((v) => {
+              const newViews = viewCounts[v.videoId];
+              if (newViews !== undefined && newViews !== v.views) {
+                recentChanged = true;
+                return { ...v, views: newViews };
+              }
+              return v;
+            });
+            if (recentChanged) {
+              await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedRecent);
+            }
+          }
+        }
+        continue;
+      }
+
+      // 4. Update channel recent (newest first, max 15)
+      // Fetch view counts in a single batched call for the 15 most recent.
+      const allVideoIds = [...newVideos, ...prevRecent].slice(0, 15).map((v) => v.videoId);
+      const viewCounts = await fetchViewCounts(apiKey, allVideoIds) || {};
+
+      const enrichedNew = newVideos.map((v) => ({
+        videoId: v.videoId,
+        title: v.title,
+        publishedAt: v.published,
+        thumbnail: v.thumbnail,
+        type: classifyVideo(v),
+        link: v.link,
+        views: viewCounts[v.videoId] || '0',
+      }));
+
+      // Re-stamp view counts on existing recent entries so they stay fresh.
+      const refreshedPrev = prevRecent.map((v) => {
+        const newViews = viewCounts[v.videoId];
+        return newViews !== undefined ? { ...v, views: newViews } : v;
+      });
+
+      const updatedRecent = [...enrichedNew, ...refreshedPrev].slice(0, 15);
+      await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent);
+
+      // 5. Update channel meta
+      if (!meta.name && uploads[0].channelTitle) meta.name = uploads[0].channelTitle;
+      meta.lastVideoId = newVideos[0].videoId;
+      if (playlistId) meta.uploadsPlaylistId = playlistId;
+      await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+
+      // 6. Get subscribers
+      const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+      if (subs.length === 0) {
+        totalNew += newVideos.length;
+        continue;
+      }
+
+      // 7. Get FCM access token once
+      let accessToken;
+      try {
+        accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+      } catch (err) {
+        console.error(`[YTData] FCM token error:`, err);
+        totalNew += newVideos.length;
+        continue;
+      }
+      const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+      const projectId = sa.project_id;
+
+      for (const deviceId of subs) {
+        const [profile, settings, override] = await Promise.all([
+          getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId)),
+          getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)),
+          getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId)),
+        ]);
+
+        if (!profile?.fcmToken) continue;
+        if (override?.muted) continue;
+
+        const effective = {
+          mode: override?.mode || settings?.mode || 'chill',
+          nagInterval: override?.nagInterval || settings?.nagInterval || 15,
+          dndEnabled: settings?.dndEnabled || false,
+          dndStart: settings?.dndStart || '22:00',
+          dndEnd: settings?.dndEnd || '07:00',
+          dndTimezone: settings?.dndTimezone || 'UTC',
+          dndBypass: override?.dndBypass || false,
+          tapAction: settings?.tapAction || 'video',
+        };
+
+        // Per-device per-channel state
+        const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
+          unwatched: [],
+          lastNagAt: null,
+          nagCount: 0,
+        };
+
+        let shouldNotify = true;
+        for (const video of newVideos) {
+          if (!state.unwatched.includes(video.videoId)) {
+            state.unwatched.push(video.videoId);
+          }
+
+          if (video.type === 'live_scheduled') {
+            // Schedule upcoming bucket entries
+            const publishedTime = new Date(video.publishedAt).getTime();
+            const headsUpTime = publishedTime - 30 * 60 * 1000;
+            if (headsUpTime > Date.now()) {
+              const bucket = upcomingBucket(new Date(headsUpTime).toISOString());
+              const bucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(bucket)) || [];
+              bucketData.push({
+                channelId,
+                videoId: video.videoId,
+                type: 'live_scheduled',
+                scheduledFor: publishedTime,
+                headsUp: true,
+              });
+              await putKV(env.TUBEPULSE_KV, key.upcoming(bucket), bucketData);
+            }
+            const liveBucket = upcomingBucket(new Date(video.publishedAt).toISOString());
+            const liveBucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(liveBucket)) || [];
+            liveBucketData.push({
+              channelId,
+              videoId: video.videoId,
+              type: 'live_scheduled',
+              scheduledFor: publishedTime,
+              headsUp: false,
+            });
+            await putKV(env.TUBEPULSE_KV, key.upcoming(liveBucket), liveBucketData);
+            continue;
+          }
+
+          const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
+          const isLivestream = video.type === 'live';
+          const bypassesDnd = effective.dndBypass || isLivestream;
+          if (dndActive && !bypassesDnd) {
+            shouldNotify = false;
+          }
+        }
+
+        // Save updated state
+        await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+
+        // Send FCM
+        const notifyEntries = newVideos.filter((v) => v.type !== 'live_scheduled' && shouldNotify);
+        if (notifyEntries.length > 0) {
+          let notifPayload;
+          const channelName = meta.name || channelId;
+          if (notifyEntries.length === 1) {
+            const v = notifyEntries[0];
+            notifPayload = {
+              title: `${channelName} uploaded`,
+              body: v.title,
+              data: {
+                videoId: v.videoId,
+                channelId,
+                channelName,
+                videoLink: v.link,
+                type: v.type,
+              },
+              tag: `video-${v.videoId}`,
+            };
+          } else {
+            notifPayload = {
+              title: `${channelName} - ${notifyEntries.length} new videos`,
+              body: notifyEntries.map((v) => v.title).join('\n'),
+              data: {
+                type: 'batch',
+                count: String(notifyEntries.length),
+                channelId,
+              },
+              tag: 'tubepulse-batch',
+            };
+          }
+          await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+        }
+
+        // Schedule nag
+        if (state.unwatched.length > 0 && shouldNotify) {
+          const nagIntervalMs = effective.nagInterval * 60 * 1000;
+          const nextNagTime = effective.mode === 'chill'
+            ? Date.now() + 4 * 60 * 60 * 1000
+            : Date.now() + nagIntervalMs;
+          const bucket = nagBucket(nextNagTime);
+          const bucketData = await getKV(env.TUBEPULSE_KV, key.nag(bucket)) || [];
+          const exists = bucketData.some((e) => e.deviceId === deviceId && e.channelId === channelId);
+          if (!exists) {
+            bucketData.push({ deviceId, channelId, videoIds: [...state.unwatched] });
+            await putKV(env.TUBEPULSE_KV, key.nag(bucket), bucketData);
+          }
+        }
+      }
+
+      totalNew += newVideos.length;
+    } catch (err) {
+      console.error(`[YTData] Error processing ${channelId}:`, err.message);
+    }
+  }
+
+  return { channels: active.length, newVideos: totalNew, quotaErrors };
+}
+
 // ─── Job 3: Lease renewal (every 6 hours) ──────────────────────────────
 
 async function runLeaseCron(env) {
@@ -563,6 +903,11 @@ export default {
     // Upcoming events: every 5 minutes (minute % 5 === 0)
     if (mins % 5 === 0) {
       results.upcoming = await runUpcomingCron(env);
+    }
+
+    // RSS poll: every 5 minutes (minute % 5 === 0) — fallback for WebSub
+    if (mins % 5 === 0) {
+      results.rss = await runRssPollCron(env);
     }
 
     // Nag cycle: every 15 minutes (minute % 15 === 0)

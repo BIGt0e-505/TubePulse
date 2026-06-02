@@ -204,9 +204,12 @@ function parseWebSubPush(xmlText) {
     const thumbnail = thumbMatch ? thumbMatch[1] : null;
     const descMatch = e.match(/<media:description>([^<]*)<\/media:description>/);
     const description = descMatch ? descMatch[1] : '';
+    // View count lives in media:community/media:statistics/@_views
+    const viewsMatch = e.match(/<media:statistics[^>]*views="(\d+)"/);
+    const views = viewsMatch ? viewsMatch[1] : '0';
 
     if (videoId) {
-      entries.push({ videoId, title, link, published, updated, thumbnail, description });
+      entries.push({ videoId, title, link, published, updated, thumbnail, description, views });
     }
   }
 
@@ -241,6 +244,7 @@ async function fetchYouTubeRSS(channelId) {
       link: e.link,
       thumbnail: e.thumbnail,
       description: e.description,
+      views: e.views || '0',
     }));
 
     return { channel, videos };
@@ -281,6 +285,33 @@ async function fetchRecentVideosViaAPI(apiKey, channelId, maxResults = 15) {
     return videos;
   } catch (err) {
     console.error(`Search API error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Batched view-count lookup. Returns { [videoId]: "12345" } string view counts.
+// Costs 1 quota unit per call (up to 50 video IDs at once).
+// Returns null on quota/connection error so the caller can degrade gracefully.
+async function fetchViewCounts(apiKey, videoIds) {
+  if (!videoIds || videoIds.length === 0) return {};
+  const ids = videoIds.filter(Boolean).slice(0, 50);
+  if (ids.length === 0) return {};
+  const apiUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${ids.map(encodeURIComponent).join(',')}&key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(apiUrl, { signal: controller.signal });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const out = {};
+    for (const item of data.items || []) {
+      out[item.id] = String(item.statistics?.viewCount ?? '0');
+    }
+    return out;
+  } catch (err) {
+    console.error(`ViewCounts error:`, err.message);
     return null;
   } finally {
     clearTimeout(timer);
@@ -886,7 +917,12 @@ async function handleBootstrap(request, env, ctx) {
       try {
         const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
         if (apiVideos && apiVideos.length > 0) {
-          recent = apiVideos;
+          // Enrich with view counts in a single batched call (1 quota unit).
+          const viewCounts = await fetchViewCounts(env.YOUTUBE_API_KEY, apiVideos.map((v) => v.videoId)) || {};
+          recent = apiVideos.map((v) => ({
+            ...v,
+            views: viewCounts[v.videoId] || '0',
+          }));
           if (meta) meta.lastVideoId = apiVideos[0].videoId;
           await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
             name: channelId,
@@ -901,7 +937,7 @@ async function handleBootstrap(request, env, ctx) {
       }
     }
 
-    // RSS fallback
+    // RSS fallback — view counts available here from media:community/media:statistics
     if (!recent) {
       const rssResult = await fetchYouTubeRSS(channelId);
       if (rssResult?.videos?.length > 0) {
@@ -912,6 +948,7 @@ async function handleBootstrap(request, env, ctx) {
           thumbnail: v.thumbnail,
           type: classifyVideo(v),
           link: v.link,
+          views: v.views || '0',
         }));
 
         if (!meta) {
@@ -927,6 +964,36 @@ async function handleBootstrap(request, env, ctx) {
 
         await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
         await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+      }
+    }
+  }
+
+  // If recent is already cached but missing view counts, enrich in place.
+  // This happens when a previous bootstrap ran before the view-counts code
+  // shipped, or when a user opens the app before the next cron tick.
+  // 1 quota unit per bootstrap, idempotent (only writes if views differ).
+  if (recent && env.YOUTUBE_API_KEY) {
+    const needsViews = recent.some((v) => v.views === undefined || v.views === null);
+    if (needsViews) {
+      try {
+        const ids = recent.map((v) => v.videoId).filter(Boolean);
+        const viewCounts = await fetchViewCounts(env.YOUTUBE_API_KEY, ids);
+        if (viewCounts) {
+          let changed = false;
+          const updated = recent.map((v) => {
+            if ((v.views === undefined || v.views === null) && viewCounts[v.videoId] !== undefined) {
+              changed = true;
+              return { ...v, views: viewCounts[v.videoId] };
+            }
+            return v;
+          });
+          if (changed) {
+            recent = updated;
+            await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+          }
+        }
+      } catch (e) {
+        console.warn(`[Bootstrap] View-count enrichment failed for ${channelId}:`, e.message);
       }
     }
   }
