@@ -102,6 +102,21 @@ function classifyVideo(entry) {
 
 // ─── YouTube Data API helpers (RSS feeds are 404 as of 2024-2025) ──────
 // PubSubHubbub (WebSub) hub was also shut down by Google.
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║  DEAD CODE — v3.0.18                                                 ║
+// ║                                                                      ║
+// ║  These three functions used to power the YouTube Data API poller.   ║
+// ║  runRssPollCron now uses RSS exclusively (see parseRSSFeed +         ║
+// ║  fetchChannelRSS above and runRssPollCron below), so the YouTube    ║
+// ║  Data API is no longer called from the cron worker at all.          ║
+// ║                                                                      ║
+// ║  The cron tick used to cost ~2 quota units per channel per 5-min.   ║
+// ║  It now costs 0 quota units. The YouTube Data API is only used     ║
+// ║  from the API worker, and only at subscribe time (one-time).        ║
+// ║                                                                      ║
+// ║  Kept here for reference. Can be deleted safely.                    ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+
 // Fallback: poll YouTube Data API for each active channel every 5 minutes.
 // Cost: 1 unit per channels.list (once per channel to get uploads playlist ID,
 //       result cached in channel meta) + 1 unit per playlistItems.list call.
@@ -184,14 +199,83 @@ async function fetchViewCounts(apiKey, videoIds) {
   }
 }
 
+// Lightweight RSS/Atom feed parser — extracts videoId, title, published,
+// thumbnail, link, and media:statistics views from a YouTube videos.xml
+// feed. Mirrors parseWebSubPush in tubepulse-api/index.js; both workers
+// can parse feeds without a heavy XML library.
+function parseRSSFeed(xmlText) {
+  const entries = [];
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+  let m;
+
+  while ((m = entryRegex.exec(xmlText)) !== null) {
+    const e = m[1];
+    const videoId = e.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1];
+    const title = e.match(/<title>([^<]+)<\/title>/)?.[1];
+    const link = e.match(/<link[^>]*rel="alternate"[^>]*href="([^"]+)"/)?.[1]
+      || e.match(/<link[^>]*href="([^"]+)"[^>]*rel="alternate"/)?.[1]
+      || `https://www.youtube.com/watch?v=${videoId}`;
+    const published = e.match(/<published>([^<]+)<\/published>/)?.[1];
+    const updated = e.match(/<updated>([^<]+)<\/updated>/)?.[1];
+    const thumbMatch = e.match(/<media:thumbnail[^>]*url="([^"]+)"/);
+    const thumbnail = thumbMatch ? thumbMatch[1] : null;
+    const descMatch = e.match(/<media:description>([^<]*)<\/media:description>/);
+    const description = descMatch ? descMatch[1] : '';
+    const viewsMatch = e.match(/<media:statistics[^>]*views="(\d+)"/);
+    const views = viewsMatch ? viewsMatch[1] : '0';
+
+    if (videoId) {
+      entries.push({ videoId, title, link, published, updated, thumbnail, description, views });
+    }
+  }
+
+  const channelId = xmlText.match(/<yt:channelId>([^<]+)<\/yt:channelId>/)?.[1];
+  const channelName = xmlText.match(/<name>([^<]+)<\/name>/)?.[1];
+
+  return { channelId, channelName, entries };
+}
+
+// Fetch and parse the YouTube RSS feed for a channel. Returns
+// { channelId, channelName, entries: [{videoId, title, link, published, thumbnail, views, ...}] }
+// or null on network/error.
+async function fetchChannelRSS(channelId) {
+  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(feedUrl, {
+      signal: controller.signal,
+      headers: {
+        // YouTube serves a cookie-consent redirect to EU/UK users without these
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Cookie': 'SOCS=CAESEwgDEgk2MTcxNTcyNjAaAmVuIAEaBgiA_LyaBg; CONSENT=YES+cb',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'application/atom+xml,application/xml,text/xml,*/*;q=0.8',
+      },
+      redirect: 'follow',
+    });
+    if (!resp.ok) {
+      console.warn(`[RSS] HTTP ${resp.status} for ${channelId}`);
+      return null;
+    }
+    const xml = await resp.text();
+    return parseRSSFeed(xml);
+  } catch (err) {
+    console.error(`[RSS] fetch error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── WebSub lease renewal (DISABLED — PubSubHubbub hub is dead) ───────
 // Google's pubsubhubbub.appspot.com hub was shut down in 2024.
 // WebSub subscriptions can no longer be established or renewed for YouTube.
-// The YTData poller replaces push notifications entirely.
+// The RSS poller (runRssPollCron above) replaces push notifications entirely.
 // Keep this function for archival; runLeaseCron is now a no-op.
 
 const HUB_URL = 'https://pubsubhubbub.appspot.com/';  // defunct
-const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';  // also 404
+const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';  // active — used by fetchChannelRSS above
 
 async function renewSubscriptions(env, callbackUrl) {
   // No-op: WebSub hub is dead, polling is the active path
@@ -611,97 +695,92 @@ async function runNagCron(env) {
   return { fired };
 }
 
-// ─── Job 2.5: YouTube Data API polling (every 5 min) ────────────────
-// WebSub push was the preferred path, but Google's pubsubhubbub.appspot.com
-// hub was shut down (2024), and YouTube's public RSS feeds now 404 (2024-2025).
-// Polling the YouTube Data API is the only reliable way to detect new uploads.
-// The notification path is identical to what a WebSub push would have done —
-// the same FCM + nag scheduling runs whether a video was detected via push
-// or poll. This means the rest of the system doesn't notice the swap.
+// ─── Job 2.5: YouTube RSS polling (every 5 min) ─────────────────────
+// Active new-video detection path. Uses the public YouTube RSS feed
+// (https://www.youtube.com/feeds/videos.xml?channel_id=...) which costs
+// zero YouTube Data API quota. Each feed entry carries videoId, title,
+// publishedAt, thumbnail, link, and view count (from media:statistics).
 //
-// Cost: 1 unit per channels.list (one-time, then playlistId cached in meta)
-//       + 1 unit per playlistItems.list. ~16,000 polls/day for 50 channels
-//       with cached playlist IDs (under the 10,000 default quota on fresh).
+// The YouTube Data API is now used ONLY at subscribe time by the API
+// worker (handle → channelId resolve, channel meta + avatar fetch).
+// After subscribe, the channel meta is cached in KV and never re-fetched
+// by the cron — RSS is enough for the recent list.
+//
+// What this means for the YouTube Data API quota budget:
+//   - 1 unit per subscribe (one-time, only when a new channel is added)
+//   - 0 units per 5-min tick
+//   - Previously: ~2 units per channel per 5-min tick (playlistItems + videos.statistics)
+//   - At 50 channels: ~28,800 units/day → 0 units/day
+//
+// What this means for Cloudflare KV budget:
+//   - Reads per channel per tick: 1 (recent) + 1 (meta, only if changed) ≈ 1-2
+//   - Writes per channel per tick: 0 if nothing changed, 1 if recent changed
+//   - With 50 channels: 50-100 writes/day, well under the 1,000/day free tier
 
 async function runRssPollCron(env) {
-  const apiKey = env.YOUTUBE_API_KEY;
-  if (!apiKey) {
-    console.error('[YTData] YOUTUBE_API_KEY not set — cannot poll');
-    return { channels: 0, newVideos: 0, error: 'no_api_key' };
-  }
-
   const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
   if (active.length === 0) {
     return { channels: 0, newVideos: 0 };
   }
 
-  console.log(`[YTData] Polling ${active.length} channel(s)`);
+  console.log(`[YTData] Polling ${active.length} channel(s) via RSS`);
 
   let totalNew = 0;
-  let quotaErrors = 0;
+  let errors = 0;
 
   for (const channelId of active) {
     try {
-      // 1. Ensure we have the uploads playlist ID (cached in meta)
-      const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
-      let playlistId = meta.uploadsPlaylistId;
-      if (!playlistId) {
-        playlistId = await getUploadsPlaylistId(apiKey, channelId);
-        if (playlistId) {
-          meta.uploadsPlaylistId = playlistId;
-          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
-        } else {
-          console.warn(`[YTData] No uploads playlist for ${channelId} — skipping`);
-          continue;
-        }
-      }
-
-      // 2. Fetch the latest uploads (top 10)
-      const uploads = await getRecentUploadsFromPlaylist(apiKey, playlistId, 10);
-      if (!uploads) {
-        quotaErrors++;
-        if (quotaErrors > 3) {
-          console.error('[YTData] Multiple quota/connection errors — aborting poll');
+      // 1. Fetch the channel's RSS feed. Each entry already carries
+      // videoId, title, publishedAt, thumbnail, link, AND views.
+      const feed = await fetchChannelRSS(channelId);
+      if (!feed) {
+        errors++;
+        if (errors > 5) {
+          console.error('[YTData] Multiple RSS errors — aborting poll');
           break;
         }
         continue;
       }
-      if (uploads.length === 0) continue;
+      if (feed.entries.length === 0) continue;
 
-      // 3. Find new videos (not already in `recent`)
+      // Normalise entries to the shape the rest of the system expects.
+      const uploads = feed.entries.map((e) => ({
+        videoId: e.videoId,
+        title: e.title,
+        published: e.published,
+        thumbnail: e.thumbnail,
+        link: e.link,
+        channelTitle: feed.channelName,
+        views: e.views,
+      }));
+
+      // 2. Read existing recent list to find new videos
       const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId)) || [];
       const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
       const newVideos = uploads.filter((v) => !prevVideoIds.has(v.videoId));
+
+      // 3. Re-stamp view counts on existing recent entries from the same
+      // RSS response. RSS gives us view counts for the latest 15 videos
+      // (which is exactly the size of the recent list), so this is free.
+      // Only write if a count actually changed.
+      const rssByVideoId = new Map(uploads.map((u) => [u.videoId, u]));
+      const refreshedPrev = prevRecent.map((v) => {
+        const fromRss = rssByVideoId.get(v.videoId);
+        if (fromRss && fromRss.views && fromRss.views !== v.views) {
+          return { ...v, views: fromRss.views };
+        }
+        return v;
+      });
+      const recentChanged = refreshedPrev.some((v, i) => v !== prevRecent[i]);
+
       if (newVideos.length === 0) {
-        // No new videos this tick, but refresh view counts on the existing
-        // recent list so the views don't go stale. Cheap: 1 quota unit per
-        // channel per 5-min tick.
-        const recentVideoIds = prevRecent.map((v) => v.videoId).filter(Boolean);
-        if (recentVideoIds.length > 0) {
-          const viewCounts = await fetchViewCounts(apiKey, recentVideoIds);
-          if (viewCounts) {
-            let recentChanged = false;
-            const refreshedRecent = prevRecent.map((v) => {
-              const newViews = viewCounts[v.videoId];
-              if (newViews !== undefined && newViews !== v.views) {
-                recentChanged = true;
-                return { ...v, views: newViews };
-              }
-              return v;
-            });
-            if (recentChanged) {
-              await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedRecent);
-            }
-          }
+        if (recentChanged) {
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedPrev);
         }
         continue;
       }
 
-      // 4. Update channel recent (newest first, max 15)
-      // Fetch view counts in a single batched call for the 15 most recent.
-      const allVideoIds = [...newVideos, ...prevRecent].slice(0, 15).map((v) => v.videoId);
-      const viewCounts = await fetchViewCounts(apiKey, allVideoIds) || {};
-
+      // 4. New videos detected — build the updated recent list
       const enrichedNew = newVideos.map((v) => ({
         videoId: v.videoId,
         title: v.title,
@@ -709,23 +788,26 @@ async function runRssPollCron(env) {
         thumbnail: v.thumbnail,
         type: classifyVideo(v),
         link: v.link,
-        views: viewCounts[v.videoId] || '0',
+        views: v.views || '0',
       }));
-
-      // Re-stamp view counts on existing recent entries so they stay fresh.
-      const refreshedPrev = prevRecent.map((v) => {
-        const newViews = viewCounts[v.videoId];
-        return newViews !== undefined ? { ...v, views: newViews } : v;
-      });
 
       const updatedRecent = [...enrichedNew, ...refreshedPrev].slice(0, 15);
       await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent);
 
-      // 5. Update channel meta
-      if (!meta.name && uploads[0].channelTitle) meta.name = uploads[0].channelTitle;
-      meta.lastVideoId = newVideos[0].videoId;
-      if (playlistId) meta.uploadsPlaylistId = playlistId;
-      await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+      // 5. Update channel meta (name, lastVideoId) — only if changed
+      const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
+      let metaChanged = false;
+      if (!meta.name && feed.channelName) {
+        meta.name = feed.channelName;
+        metaChanged = true;
+      }
+      if (meta.lastVideoId !== newVideos[0].videoId) {
+        meta.lastVideoId = newVideos[0].videoId;
+        metaChanged = true;
+      }
+      if (metaChanged) {
+        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+      }
 
       // 6. Get subscribers
       const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
@@ -876,7 +958,7 @@ async function runRssPollCron(env) {
     }
   }
 
-  return { channels: active.length, newVideos: totalNew, quotaErrors };
+  return { channels: active.length, newVideos: totalNew, errors };
 }
 
 // ─── Job 3: Lease renewal (every 6 hours) ──────────────────────────────
