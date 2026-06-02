@@ -8,6 +8,9 @@ node_modules/
 *.apk
 *.aab
 
+# Android local properties (machine-specific paths, e.g. ndk.dir)
+android/local.properties
+
 # Wrangler local secrets
 # .dev.vars is read by wrangler dev and deploy --dry-run; never commit
 .dev.vars
@@ -41,3 +44,4 @@ firebase-debug.log
 
 # Aider
 .aider*
+.cmdline-tools/
