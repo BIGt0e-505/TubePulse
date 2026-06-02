@@ -8,9 +8,9 @@
 #
 # Usage:
 #   ./build-and-release.sh 3.0.13                # build only, current branch
-#   ./build-and-release.sh 3.0.13 v3-restored    # build + commit + push + gh release
-#   ./build-and-release.sh 3.0.13 v3-restored --build-only  # skip git push + gh release
-#   ./build-and-release.sh 3.0.13 v3-restored --clean         # nuke gradle cache first
+#   ./build-and-release.sh 3.0.18 master              # build + commit + push + gh release
+#   ./build-and-release.sh 3.0.18 master --build-only  # skip git push + gh release
+#   ./build-and-release.sh 3.0.18 master --clean         # nuke gradle cache first
 #
 # Requirements (all already on the Windows host):
 #   - JDK 17 or 21 at C:\Program Files\Java\jdk-XX
