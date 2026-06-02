@@ -363,10 +363,21 @@ async function getGoogleAccessToken(serviceAccountJson) {
   const input = `${headerB64}.${payloadB64}`;
 
   const pemKey = sa.private_key;
-  const pemBody = pemKey
+  // The Cloudflare secret manager may store the file with literal "\n"
+  // two-character sequences (escape sequences) rather than actual newlines.
+  // Convert literal "\n" to real newlines first, then strip headers/whitespace.
+  let pemBody = pemKey
+    .replace(/\\n/g, '\n')
     .replace(/-----BEGIN PRIVATE KEY-----/, '')
     .replace(/-----END PRIVATE KEY-----/, '')
     .replace(/\s/g, '');
+
+  // Fix base64 padding. Google service account JSON sometimes ships with the
+  // wrong number of trailing '=' signs because JSON encoding strips them
+  // inconsistently. Body length must be divisible by 4 to decode.
+  while (pemBody.length % 4 !== 0) {
+    pemBody += '=';
+  }
 
   const binaryStr = atob(pemBody);
   const bytes = new Uint8Array(binaryStr.length);
@@ -485,13 +496,26 @@ async function handleRegister(request, env) {
   try { body = await request.json(); } catch { return errorResponse('Invalid JSON body'); }
 
   const { fcmToken, platform, appVersion } = body;
-  if (!fcmToken) return errorResponse('fcmToken is required');
-
+  // fcmToken is optional — the device profile is what subscribes channels and
+  // serves /feed. Push delivery is a separate concern, addressed by the
+  // /register call when the user grants notification permission, and by
+  // the onTokenRefresh hook from the app. If we made fcmToken required,
+  // a fresh install on a user who denies notifications would never get
+  // a device profile, and every subsequent /feed /subscribe-channel /etc
+  // would 404.
   const now = Date.now();
   const existing = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
 
+  // Preserve existing fcmToken if the new one is missing or null —
+  // this lets the app re-register on app launch with the current token
+  // (which may be the same or a refreshed one) without overwriting
+  // a known-good token with null during permission races.
+  const effectiveFcmToken = (fcmToken && fcmToken.length > 0)
+    ? fcmToken
+    : (existing?.fcmToken || null);
+
   const profile = {
-    fcmToken,
+    fcmToken: effectiveFcmToken,
     platform: platform || existing?.platform || 'android',
     appVersion: appVersion || existing?.appVersion || null,
     createdAt: existing?.createdAt || now,
@@ -499,7 +523,7 @@ async function handleRegister(request, env) {
   };
 
   await putKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId), profile);
-  return json({ ok: true, createdAt: profile.createdAt });
+  return json({ ok: true, createdAt: profile.createdAt, fcmTokenPresent: effectiveFcmToken !== null });
 }
 
 // ─── POST /subscribe-channel ────────────────────────────────────────────
