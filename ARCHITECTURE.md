@@ -1,8 +1,8 @@
 # TubePulse — Architecture Specification
 
-**Version:** v3.0 (target)
-**Date:** 2026-04-19
-**Status:** Design — pre-implementation
+**Version:** v3.0 (as shipped)
+**Date:** 2026-04-19 (initial), updated 2026-06-02
+**Status:** Live — matches deployed code
 
 ---
 
@@ -119,8 +119,8 @@ The architectural difference is roughly 100x at this scale, and it widens as you
 
 | Component | Role | Triggered by |
 |-----------|------|--------------|
-| `tubepulse-api` | REST API for app + WebSub callback | HTTP requests |
-| `tubepulse-cron` | Three scheduled jobs (see §6) | Cron schedules |
+| `tubepulse-api` | REST API for app + WebSub callback (dormant) | HTTP requests |
+| `tubepulse-cron` | Four scheduled jobs (see §6) — YouTube Data API polling is the active detection path | Cron schedules |
 | Cloudflare KV | Single namespace, all persistent state | Workers |
 | Firebase Cloud Messaging | Push notifications to devices | API + cron workers |
 | Android app | UI, device-local cache, FCM receiver | User + push |
@@ -130,7 +130,18 @@ The architectural difference is roughly 100x at this scale, and it widens as you
 - No database (KV only — see §5.1 for why)
 - No queue (KV operations are fast enough)
 - No separate cache layer (KV is already edge-cached)
-- No backend service polling YouTube (WebSub does it)
+- No backend service polling YouTube RSS — **YouTube Data API polling is the active path (Job 2.5)**, not RSS
+
+### 4.3 Active detection path (as of 2026-06-02)
+
+Google's `pubsubhubbub.appspot.com` hub was **shut down in 2024**. The WebSub handler remains in both workers for:
+- Manual testing
+- Compatibility with any future YouTube-compatible hub
+- As a clean integration point for self-hosted hubs
+
+But the **active video detection path** is the cron running a **YouTube Data API poller** every 5 minutes (Job 2.5 in `tubepulse-cron/index.js`). It iterates the `channels:active` index, calls `videos.list?part=snippet&channelId=...&maxResults=15` for each, and diffs the response against `channel:{channelId}:recent.lastVideoId`. New videos are treated identically to WebSub pushes from the API worker's perspective.
+
+**Cost:** ~1 YouTube Data API quota unit per channel per 5-min tick. With 100 channels that's 28,800 units/day — under the 10,000/day free tier only at low channel counts. Watch this number as the catalogue grows.
 
 ---
 
@@ -286,7 +297,7 @@ This is a soft cap — if the requirement changes, raising it requires no schema
 
 ## 6. Cron jobs
 
-Three separate scheduled workers, each with a single responsibility. Splitting them lets each run at its natural frequency without the others becoming a bottleneck.
+Four separate scheduled jobs in the same Worker, each with a single responsibility. Splitting them lets each run at its natural frequency without the others becoming a bottleneck. All four use the same KV namespace.
 
 ### 6.1 Upcoming events cron — every 5 minutes
 
@@ -300,7 +311,24 @@ Reads the `upcoming:` bucket key for the current 5-minute window. For each entry
 
 Cost per tick: 1 read minimum, 2 reads + 2 writes per event firing. Most ticks have nothing in the bucket.
 
-### 6.2 Nag cron — every 15 minutes
+### 6.2 YouTube Data API poll cron — every 5 minutes  ⚠️ ACTIVE DETECTION PATH
+
+```
+*/5 * * * *
+```
+
+This is the **primary** new-video detection path (since WebSub hub shutdown in 2024).
+
+1. Read `channels:active` index from KV
+2. For each channelId:
+   - Call YouTube Data API `videos.list?part=snippet&channelId={id}&maxResults=15&order=date`
+   - Compare response against `channel:{channelId}:recent`
+   - For each new videoId: update recent list, look up subscribers, send FCM
+3. New videos flow through the same notification pipeline as WebSub pushes would
+
+**Quota cost:** 1 unit per channel per tick. At 288 ticks/day and N channels, that's `288 × N` units/day. Stays inside the 10K free tier up to ~35 channels. Beyond that, the bound is quota, not architecture — consider Workers Paid ($5/mo) or accept hourly polling for low-priority channels.
+
+### 6.3 Nag cron — every 15 minutes
 
 ```
 */15 * * * *
@@ -316,29 +344,30 @@ Cost per tick: 1 read minimum, 4 reads + 2 writes per nag firing.
 
 15 minutes is fine for nags because nag frequency is configured in 5-min minimum increments — worst case a "5-minute" nag fires up to 15 minutes late. Document this in user-facing settings as "approximately every 5 minutes".
 
-### 6.3 Lease renewal cron — every 6 hours
+### 6.4 WebSub lease renewal cron — every 6 hours (DORMANT)
 
 ```
 0 */6 * * *
 ```
 
-Reads `channels:active`. For each channel:
-- Read `channel:{channelId}:websub`
-- If lease expires within 24 hours, renew via WebSub PubSubHubbub
+**Currently a no-op.** The `pubsubhubbub.appspot.com` hub has been defunct since 2024. Kept in the schedule so we can flip it back on instantly if a compatible hub reappears. Code path reads `channels:active`, checks `channel:{channelId}:websub.leaseExpiresAt`, and would re-subscribe to the hub if needed.
 
-Cost per tick: 1 + N reads, M writes (where M = channels needing renewal in this window).
+### 6.5 What's NOT in any cron
 
-6-hour cadence with 24-hour-ahead renewal gives 4x safety margin against worker outages.
-
-### 6.4 What's NOT in any cron
-
-- "Check channels for new videos" — WebSub push handles this
+- "Check channels for new videos" — done by the Data API poller (6.2), not by a device-iteration loop
 - "Iterate devices to find unwatched videos" — devices already have local state; nags are pre-scheduled
-- "Refresh channel metadata" — done lazily on next push or bootstrap
+- "Refresh channel metadata" — done lazily on next poll or bootstrap
 
 ---
 
 ## 7. WebSub push handling
+
+**Status: dormant but intact.** Code is in `tubepulse-api/index.js` (`handleWebSubVerification`, `handleWebSubPush`). Not used as the active detection path since 2024. Kept for:
+- Manual smoke tests
+- Future YouTube-compatible hub revival
+- Self-hosted hub integration
+
+The active detection path is described in §6.2.
 
 ### 7.1 Verification (GET /websub)
 
@@ -346,7 +375,7 @@ Standard WebSub challenge-response. Read `channel:{channelId}:websub` to verify 
 
 ### 7.2 Push delivery (POST /websub)
 
-The hot path. This is what fires when YouTube tells us a channel has new content.
+If a push ever does arrive (e.g. from a self-hosted hub), the handler does the same work as the Data API poller:
 
 ```
 1. Verify HMAC signature against channel:{channelId}:websub.hmacSecret
@@ -374,11 +403,11 @@ The hot path. This is what fires when YouTube tells us a channel has new content
    - Write entry into upcoming:{publishedAt} bucket (live-now)
 ```
 
-### 7.3 Why WebSub is a hard requirement
+### 7.3 Why WebSub is a hard requirement (historical, not current)
 
-WebSub is the only way to get push-style notifications from YouTube without polling. Polling either uses YouTube Data API quota (limited) or RSS feeds (works but expensive at scale). WebSub is push, free, and standard.
+WebSub was the preferred path because it was push-based, free, and standard. The shutdown of Google's hub in 2024 changed the calculus. The fallback that was always sketched in the design is now the production path: poll the YouTube Data API on a cron schedule, with the same "process new video for channel" function the WebSub handler uses.
 
-If WebSub becomes unreliable in the future, the fallback design is to poll RSS at the cron level — but architect such that the rest of the system doesn't notice. RSS polling would call the same "process new video for channel" function the WebSub handler does.
+**Quota math (§6.2 revisited):** at 35 channels, 5-min polling fits in the free tier. Beyond that, either upgrade or accept coarser polling for low-priority channels.
 
 ---
 
@@ -567,7 +596,7 @@ Workers update this key in batches (e.g. flushed every 5 minutes from worker mem
 
 ## 12. Implementation order
 
-Suggested sequence to minimise risk. Each step should produce a working, testable deliverable. Don't build all the workers first and test at the end.
+**All steps completed 2026-04-20 → 2026-06-02 (v3.0.0 → v3.0.13).** Kept here as the historical record of the build sequence.
 
 1. **Set up KV namespace and a smoke-test Worker.** Create a few keys in the new schema, verify reads work.
 2. **Build the channel-first WebSub handler.** Highest-value piece — both the hot path and the architectural inversion that makes everything else work. Test with a single subscribed channel before moving on.
@@ -577,6 +606,11 @@ Suggested sequence to minimise risk. Each step should produce a working, testabl
 6. **Build the lease renewal cron.** Last because it's the slowest-ticking job and easiest to verify works.
 7. **Update the app to talk to the new API.** Local cache, FCM payload handling, all endpoint calls.
 8. **Observability.** Metrics key updates, alerts, daily summary push to Telegram.
+
+**Post-v3 additions:**
+- **YouTube Data API poller (Job 2.5)** — added after WebSub hub shutdown was confirmed. Replaces WebSub as the active detection path. Same fan-out logic, different input source.
+- **FCM JWT signing fixes** — PKCS8 base64 padding, `\n` escape handling. Without these, no push could ever deliver.
+- **v3.0.13 release pipeline** — `build-and-release.sh` rewritten as a WSL-native gradle build with GitHub release publishing.
 
 ---
 

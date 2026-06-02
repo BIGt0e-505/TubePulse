@@ -16,17 +16,23 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 
 > **Note:** Each device registers independently. There's no cross-device sync — if you install TubePulse on two phones, each manages its own channel list and settings.
 
-### ⚡ WebSub Push Detection
-TubePulse doesn't poll YouTube. It uses **WebSub** (PubSubHubbub) — YouTube pushes to us the instant a video drops. This means:
+### ⚡ New-Video Detection
+TubePulse detects new uploads via a **YouTube Data API poller** running on a Cloudflare Worker cron (every 5 min). Originally it used **WebSub** (PubSubHubbub) for push-style detection, but Google's `pubsubhubbub.appspot.com` hub was shut down in 2024, so the cron polls `videos.list?channelId=...&order=date` for each tracked channel and diffs against the cached recent list.
 
-- **Zero polling** — no wasted RSS fetches, no battery drain
-- **Instant detection** — new videos appear within seconds of upload
-- **Infinite scalability** — 1 user or 10,000, same server cost
-- **No YouTube API quota** for video detection — Atom feeds only, API reserved for channel avatars
+**Active path (since 2024):**
+- **Polling-based** — cron hits the YouTube Data API every 5 min for every channel with at least one subscriber
+- **Cheap to operate** — 1 quota unit per channel per tick (~28,800/day at 100 channels, free tier is 10,000/day)
+- **Latency** — up to 5 min between upload and detection
+- **Quota-aware** — at scale beyond ~35 channels, the bound becomes API quota, not architecture
 
-When a channel is added, TubePulse subscribes to its WebSub feed. YouTube sends a verification handshake, then pushes an Atom XML payload whenever new content is published. WebSub leases expire (typically 5 days), so a cron job renews subscriptions 24 hours before expiry. The last device to remove a channel triggers an unsubscribe.
+**WebSub (dormant):** the `/websub` endpoints and handler code remain in the workers for:
+- Manual testing
+- Future YouTube-compatible hub revival
+- Self-hosted hub integration
 
-**Known limitation:** YouTube's Atom feed doesn't distinguish Shorts, premieres, or livestreams from regular uploads. However, TubePulse detects **scheduled events** (premieres and scheduled livestreams) by checking if the `<published>` time is in the future. These are handled specially:
+When a new video is detected, the worker pushes it to all eligible devices via FCM. New videos appear within 5 minutes of upload. WebSub leases would expire (typically 5 days), so a cron job would renew subscriptions 24 hours before expiry if the hub were active. The last device to remove a channel would trigger an unsubscribe.
+
+**Scheduled event detection:** YouTube Data API entries with a future `publishedAt` are treated as scheduled livestreams/premieres:
 - Stored silently when detected — no immediate notification
 - **"Going live soon"** notification sent 1 nag interval before the scheduled start
 - **"Is live"** notification sent when the scheduled time passes
@@ -78,26 +84,27 @@ This is the key interaction: video tap for "I've seen this one", channel tap for
 ### Overview — v3.0 (channel-first)
 
 ```
-YouTube ──WebSub push──▶ API Worker ──FCM push──▶ Phone
-                                │
-                                ▼
-                          Cloudflare KV
-                          (devices, channels,
-                           subscribers, state,
-                           time buckets)
-                                │
-                                ▼
-                     Cron Worker (*/5)
-                     ┌─────────────────────┐
-                     │ */5  upcoming events  │ ← scheduled livestream reminders
-                     │ */15 nag bucket       │ ← re-notify unwatched videos
-                     │ 0*/6 lease renewal   │ ← renew WebSub subscriptions
-                     └─────────────────────┘
+YouTube Data API ──poll every 5 min──▶ Cron Worker ──new videos──▶ API Worker ──FCM push──▶ Phone
+                                                      │                                       │
+                                                      ▼                                       │
+                                                Cloudflare KV                                  │
+                                                (channels:active,                              │
+                                                 channel meta/recent/subs,                     │
+                                                 device profile/settings/state/override)       │
+                                                                                               │
+                                                                                               ▼
+                                                                                          Phone
+                                                                          (also: scheduled events,
+                                                                           nag cycle, WebSub dormant)
 ```
 
 **Key principle:** Channels are the unit of work. Devices are the unit of subscription.  
 Every operation asks "what's happening to this channel" first, then "who cares about this channel".  
 This inverts the old device-first approach and eliminates `KV.list()` entirely.
+
+**Detection paths in v3:**
+- **Active:** Cron Worker polls YouTube Data API every 5 min, diffs results against `channel:{id}:recent.lastVideoId`, fans out new videos to API Worker
+- **Dormant:** WebSub handlers in both workers exist but the hub is shut down; `/websub` endpoint still works for manual testing or future hub revival
 
 ### API Worker (`tubepulse-api`)
 
@@ -129,31 +136,32 @@ The central Cloudflare Worker. Handles:
 
 ### Cron Worker (`tubepulse-cron`)
 
-Runs every 5 minutes. Two jobs:
+Runs every 5 minutes. Four jobs:
 
-#### Job 1: Nag Cycle
+#### Job 1: Upcoming Events
 
-Scans all devices for unwatched videos that need re-notifying:
+Scans time-bucketed `upcoming:` keys for scheduled livestreams going live in the next 30 min.
 
-1. List all device keys from KV
-2. For each device, for each tracked channel, read the feed from KV
-3. For each video in the feed not in the device's `seenIds`:
-   - **Relentless**: check if `lastNotifiedAt + nagInterval` has elapsed → re-nag
-   - **Chill**: check if `lastRemindedAt + 4h` has elapsed → nudge
-4. Skip if DND is active (global or per-channel)
-5. Send FCM push, update nag state in KV
-6. Prune stale nag states for videos no longer in the feed
+#### Job 2: YouTube Data API Polling — **active new-video detection**
 
-Also acts as a safety net — if a WebSub push was missed (e.g. during DND), the nag cycle will eventually notify the device.
+Iterates `channels:active` and calls `videos.list?part=snippet&channelId=...&order=date&maxResults=15` for each. Diffs the response against `channel:{channelId}:recent` to find new videoIds. For each new video, looks up subscribers and writes an entry to the API Worker for fan-out to FCM.
 
-#### Job 2: WebSub Lease Renewal
+Cost: 1 YouTube Data API quota unit per channel per 5-min tick. Fits in the 10K free tier up to ~35 channels.
 
-WebSub subscriptions expire (typically 4–10 days). The cron renews any subscription expiring within 24 hours:
+#### Job 3: Nag Cycle
 
-1. List all `sub:*` keys from KV
-2. Check `leaseExpires` timestamp
-3. If expiring within 24h, send a subscribe request to the PubSubHubbub hub
-4. The hub sends a GET verification to `/websub`, which updates the lease expiry
+Scans time-bucketed `nag:` keys for unwatched videos that need re-notifying:
+
+1. For each nag entry, read device profile + settings + per-channel override
+2. Skip if DND is active (global or per-channel)
+3. Send FCM push, update nag state in KV
+4. Schedule next nag into the appropriate bucket
+
+Also acts as a safety net — if the YouTube poller missed a new video, the nag cycle will eventually notify the device when it checks the feed.
+
+#### Job 4: WebSub Lease Renewal (DORMANT)
+
+WebSub subscriptions would expire (typically 4–10 days) if active. Currently a no-op because Google's `pubsubhubbub.appspot.com` hub has been shut down since 2024. Code path remains so a flip-on is instant if a compatible hub reappears.
 
 ### Data Model (Cloudflare KV) — v3.0
 
@@ -195,15 +203,19 @@ WebSub subscriptions expire (typically 4–10 days). The cron renews any subscri
 Video uploaded on YouTube
          │
          ▼
-YouTube sends WebSub push to /websub
+Cron Worker polls YouTube Data API every 5 min
+(via videos.list?channelId=...&order=date)
          │
          ▼
-API Worker parses Atom XML, detects new video
+Diff against channel:{id}:recent → new videoIds found
+         │
+         ▼
+Cron Worker calls API Worker's fan-out with new videos
          │
          ├─ DND active? → skip, nag cycle catches later
          │
          ▼
-Send FCM push to all eligible devices
+API Worker sends FCM push to all eligible devices
          │
          ▼
 Device receives notification
@@ -213,7 +225,7 @@ Device receives notification
          ├─ User ignores → nag cycle re-notifies on schedule
          │
          ▼
-Nag Cycle (every 5 min)
+Nag Cycle (every 5 min, scheduled into time buckets)
          │
          ├─ Relentless: re-nag if nagInterval elapsed
          ├─ Chill: nudge if 4h elapsed
@@ -224,6 +236,8 @@ Nag Cycle (every 5 min)
 Repeat until user watches
 ```
 
+**Note:** The notification flow's WebSub push trigger has been replaced by the cron-based YouTube Data API poller. WebSub handlers in the workers are dormant but intact.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -231,7 +245,7 @@ Repeat until user watches
 | Framework | React Native + Expo |
 | Navigation | React Navigation (native stack) |
 | Storage | AsyncStorage (channels, settings, cache) |
-| Push Detection | WebSub (PubSubHubbub) via YouTube's hub |
+| Push Detection | YouTube Data API poller (cron-driven, 5 min). WebSub handler dormant (hub shut down 2024) |
 | Video Data | YouTube RSS/Atom feeds (parsed from WebSub pushes) |
 | API | YouTube Data API v3 (handle resolution + avatars only) |
 | Backend | Cloudflare Workers (API + Cron) |

@@ -52,25 +52,35 @@ export default function App() {
 
         // Request permission and get FCM token
         const fcmToken = await requestPermissionAndGetToken();
+        // Register device with the server. We do this even if FCM is unavailable —
+        // the device profile is what the preseed channel bootstrap subscribes against.
+        // FCM token is a separate field on the profile and is set/updated below.
+        try {
+          await registerDevice(deviceId, fcmToken || null);
+        } catch (e) {
+          console.warn('Device register failed:', e);
+        }
+
         if (fcmToken) {
           fcmTokenRef.current = fcmToken;
+        }
 
-          // Register device profile with API Worker (profile only — channels/settings are separate)
-          await registerDevice(deviceId, fcmToken);
+        // Clear init flag from previous session
+        const { AsyncStorage: ASInit } = require('react-native');
+        await ASInit.removeItem('tubepulse_init_done');
 
-          // Clear init flag from previous session
-          const { AsyncStorage: ASInit } = require('react-native');
-          await ASInit.removeItem('tubepulse_init_done');
+        // After registering, ensure local channels are subscribed on the server
+        // This handles both fresh install and v2→v3 migration
+        // CRITICAL: this must run regardless of FCM token availability —
+        // preseed channels need their server-side state and avatars populated
+        // even if the user denied notification permission.
+        try {
+          const { getChannels, getSettings } = require('./src/utils/storage');
+          const localChannels = await getChannels();
+          const localSettings = await getSettings();
 
-          // After registering, ensure local channels are subscribed on the server
-          // This handles both fresh install and v2→v3 migration
-          try {
-            const { getChannels, getSettings } = require('./src/utils/storage');
-            const localChannels = await getChannels();
-            const localSettings = await getSettings();
-
-            // Push settings to server
-            try { await updateSettings(deviceId, localSettings); } catch (e) {}
+          // Push settings to server
+          try { await updateSettings(deviceId, localSettings); } catch (e) {}
 
             // Subscribe any local channels that aren't on the server yet
             const feedResult = await fetchFeed(deviceId);
@@ -153,13 +163,12 @@ export default function App() {
               }
               console.log(`[Init] Subscribed ${missingChannels.length} channels`);
             }
-          } catch (e) {
-            console.warn('[Init] Channel subscription failed:', e);
-          }
-          // Signal that init is complete (whether or not migration ran)
-          const { AsyncStorage: AS } = require('react-native');
-          await AS.setItem('tubepulse_init_done', String(Date.now()));
+        } catch (e) {
+          console.warn('[Init] Channel subscription failed:', e);
         }
+        // Signal that init is complete (whether or not migration ran, with or without FCM)
+        const { AsyncStorage: AS } = require('react-native');
+        await AS.setItem('tubepulse_init_done', String(Date.now()));
       } catch (e) {
         console.warn('Init error:', e);
       }

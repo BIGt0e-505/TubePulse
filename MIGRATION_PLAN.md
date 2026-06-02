@@ -1,8 +1,10 @@
 # TubePulse — Push Notification Architecture Migration Plan
 
-**Version:** 1.0  
-**Date:** 18 April 2026  
-**Status:** Draft  
+**Version:** 1.0 (historical)
+**Date:** 18 April 2026
+**Status:** ✅ **Completed 2026-04-20 → 2026-06-02. All phases shipped as v3.0.0 → v3.0.13.**
+
+> This document is kept as a historical record of the v1 (client-polling) → v2 (server-push) migration. For the current state of the project, see [STATUS.md](STATUS.md). For the architecture spec as it exists today, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -533,18 +535,24 @@ If the push architecture causes issues:
 
 ---
 
-## 14. Timeline Estimate
+## 14. Timeline Estimate vs Actual
 
-| Phase | Effort | Notes |
-|-------|--------|-------|
-| Phase 0: Firebase + infra | 1–2 hours | Mostly console work + Worker secrets |
-| Phase 1: API Worker | 3–4 hours | REST endpoints + KV data model |
-| Phase 2: Cron Worker | 3–4 hours | RSS fetch + FCM push engine + state mgmt |
-| Phase 3: App Firebase | 2–3 hours | FCM integration + native config |
-| Phase 4: App refactor | 3–4 hours | Remove polling, wire API, simplify |
-| Phase 5: Polish | 2–3 hours | Edge cases, offline, cleanup |
-| **Total** | **14–20 hours** | Spread over 2–3 sessions |
+| Phase | Estimate | Actual | Notes |
+|-------|----------|--------|-------|
+| Phase 0: Firebase + infra | 1–2 hours | ~2 hours | |
+| Phase 1: API Worker | 3–4 hours | ~5 hours | Spread over 2 sessions |
+| Phase 2: Cron Worker | 3–4 hours | ~6 hours | Data API poller added post-launch (WebSub hub died) |
+| Phase 3: App Firebase | 2–3 hours | ~3 hours | |
+| Phase 4: App refactor | 3–4 hours | ~5 hours | More screens affected than anticipated |
+| Phase 5: Polish | 2–3 hours | ~6 hours | Fresh-install bootstrap, widget auth, settings field drift |
+| Bug-fix patch series (v3.0.1 → v3.0.13) | — | ~8 hours | FCM JWT signing fix was the biggest unblocker |
+| **Total** | **14–20 hours** | **~35 hours** | Spanned 2026-04-18 → 2026-06-02 across ~10 sessions |
+
+### Deviations from plan
+- **WebSub replaced by YouTube Data API polling** when Google's hub was confirmed shut down. Cron design absorbed the change cleanly.
+- **FCM JWT signing was a 2-month silent failure.** The truncated 1216-byte PKCS8 key was the root cause — discovered only when a code path actually exercised `getGoogleAccessToken` end-to-end. Fixed in v3.0.13 by regenerating the key + adding base64 padding + `\n` escape handling in the PEM parser.
+- **`v3-restored` branch** — after a botched merge attempt, all v3 work was rebased onto a fresh branch rather than `main`. The release at v3.0.13 lives there.
 
 ---
 
-*This plan lives at `/mnt/d/dev/TubePulse/MIGRATION_PLAN.md`. Update it as we progress through phases.*
+*This plan lives at `/mnt/d/dev/TubePulse/MIGRATION_PLAN.md`. Historical record — superseded by [STATUS.md](STATUS.md) and [ARCHITECTURE.md](ARCHITECTURE.md).*
