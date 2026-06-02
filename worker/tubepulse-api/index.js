@@ -76,6 +76,116 @@ const key = {
 async function getKV(kv, k) { return await kv.get(k, 'json'); }
 async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
 
+// ─── Cleanup helpers ────────────────────────────────────────────────────
+//
+// These remove state for channels/devices that no longer need it. Both
+// run on a single worker, so KV ops are not double-counted elsewhere.
+//
+// Idempotent: kv.delete() on a missing key is a no-op. If two workers
+// race to clean up the same dead device, we just log the duplicate and
+// move on — no state corruption, just a small amount of wasted ops.
+//
+// Logging convention: every cleanup emits a single console.log with
+// deviceId/channelId + reason + counts. Watch for sudden spikes in
+// cleanup volume (likely an app-version bug or mass uninstall event).
+
+/**
+ * Remove a channel's cached state once it has zero subscribers.
+ * Idempotent. Safe to call even if the channel was never cached.
+ *
+ * Returns a promise that resolves with the cleanup result. The caller
+ * decides whether to await it (blocking) or wrap it in ctx.waitUntil
+ * (fire-and-forget) depending on the request lifecycle.
+ *
+ * @param {string} channelId
+ * @param {object} env
+ * @param {string} [reason='unsubscribe_last'] — for logs
+ * @returns {Promise<{deletedKeys: number, removedFromActive: boolean}>}
+ */
+async function cleanupDeadChannel(channelId, env, reason = 'unsubscribe_last') {
+  const kv = env.TUBEPULSE_KV;
+  let deletedKeys = 0;
+
+  await kv.delete(key.channelMeta(channelId));
+  deletedKeys++;
+  await kv.delete(key.channelRecent(channelId));
+  deletedKeys++;
+  await kv.delete(key.channelWebsub(channelId));
+  deletedKeys++;
+
+  const active = await getKV(kv, key.channelsActive()) || [];
+  const filtered = active.filter((id) => id !== channelId);
+  const removedFromActive = filtered.length !== active.length;
+  if (removedFromActive) {
+    await putKV(kv, key.channelsActive(), filtered);
+  }
+
+  console.log(`[Cleanup] channel ${channelId}: reason=${reason} deletedKeys=${deletedKeys} removedFromActive=${removedFromActive}`);
+  return { deletedKeys, removedFromActive };
+}
+
+/**
+ * Remove a device's full state once FCM has reported it dead (UNREGISTERED).
+ * Also cleans up every channel the device was subscribed to — and if any
+ * of those channels go from N=1 to N=0 subscribers, the channel is also
+ * cleaned via cleanupDeadChannel.
+ *
+ * Idempotent. Safe to call on a device that was never registered.
+ *
+ * Returns a promise; caller decides whether to await or wrap in waitUntil.
+ *
+ * @param {string} deviceId
+ * @param {object} env
+ * @param {string} [reason='fcm_unregistered']
+ * @returns {Promise<{channelsCleaned: number, devicesDeleted: number}>}
+ */
+async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
+  const kv = env.TUBEPULSE_KV;
+
+  // 1. Find every channel this device was on.
+  const channels = await getKV(kv, key.deviceChannels(deviceId)) || [];
+  let channelsCleaned = 0;
+
+  // 2. For each channel, remove the device from its subscribers list.
+  //    If the list goes empty, the channel is also fully cleaned up.
+  for (const channelId of channels) {
+    const subs = await getKV(kv, key.channelSubs(channelId)) || [];
+    const filtered = subs.filter((id) => id !== deviceId);
+    await putKV(kv, key.channelSubs(channelId), filtered);
+
+    if (filtered.length === 0 && subs.length > 0) {
+      await cleanupDeadChannel(channelId, env, 'last_subscriber_dead');
+      channelsCleaned++;
+    }
+  }
+
+  // 3. Delete the device's own state. We do this last so a failure in
+  //    step 2 leaves the device profile intact and the next push will
+  //    retry the cleanup.
+  let devicesDeleted = 0;
+  const deviceKeys = [
+    key.deviceProfile(deviceId),
+    key.deviceSettings(deviceId),
+    key.deviceChannels(deviceId),
+  ];
+  for (const k of deviceKeys) {
+    await kv.delete(k);
+    devicesDeleted++;
+  }
+
+  // 4. Delete per-channel state + override. We don't know the channel
+  //    list any more (we just deleted :channels), so iterate the list
+  //    we captured in step 1.
+  for (const channelId of channels) {
+    await kv.delete(key.deviceState(deviceId, channelId));
+    await kv.delete(key.deviceOverride(deviceId, channelId));
+    devicesDeleted += 2;
+  }
+
+  console.log(`[Cleanup] device ${deviceId}: reason=${reason} channelsAffected=${channels.length} channelsCleaned=${channelsCleaned} devicesDeleted=${devicesDeleted}`);
+  return { channelsCleaned, devicesDeleted };
+}
+
 // ─── DND logic ──────────────────────────────────────────────────────────
 
 function isDndActive(dndStart, dndEnd, timezone = 'UTC') {
@@ -751,11 +861,10 @@ async function handleUnsubscribe(request, env, ctx) {
     const callbackUrl = `${new URL(request.url).origin}/websub`;
     ctx.waitUntil((async () => {
       await unsubscribeFromChannel(channelId, callbackUrl);
-      await env.TUBEPULSE_KV.delete(key.channelWebsub(channelId));
-      // Remove from channels:active
-      const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
-      const newActive = active.filter((id) => id !== channelId);
-      await putKV(env.TUBEPULSE_KV, key.channelsActive(), newActive);
+      // cleanupDeadChannel deletes meta/recent/websub and removes from
+      // channels:active. Don't delete the device profile — the user
+      // may re-subscribe later and we want to preserve their settings.
+      await cleanupDeadChannel(channelId, env, 'unsubscribe_last');
     })());
   }
 
@@ -1315,13 +1424,13 @@ async function handleWebSubPush(request, env, ctx) {
         const result = await sendFCMPush(accessToken, projectId, fcmToken, notifPayload);
 
         if (result.deadToken) {
-          // Clean up dead device
+          // FCM has confirmed the device is gone (UNREGISTERED). Run the
+          // full cleanup: remove from every channel's subscribers, clean
+          // up any channel that goes empty, delete the device's profile.
+          // We do this in ctx.waitUntil so the response to the hub isn't
+          // blocked on the cleanup work.
           console.log(`[WebSub] Pruning dead token: ${deviceId}`);
-          // Remove device profile and from all subscriber lists
-          await env.TUBEPULSE_KV.delete(key.deviceProfile(deviceId));
-          // Remove from this channel's subscribers (others handled by cron or next push)
-          const currentSubs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
-          await putKV(env.TUBEPULSE_KV, key.channelSubs(channelId), currentSubs.filter((id) => id !== deviceId));
+          ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
         }
       }
 

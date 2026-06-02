@@ -19,6 +19,7 @@ const key = {
   channelRecent:    (channelId) => `channel:${channelId}:recent`,
   deviceProfile:    (deviceId)  => `device:${deviceId}:profile`,
   deviceSettings:   (deviceId)  => `device:${deviceId}:settings`,
+  deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
   deviceOverride:   (deviceId, channelId) => `device:${deviceId}:override:${channelId}`,
   deviceState:      (deviceId, channelId) => `device:${deviceId}:state:${channelId}`,
   upcoming:         (bucket)    => `upcoming:${bucket}`,
@@ -37,6 +38,100 @@ async function putKV(kv, k, value) { kvOps.writes++; await kv.put(k, JSON.string
 async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
 // Note: kv.list() isn't called anywhere in this worker (the channels:active
 // index replaces it). If it ever is, the counter is here and ready.
+
+// ─── Cleanup helpers ────────────────────────────────────────────────────
+//
+// Identical logic to the API worker's cleanup helpers. Kept in sync so
+// both workers can clean up dead devices/channels the same way.
+//
+// Idempotent: kv.delete() on a missing key is a no-op. If the API and
+// cron workers race to clean up the same dead device (e.g. WebSub push
+// and RSS poll both detect UNREGISTERED in the same window), we just
+// log the duplicate and move on.
+//
+// Logging: every cleanup emits a single console.log with reason + counts.
+// Watch for sudden spikes (likely an app-version bug or mass uninstall).
+
+/**
+ * Remove a channel's cached state once it has zero subscribers.
+ * Idempotent. Safe to call even if the channel was never cached.
+ */
+async function cleanupDeadChannel(channelId, env, reason = 'last_subscriber_dead') {
+  const kv = env.TUBEPULSE_KV;
+  let deletedKeys = 0;
+
+  await deleteKV(kv, key.channelMeta(channelId));
+  deletedKeys++;
+  await deleteKV(kv, key.channelRecent(channelId));
+  deletedKeys++;
+  await deleteKV(kv, key.channelWebsub(channelId));
+  deletedKeys++;
+
+  const active = await getKV(kv, key.channelsActive()) || [];
+  const filtered = active.filter((id) => id !== channelId);
+  const removedFromActive = filtered.length !== active.length;
+  if (removedFromActive) {
+    await putKV(kv, key.channelsActive(), filtered);
+  }
+
+  console.log(`[Cleanup] channel ${channelId}: reason=${reason} deletedKeys=${deletedKeys} removedFromActive=${removedFromActive}`);
+  return { deletedKeys, removedFromActive };
+}
+
+/**
+ * Remove a device's full state once FCM has reported it dead (UNREGISTERED).
+ * Also cleans up every channel the device was subscribed to — and if any
+ * of those channels go from N=1 to N=0 subscribers, the channel is also
+ * cleaned via cleanupDeadChannel.
+ *
+ * Idempotent. Safe to call on a device that was never registered.
+ */
+async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
+  const kv = env.TUBEPULSE_KV;
+
+  // 1. Find every channel this device was on.
+  const channels = await getKV(kv, key.deviceChannels(deviceId)) || [];
+  let channelsCleaned = 0;
+
+  // 2. For each channel, remove the device from its subscribers list.
+  //    If the list goes empty, the channel is also fully cleaned up.
+  for (const channelId of channels) {
+    const subs = await getKV(kv, key.channelSubs(channelId)) || [];
+    const filtered = subs.filter((id) => id !== deviceId);
+    await putKV(kv, key.channelSubs(channelId), filtered);
+
+    if (filtered.length === 0 && subs.length > 0) {
+      await cleanupDeadChannel(channelId, env, 'last_subscriber_dead');
+      channelsCleaned++;
+    }
+  }
+
+  // 3. Delete the device's own state. We do this last so a failure in
+  //    step 2 leaves the device profile intact and the next push will
+  //    retry the cleanup.
+  let devicesDeleted = 0;
+  const deviceKeys = [
+    key.deviceProfile(deviceId),
+    key.deviceSettings(deviceId),
+    key.deviceChannels(deviceId),
+  ];
+  for (const k of deviceKeys) {
+    await deleteKV(kv, k);
+    devicesDeleted++;
+  }
+
+  // 4. Delete per-channel state + override. We don't know the channel
+  //    list any more (we just deleted :channels), so iterate the list
+  //    we captured in step 1.
+  for (const channelId of channels) {
+    await deleteKV(kv, key.deviceState(deviceId, channelId));
+    await deleteKV(kv, key.deviceOverride(deviceId, channelId));
+    devicesDeleted += 2;
+  }
+
+  console.log(`[Cleanup] device ${deviceId}: reason=${reason} channelsAffected=${channels.length} channelsCleaned=${channelsCleaned} devicesDeleted=${devicesDeleted}`);
+  return { channelsCleaned, devicesDeleted };
+}
 
 // ─── DND logic ──────────────────────────────────────────────────────────
 
@@ -410,7 +505,7 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
 
 // ─── Job 1: Upcoming events (every 5 min) ───────────────────────────────
 
-async function runUpcomingCron(env) {
+async function runUpcomingCron(env, ctx) {
   const bucket = currentUpcomingBucket();
   const entries = await getKV(env.TUBEPULSE_KV, key.upcoming(bucket));
 
@@ -490,10 +585,12 @@ async function runUpcomingCron(env) {
       if (result.sent) {
         fired++;
       } else if (result.deadToken) {
-        // Clean up dead device
-        await env.TUBEPULSE_KV.delete(key.deviceProfile(deviceId));
-        const currentSubs = await getKV(env.TUBEPULSE_KV, key.channelSubs(entry.channelId)) || [];
-        await putKV(env.TUBEPULSE_KV, key.channelSubs(entry.channelId), currentSubs.filter((id) => id !== deviceId));
+        // FCM has confirmed the device is gone. Run the full cleanup —
+        // remove the device from every channel's subscribers, clean up
+        // any channel that goes empty, delete the device's profile.
+        // Don't block the upcoming-events tick on this.
+        console.log(`[Upcoming] Pruning dead device: ${deviceId}`);
+        ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
       }
     }
 
@@ -549,7 +646,7 @@ async function runUpcomingCron(env) {
 
 // ─── Job 2: Nag cycle (every 15 min) ────────────────────────────────────
 
-async function runNagCron(env) {
+async function runNagCron(env, ctx) {
   const bucket = currentNagBucket();
   const entries = await getKV(env.TUBEPULSE_KV, key.nag(bucket));
 
@@ -689,13 +786,12 @@ async function runNagCron(env) {
     }
   }
 
-  // Clean up dead tokens
+  // Clean up dead tokens — full device cleanup so the KV state stays
+  // consistent (don't leave orphaned profile/settings/state/override keys
+  // for devices the FCM server has confirmed are gone).
   for (const deviceId of deadTokens) {
     console.log(`[Nag] Pruning dead device: ${deviceId}`);
-    await env.TUBEPULSE_KV.delete(key.deviceProfile(deviceId));
-    // Remove from all subscriber lists - we don't know which channels,
-    // but the next push to any channel they were on will skip them
-    // A weekly consistency check should fully clean up
+    ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
   }
 
   // Clear the processed bucket
@@ -726,7 +822,7 @@ async function runNagCron(env) {
 //   - Writes per channel per tick: 0 if nothing changed, 1 if recent changed
 //   - With 50 channels: 50-100 writes/day, well under the 1,000/day free tier
 
-async function runRssPollCron(env) {
+async function runRssPollCron(env, ctx) {
   const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
   if (active.length === 0) {
     return { channels: 0, newVideos: 0 };
@@ -878,6 +974,7 @@ async function runRssPollCron(env) {
       }
       const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
       const projectId = sa.project_id;
+      const deadDevices = []; // collected during the per-device fan-out, cleaned at the end
 
       for (const deviceId of subs) {
         const [profile, settings, override] = await Promise.all([
@@ -984,7 +1081,10 @@ async function runRssPollCron(env) {
               tag: 'tubepulse-batch',
             };
           }
-          await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+          const pushResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+          if (pushResult.deadToken) {
+            deadDevices.push(deviceId);
+          }
         }
 
         // Schedule nag
@@ -1001,6 +1101,14 @@ async function runRssPollCron(env) {
             await putKV(env.TUBEPULSE_KV, key.nag(bucket), bucketData);
           }
         }
+      }
+
+      // Clean up any dead devices we collected during this channel's
+      // fan-out. Deduped (a device subscribed to multiple channels will
+      // only be cleaned once even if it appears in several iterations).
+      for (const deviceId of [...new Set(deadDevices)]) {
+        console.log(`[YTData] Pruning dead device: ${deviceId}`);
+        ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
       }
 
       totalNew += newVideos.length;
@@ -1035,17 +1143,17 @@ export default {
 
     // Upcoming events: every 5 minutes (minute % 5 === 0)
     if (mins % 5 === 0) {
-      results.upcoming = await runUpcomingCron(env);
+      results.upcoming = await runUpcomingCron(env, ctx);
     }
 
     // RSS poll: every 5 minutes (minute % 5 === 0) — fallback for WebSub
     if (mins % 5 === 0) {
-      results.rss = await runRssPollCron(env);
+      results.rss = await runRssPollCron(env, ctx);
     }
 
     // Nag cycle: every 15 minutes (minute % 15 === 0)
     if (mins % 15 === 0) {
-      results.nag = await runNagCron(env);
+      results.nag = await runNagCron(env, ctx);
     }
 
     // Lease renewal: every 6 hours (minute === 0 && hour % 6 === 0)
