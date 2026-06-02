@@ -26,7 +26,15 @@
 - The WebSub handler in both workers is intact but the cron no longer initiates new subscriptions
 - Lease renewal job is a no-op
 - **`/websub` endpoints** remain for manual testing and as a clean integration point if/when a YouTube-compatible hub reappears
-- **Active video detection path:** the cron runs a YouTube Data API poller every 5 min (Job 2.5 in `tubepulse-cron/index.js`), which sees the full catalogue of videos per channel and detects new ones by `lastVideoId` drift
+- **Active video detection path:** the cron runs a YouTube **RSS feed** poller every 5 min (Job 2.5 in `tubepulse-cron/index.js`), which reads `https://www.youtube.com/feeds/videos.xml?channel_id=...` for each channel and detects new entries by `lastVideoId` drift. RSS includes view counts via `media:statistics/@_views`, so no extra API call is needed.
+
+### YouTube Data API Status: Subscribe-time only
+- The YouTube Data API is now used **only at subscribe time**, never by the cron:
+  - `/resolve` (handle → channelId + name + avatar) — 1 unit, cached 7 days per handle
+  - `/subscribe-channel` (avatar fetch if `meta.avatarUrl` is missing) — 1 unit per new channel, cached forever in `channel:{id}:meta`
+- After subscribe, the channel meta is cached in KV and the cron never touches the Data API again
+- **Quota cost: ~2 units per new channel added, then 0 units forever for that channel**
+- The 10,000 units/day free tier is more than enough for any plausible growth rate
 
 ### FCM Status: Working ✅
 - Firebase service account key (truncated 1216-byte PKCS8 — broken since v2) **regenerated to 1217 bytes** on 2026-06-02
@@ -151,14 +159,15 @@ Nag cycle keeps nudging per settings until watched
 
 ## Cloudflare Free Tier (current observed usage)
 
-| Resource | Limit | Actual |
-|----------|-------|--------|
+| Resource | Limit | Actual (v3.0.18+, RSS-based) |
+|----------|-------|------------------------------|
 | KV reads | 100,000/day | ~3,000/day |
-| KV writes | 1,000/day | ~200/day |
+| KV writes | 1,000/day | ~200/day (only when view counts change or new video detected) |
 | KV list ops | 1,000/day | **0** (channels:active index) |
 | KV storage | 1 GB | < 1 MB |
-| Worker requests | 100,000/day | ~500/day |
+| Worker requests | 100,000/day | ~500/day (API + cron = scheduled invocations) |
 | Worker CPU time | 10 ms per invocation | < 5 ms |
+| YouTube Data API | 10,000 units/day | ~0 units/day (only on subscribe; ~2 units per new channel) |
 
 ---
 
@@ -172,4 +181,6 @@ Nag cycle keeps nudging per settings until watched
 | v2.4.3 | 2026-04-19 | Batch nag state fix, notification dedup, /seen state clearing, bootstrap fixes |
 | v3.0.0 | 2026-04-20 | **Channel-first architecture** migration: zero KV.list(), time buckets, split device keys, per-channel endpoints |
 | v3.0.0 → v3.0.13 | 2026-04-20 → 2026-06-02 | Bug-fix patch series: FCM JWT signing, widget auth, DND timezone, fresh-install bootstrap, settings field naming, build script rewrite |
-| v3.0.13 | 2026-06-02 | **First fully-shipped v3 release.** APK published on GitHub, FCM key regenerated, all workers repointed to new CF account + KV, build pipeline working end-to-end. |
+| v3.0.16 | 2026-06-02 | Background push handler updates cache + triggers widget re-render so widget stays fresh without app open |
+| v3.0.17 | 2026-06-02 | HomeScreen.refresh now passes through `views` field (it was being dropped from server response) |
+| v3.0.18 | 2026-06-02 | **Cron reverted to RSS-based new-video detection.** YouTube Data API is now used only at subscribe time (handle resolve + avatar fetch). Zero per-tick YouTube quota cost. Documents updated to match. |

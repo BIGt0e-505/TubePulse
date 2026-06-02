@@ -132,16 +132,18 @@ The architectural difference is roughly 100x at this scale, and it widens as you
 - No separate cache layer (KV is already edge-cached)
 - No backend service polling YouTube RSS — **YouTube Data API polling is the active path (Job 2.5)**, not RSS
 
-### 4.3 Active detection path (as of 2026-06-02)
+### 4.3 Active detection path (as of 2026-06-02, v3.0.18)
 
 Google's `pubsubhubbub.appspot.com` hub was **shut down in 2024**. The WebSub handler remains in both workers for:
 - Manual testing
 - Compatibility with any future YouTube-compatible hub
 - As a clean integration point for self-hosted hubs
 
-But the **active video detection path** is the cron running a **YouTube Data API poller** every 5 minutes (Job 2.5 in `tubepulse-cron/index.js`). It iterates the `channels:active` index, calls `videos.list?part=snippet&channelId=...&maxResults=15` for each, and diffs the response against `channel:{channelId}:recent.lastVideoId`. New videos are treated identically to WebSub pushes from the API worker's perspective.
+The **active video detection path** is the cron running a **YouTube RSS feed** poller every 5 minutes (Job 2.5 in `tubepulse-cron/index.js`). It iterates the `channels:active` index, fetches `https://www.youtube.com/feeds/videos.xml?channel_id=...` for each, and diffs the response against `channel:{channelId}:recent.lastVideoId`. New videos are treated identically to WebSub pushes from the API worker's perspective.
 
-**Cost:** ~1 YouTube Data API quota unit per channel per 5-min tick. With 100 channels that's 28,800 units/day — under the 10,000/day free tier only at low channel counts. Watch this number as the catalogue grows.
+**Cost:** zero YouTube Data API units. RSS is a free, public feed. The only outbound calls are to YouTube's RSS server and to Cloudflare KV.
+
+**The YouTube Data API is used only at subscribe time** by the API worker for handle→channelId resolve (1 unit, cached 7 days) and avatar fetch (1 unit per new channel, cached forever in `channel:{id}:meta`). After subscribe, the channel meta is cached in KV and the cron never touches the Data API again.
 
 ---
 
@@ -311,22 +313,32 @@ Reads the `upcoming:` bucket key for the current 5-minute window. For each entry
 
 Cost per tick: 1 read minimum, 2 reads + 2 writes per event firing. Most ticks have nothing in the bucket.
 
-### 6.2 YouTube Data API poll cron — every 5 minutes  ⚠️ ACTIVE DETECTION PATH
+### 6.2 RSS poll cron — every 5 minutes  ⚠️ ACTIVE DETECTION PATH
 
 ```
 */5 * * * *
 ```
 
-This is the **primary** new-video detection path (since WebSub hub shutdown in 2024).
+This is the **primary** new-video detection path (since WebSub hub shutdown in 2024, and the YouTube Data API quota approach was abandoned in v3.0.18 because RSS provides the same data at zero quota cost).
 
 1. Read `channels:active` index from KV
 2. For each channelId:
-   - Call YouTube Data API `videos.list?part=snippet&channelId={id}&maxResults=15&order=date`
-   - Compare response against `channel:{channelId}:recent`
+   - Fetch `https://www.youtube.com/feeds/videos.xml?channel_id={id}` (no API key, no quota)
+   - Parse the Atom feed — extract videoId, title, publishedAt, thumbnail, link, **and views** (from `media:community/media:statistics/@_views`)
+   - Compare against `channel:{channelId}:recent`
    - For each new videoId: update recent list, look up subscribers, send FCM
 3. New videos flow through the same notification pipeline as WebSub pushes would
 
-**Quota cost:** 1 unit per channel per tick. At 288 ticks/day and N channels, that's `288 × N` units/day. Stays inside the 10K free tier up to ~35 channels. Beyond that, the bound is quota, not architecture — consider Workers Paid ($5/mo) or accept hourly polling for low-priority channels.
+**Quota cost:** 0 YouTube Data API units. The only network calls are to YouTube's public RSS feed (free, no auth) and to KV (free tier).
+
+**KV cost:** 1 read per channel per tick (`channel:{id}:recent`). Writes only when a view count changes or a new video is detected. At 50 channels: ~50-100 writes/day, well under the 1,000/day free tier.
+
+**Why RSS, not the YouTube Data API:**
+- RSS includes the data we need: videoId, title, publishedAt, thumbnail, link, AND view counts (from `media:statistics/@_views`)
+- Zero YouTube Data API quota cost
+- Less brittle than depending on the API staying within quota
+- The same detection contract (new video → fan out to subscribers → FCM push) works identically
+- The YouTube Data API is reserved for one-time, on-subscribe operations: handle→channelId resolve + avatar fetch (1-2 units per new channel)
 
 ### 6.3 Nag cron — every 15 minutes
 
