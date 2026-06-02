@@ -606,7 +606,13 @@ async function handleSubscribeChannel(request, env, ctx) {
   let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
 
   if (!meta || !recent) {
-    // Step 1: Fetch avatar + channel name via YouTube Data API
+    // Step 1: Fetch avatar + channel name via YouTube Data API — 1 quota unit,
+    // ONLY on first subscribe, ONLY if meta is missing. Once avatar is
+    // cached, this branch never runs again. The YouTube Data API is also
+    // called by resolveChannelViaAPI for handle→channelId lookup (1 unit),
+    // which happens in the client-side resolve() before subscribe. Total:
+    // 2 quota units per brand-new channel. After that, the cron takes over
+    // via RSS (0 quota units).
     if (env.YOUTUBE_API_KEY && !meta) {
       try {
         const resolved = await resolveChannelViaAPI(env.YOUTUBE_API_KEY, channelId);
@@ -624,27 +630,9 @@ async function handleSubscribeChannel(request, env, ctx) {
       }
     }
 
-    // Step 2: Fetch recent videos - try YouTube Data API first, then RSS fallback
-    if (!recent && env.YOUTUBE_API_KEY) {
-      try {
-        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
-        if (apiVideos && apiVideos.length > 0) {
-          recent = apiVideos;
-          if (meta) meta.lastVideoId = apiVideos[0].videoId;
-          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
-            name: channelId,
-            avatarUrl: null,
-            lastVideoId: apiVideos[0].videoId,
-            addedAt: Date.now(),
-          });
-          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
-        }
-      } catch (e) {
-        console.warn(`[API] Video search failed for ${channelId}:`, e.message);
-      }
-    }
-
-    // Step 3: RSS fallback (if API didn't work)
+    // Step 2: Fetch recent videos via RSS — primary path, 0 quota cost.
+    // RSS provides videoId, title, publishedAt, thumbnail, link, and views
+    // (from media:statistics). Cron takes over from here.
     if (!recent) {
       try {
         const rssResult = await fetchYouTubeRSS(channelId);
@@ -656,6 +644,7 @@ async function handleSubscribeChannel(request, env, ctx) {
             thumbnail: v.thumbnail,
             type: classifyVideo(v),
             link: v.link,
+            views: v.views || '0',
           }));
 
           if (!meta) {
@@ -674,6 +663,30 @@ async function handleSubscribeChannel(request, env, ctx) {
         }
       } catch (e) {
         console.warn(`[API] RSS bootstrap failed for ${channelId}:`, e.message);
+      }
+    }
+
+    // Step 3: Data API fallback (only if RSS is unreachable)
+    if (!recent && env.YOUTUBE_API_KEY) {
+      try {
+        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (apiVideos && apiVideos.length > 0) {
+          const viewCounts = await fetchViewCounts(env.YOUTUBE_API_KEY, apiVideos.map((v) => v.videoId)) || {};
+          recent = apiVideos.map((v) => ({
+            ...v,
+            views: viewCounts[v.videoId] || '0',
+          }));
+          if (meta) meta.lastVideoId = apiVideos[0].videoId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
+            name: channelId,
+            avatarUrl: null,
+            lastVideoId: apiVideos[0].videoId,
+            addedAt: Date.now(),
+          });
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
+        }
+      } catch (e) {
+        console.warn(`[API] Data API fallback also failed for ${channelId}:`, e.message);
       }
     }
   }
@@ -909,36 +922,14 @@ async function handleBootstrap(request, env, ctx) {
     }
   }
 
-  // Fetch recent videos - YouTube Data API first, RSS fallback
+  // Fetch recent videos — RSS first (zero quota cost), Data API as fallback
+  // for the rare case where RSS is unreachable. RSS provides videoId, title,
+  // publishedAt, thumbnail, link, and view counts (from media:statistics).
+  // The avatar is fetched separately and only on subscribe (one-time, 1 unit).
   let recent = await getKV(env.TUBEPULSE_KV, key.channelRecent(channelId));
   if (!recent) {
-    // Try YouTube Data API search
-    if (env.YOUTUBE_API_KEY) {
-      try {
-        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
-        if (apiVideos && apiVideos.length > 0) {
-          // Enrich with view counts in a single batched call (1 quota unit).
-          const viewCounts = await fetchViewCounts(env.YOUTUBE_API_KEY, apiVideos.map((v) => v.videoId)) || {};
-          recent = apiVideos.map((v) => ({
-            ...v,
-            views: viewCounts[v.videoId] || '0',
-          }));
-          if (meta) meta.lastVideoId = apiVideos[0].videoId;
-          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
-            name: channelId,
-            avatarUrl: null,
-            lastVideoId: apiVideos[0].videoId,
-            addedAt: Date.now(),
-          });
-          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
-        }
-      } catch (e) {
-        console.warn(`[Bootstrap] Video search failed for ${channelId}:`, e.message);
-      }
-    }
-
-    // RSS fallback — view counts available here from media:community/media:statistics
-    if (!recent) {
+    // Try RSS first — primary path since v3.0.18
+    try {
       const rssResult = await fetchYouTubeRSS(channelId);
       if (rssResult?.videos?.length > 0) {
         recent = rssResult.videos.slice(0, 15).map((v) => ({
@@ -965,35 +956,32 @@ async function handleBootstrap(request, env, ctx) {
         await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
         await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
       }
+    } catch (e) {
+      console.warn(`[Bootstrap] RSS fetch failed for ${channelId}:`, e.message);
     }
-  }
 
-  // If recent is already cached but missing view counts, enrich in place.
-  // This happens when a previous bootstrap ran before the view-counts code
-  // shipped, or when a user opens the app before the next cron tick.
-  // 1 quota unit per bootstrap, idempotent (only writes if views differ).
-  if (recent && env.YOUTUBE_API_KEY) {
-    const needsViews = recent.some((v) => v.views === undefined || v.views === null);
-    if (needsViews) {
+    // Data API fallback — only if RSS is unreachable
+    if (!recent && env.YOUTUBE_API_KEY) {
       try {
-        const ids = recent.map((v) => v.videoId).filter(Boolean);
-        const viewCounts = await fetchViewCounts(env.YOUTUBE_API_KEY, ids);
-        if (viewCounts) {
-          let changed = false;
-          const updated = recent.map((v) => {
-            if ((v.views === undefined || v.views === null) && viewCounts[v.videoId] !== undefined) {
-              changed = true;
-              return { ...v, views: viewCounts[v.videoId] };
-            }
-            return v;
+        const apiVideos = await fetchRecentVideosViaAPI(env.YOUTUBE_API_KEY, channelId);
+        if (apiVideos && apiVideos.length > 0) {
+          // Enrich with view counts in a single batched call (1 quota unit).
+          const viewCounts = await fetchViewCounts(env.YOUTUBE_API_KEY, apiVideos.map((v) => v.videoId)) || {};
+          recent = apiVideos.map((v) => ({
+            ...v,
+            views: viewCounts[v.videoId] || '0',
+          }));
+          if (meta) meta.lastVideoId = apiVideos[0].videoId;
+          await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta || {
+            name: channelId,
+            avatarUrl: null,
+            lastVideoId: apiVideos[0].videoId,
+            addedAt: Date.now(),
           });
-          if (changed) {
-            recent = updated;
-            await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
-          }
+          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), recent);
         }
       } catch (e) {
-        console.warn(`[Bootstrap] View-count enrichment failed for ${channelId}:`, e.message);
+        console.warn(`[Bootstrap] Data API fallback also failed for ${channelId}:`, e.message);
       }
     }
   }
