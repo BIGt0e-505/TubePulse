@@ -44,6 +44,13 @@ firebase-debug.log
 .idea/
 .vscode/
 
+# Firebase / Google client config (public per Google docs but untracked
+# here so a regenerating the file doesn't trip us up. The file is still
+# on disk and required for the Android build to work — see app.json's
+# android.googleServicesFile setting)
+google-services.json
+GoogleService-Info.plist
+
 # Aider
 .aider*
 .cmdline-tools/
