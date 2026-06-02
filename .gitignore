@@ -39,6 +39,8 @@ firebase-debug.log
 .DS_Store
 *.swp
 *.swo
+*.bak
+*.bak.*
 .idea/
 .vscode/
 
