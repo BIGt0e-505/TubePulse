@@ -7,7 +7,7 @@ import HomeScreen from './src/screens/HomeScreen';
 import ChannelsScreen from './src/screens/ChannelsScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { COLORS } from './src/utils/constants';
-import { getSettings, getLastSeen, saveLastSeen } from './src/utils/storage';
+import { getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from './src/utils/storage';
 import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNotificationOpenedApp, getInitialNotification, setBackgroundMessageHandler } from './src/utils/fcm';
 import { registerDevice, markSeen, getDeviceId, subscribeChannel, updateSettings, bootstrapChannel } from './src/utils/api';
 import { setupNotificationChannel } from './src/utils/notifications';
@@ -32,8 +32,67 @@ function HeaderButton({ title, onPress, style }) {
 }
 
 // Background message handler — must be registered at top level
+// This runs when the app is in the background or killed and a push arrives.
+// It needs to:
+//   1. Pull the latest feed from the server (so the local cache has the new video)
+//   2. Update the channel cache in AsyncStorage
+//   3. Trigger a widget re-render so the home screen widget shows the new video
+// Without this, the widget stays stale until the user opens the app.
 setBackgroundMessageHandler(async (remoteMessage) => {
-  console.log('Background push received:', remoteMessage.messageId);
+  console.log('Background push received:', remoteMessage?.messageId, remoteMessage?.data?.videoId);
+  try {
+    const { getDeviceId, fetchFeed } = require('./src/utils/api');
+    const deviceId = await getDeviceId();
+    if (!deviceId) return;
+
+    const result = await fetchFeed(deviceId);
+    if (!result?.ok || !Array.isArray(result.channels)) return;
+
+    // Get current local channels to resolve handle from channelId
+    const { getChannels } = require('./src/utils/storage');
+    const localChannels = await getChannels();
+    const channelById = Object.fromEntries(
+      localChannels.filter((c) => c.channelId).map((c) => [c.channelId, c])
+    );
+
+    const freshCache = await getChannelCache();
+    let changed = false;
+    for (const feed of result.channels) {
+      const local = channelById[feed.channelId];
+      const handle = local?.handle;
+      if (!handle) continue;
+      const existing = freshCache[handle] || {};
+      // Only overwrite if server has fresher data (more videos, or a newer lastChecked)
+      if (
+        (feed.videos?.length || 0) > (existing.videos?.length || 0) ||
+        !existing.avatar
+      ) {
+        freshCache[handle] = {
+          name: feed.meta?.name || existing.name || local.name || handle,
+          avatar: feed.meta?.avatarUrl || existing.avatar || null,
+          videos: feed.videos || existing.videos || [],
+          latestVideo: (feed.videos || [])[0] || existing.latestVideo || null,
+          channelId: feed.channelId,
+          lastChecked: new Date().toISOString(),
+        };
+        changed = true;
+      }
+    }
+    if (changed) {
+      await saveChannelCache(freshCache);
+    }
+
+    // Always trigger a widget update — the widget task handler will read
+    // whatever is in the cache and re-render. If the cache is unchanged,
+    // the widget still re-renders to a no-op state but at least stays
+    // consistent.
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
+  } catch (e) {
+    console.warn('Background push handler failed:', e);
+  }
 });
 
 export default function App() {
