@@ -26,8 +26,17 @@ const key = {
   channelsActive:   ()          => `channels:active`,
 };
 
-async function getKV(kv, k) { return await kv.get(k, 'json'); }
-async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
+// KV operation counters — incremented on every get/put/delete and logged
+// at the end of each scheduled tick. Lets us watch free-tier usage in
+// the wrangler tail without needing Cloudflare Analytics Engine access.
+// Resets at the start of every scheduled() call.
+const kvOps = { reads: 0, writes: 0, deletes: 0, lists: 0 };
+
+async function getKV(kv, k) { kvOps.reads++; return await kv.get(k, 'json'); }
+async function putKV(kv, k, value) { kvOps.writes++; await kv.put(k, JSON.stringify(value)); }
+async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
+// Note: kv.list() isn't called anywhere in this worker (the channels:active
+// index replaces it). If it ever is, the counter is here and ready.
 
 // ─── DND logic ──────────────────────────────────────────────────────────
 
