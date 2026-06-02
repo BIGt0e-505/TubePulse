@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,10 @@ export default function HomeScreen({ navigation }) {
   const [settings, setSettings] = useState({ tapAction: 'video' });
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Hold the latest cache in a ref so refresh() can be stable
+  // (depending on `cache` directly caused an infinite re-render loop
+  //  because setCache -> new refresh -> new useEffect -> new autoFetch -> new setCache)
+  const cacheRef = useRef({});
 
   const loadData = useCallback(async () => {
     const [ch, s, ls, ca] = await Promise.all([
@@ -32,6 +36,7 @@ export default function HomeScreen({ navigation }) {
       getLastSeen(),
       getChannelCache(),
     ]);
+    cacheRef.current = ca || {};
     setChannels(ch);
     setSettings(s);
     setLastSeen(ls);
@@ -64,7 +69,8 @@ export default function HomeScreen({ navigation }) {
               unwatched: v.unwatched,
             }));
 
-            const existingEntry = (await getChannelCache())[handle] || {};
+            // Use the ref so this callback stays stable across renders
+            const existingEntry = cacheRef.current[handle] || {};
             const localVideos = existingEntry.videos || [];
             // Use server data when available, preserve local-only channels
             const mergedVideos = videos.length >= localVideos.length ? videos : localVideos;
@@ -80,13 +86,13 @@ export default function HomeScreen({ navigation }) {
           }
 
           // Preserve channels that exist locally but weren't in server response
-          const localCache = await getChannelCache();
           for (const ch of localChannels) {
-            if (!newCache[ch.handle] && localCache[ch.handle]) {
-              newCache[ch.handle] = localCache[ch.handle];
+            if (!newCache[ch.handle] && cacheRef.current[ch.handle]) {
+              newCache[ch.handle] = cacheRef.current[ch.handle];
             }
           }
 
+          cacheRef.current = newCache;
           await saveChannelCache(newCache);
           setCache(newCache);
 
@@ -113,11 +119,13 @@ export default function HomeScreen({ navigation }) {
         }
       } else {
         const ca = await getChannelCache();
+        cacheRef.current = ca;
         setCache(ca);
       }
     } catch (e) {
       console.warn('Refresh failed:', e);
       const ca = await getChannelCache();
+      cacheRef.current = ca;
       setCache(ca);
     }
     setRefreshing(false);
@@ -126,14 +134,18 @@ export default function HomeScreen({ navigation }) {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
-  }, [cache]);
+  }, []); // stable: no deps, uses cacheRef
 
   const autoFetch = useCallback(async () => {
     const [ch] = await Promise.all([getChannels()]);
     // Wait for App.js init to finish (sets flag when done)
     const initDone = await AsyncStorage.getItem('tubepulse_init_done');
     if (!initDone) {
-      // Poll until init completes (max 15s)
+      // Poll until init completes (max 15s).
+      // 500ms setTimeout calls don't trigger re-renders by themselves,
+      // but the cacheRef updates + setState calls at the end of this
+      // function do — and we now use stable callbacks (loadData, refresh)
+      // so the only re-renders come from intentional state updates.
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 500));
         const done = await AsyncStorage.getItem('tubepulse_init_done');
@@ -147,6 +159,7 @@ export default function HomeScreen({ navigation }) {
       getLastSeen(),
       getSettings(),
     ]);
+    cacheRef.current = freshCache || {};
     setChannels(freshChannels);
     setCache(freshCache);
     setLastSeen(freshLastSeen);
