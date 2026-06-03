@@ -62,6 +62,7 @@ const key = {
   channelSubs:      (channelId) => `channel:${channelId}:subscribers`,
   channelWebsub:    (channelId) => `channel:${channelId}:websub`,
   channelRecent:    (channelId) => `channel:${channelId}:recent`,
+  channelRecentPosts: (channelId) => `channel:${channelId}:recent:posts`,
   deviceProfile:    (deviceId)  => `device:${deviceId}:profile`,
   deviceSettings:   (deviceId)  => `device:${deviceId}:settings`,
   deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
@@ -1097,9 +1098,46 @@ async function handleSeen(request, env) {
 
 // ─── GET /feed ──────────────────────────────────────────────────────────
 
+/**
+ * Fetch the recent posts for a channel to include in the /feed
+ * response, respecting both the global `includeCommunityPosts` setting
+ * and the per-channel override. Returns an empty array if the feature
+ * is disabled at both levels.
+ *
+ * @param {string} channelId
+ * @param {string} deviceId
+ * @param {boolean} globalInclude — global setting from deviceSettings
+ * @returns {Promise<Array>}
+ */
+async function getFeedPostsForChannel(channelId, deviceId, globalInclude) {
+  // Per-channel override takes precedence. If the user has explicitly
+  // set it (true or false), use that. Otherwise fall back to the global.
+  const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
+  const overrideValue = override?.includeCommunityPosts;
+  let posts;
+  if (overrideValue === true) posts = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
+  else if (overrideValue === false) posts = [];
+  else if (!globalInclude) posts = [];
+  else posts = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
+
+  // Mark each post as unwatched based on the device's state. Post
+  // activityIds are namespaced with "post:" in the shared unwatched
+  // list so they don't collide with video IDs.
+  if (posts.length === 0) return posts;
+  const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
+  const unwatched = state?.unwatched || [];
+  return posts.map((p) => ({
+    ...p,
+    unwatched: unwatched.includes(`post:${p.activityId}`),
+  }));
+}
+
 async function handleFeed(request, env) {
   const deviceId = getDeviceId(request);
   if (!deviceId) return errorResponse('Missing Authorization: Bearer <device-id>', 401);
+
+  const deviceSettings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
+  const globalIncludePosts = !!deviceSettings.includeCommunityPosts;
 
   const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
   if (!profile) return errorResponse('Device not registered', 404);
@@ -1120,10 +1158,15 @@ async function handleFeed(request, env) {
       unwatched: unwatched.includes(v.videoId),
     }));
 
+    // Posts: empty array when disabled at both global and per-channel level.
+    // getFeedPostsForChannel handles the override-precedence logic.
+    const posts = await getFeedPostsForChannel(channelId, deviceId, globalIncludePosts);
+
     return {
       channelId,
       meta: meta || { name: channelId },
       videos,
+      posts,
       unwatchedCount: unwatched.length,
     };
   }));

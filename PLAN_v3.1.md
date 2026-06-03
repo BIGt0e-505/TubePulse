@@ -192,8 +192,55 @@ After all four commits:
 
 ## Status
 
-- [ ] Commit 1: Likes/dislikes in the meta row
-- [ ] Commit 2: Custom ConfirmDialog + replace Alert.alert
+- [x] Commit 1: Likes/dislikes in the meta row — **DONE** (commit `216ae0d`,
+  pushed, both workers deployed, verified via wrangler tail)
+  - Server: parseLikesDislikes, updateRecentLikesDislikes, /feed passes
+    through
+  - App: meta row shows age · likes · dislikes · views
+  - Icon style: greyscale via U+FE0E text-presentation + COLORS.textDim
+  - Note: plan text references `1b54f3c` (old hash from an earlier
+    branch); actual shipped commit is `216ae0d` on `master`.
+- [x] Commit 2: Custom ConfirmDialog + replace Alert.alert — **DONE**
+  (commit `5043c69`, on `master`, unbuilt at time of writing)
+  - New `src/components/ConfirmDialog.js`
+  - Replaces `Alert.alert` in `ChannelsScreen.removeChannel`
 - [ ] Commit 3: Community posts
 - [ ] Commit 4: Prewarn time
 - [ ] Build and release v3.1.0
+
+### Commit 3 sub-progress (in flight, uncommitted at time of writing)
+
+- [x] Server cron: `runCommunityPostsCron` polls
+      `activities.list` hourly per active channel, captures posts
+      (text/image/poll), first-run guard, fires FCM to subscribers
+      that haven't opted out at the channel level. **Uncommitted in
+      working tree** of `worker/tubepulse-cron/index.js`.
+- [x] Server API: `getFeedPostsForChannel` helper + `posts: []`
+      field in `/feed` response. Per-channel override
+      (`includeCommunityPosts: true|false`) takes precedence over
+      global `includeCommunityPosts` setting. **Uncommitted in
+      working tree** of `worker/tubepulse-api/index.js`. Note: the
+      initial helper commit only added the helper; the `posts` field
+      is wired into the `handleFeed` response as part of the app-side
+      work in this commit.
+- [x] App: `includeCommunityPosts` toggle enabled in SettingsScreen
+      (was `disabled` with "Coming soon" subtitle). **Uncommitted.**
+- [x] App: Post rendering in HomeScreen — post row with image
+      thumbnail OR speech-bubble placeholder (greyscale shrunk channel
+      avatar inside rounded-rect bubble with a small triangular tail),
+      "Posts" mini-header above the post group, blue dot for unseen
+      posts (local-only seen tracking via `post:{activityId}` in the
+      seenIds list — server doesn't yet have a mark-seen endpoint for
+      posts), taps open the community tab on YouTube.
+      **Uncommitted.**
+- [x] App: Per-channel post opt-out in ChannelsScreen modal — tri-state
+      picker (Global / On / Off). "Global" leaves the field out of the
+      override payload (inherit). "On" sets `includeCommunityPosts:
+      true`. "Off" sets `includeCommunityPosts: false`. Server already
+      supports all three states. **Uncommitted.**
+- [ ] **Server: commit the worker changes** (cron + API) and deploy.
+- [ ] **App: build v3.1.0-rc APK with the SettingsScreen toggle,
+      HomeScreen post cards, and per-channel modal picker, and test
+      end-to-end** (add a channel, wait for posts cron, verify push
+      arrives, tap into YouTube community tab, verify the per-channel
+      Off override hides posts in the feed).

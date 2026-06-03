@@ -34,6 +34,8 @@ const DEFAULT_CHANNEL_NOTIF = {
   dndEnabled: false,
   dndStart: '22:00',
   dndEnd: '07:00',
+  // Tri-state for community posts: null = inherit from global, true = on, false = off.
+  includeCommunityPosts: null,
 };
 
 export default function ChannelsScreen() {
@@ -71,12 +73,17 @@ export default function ChannelsScreen() {
     setChannelNotifSettings(updated);
     await saveChannelNotifSettings(updated);
 
-    // Sync override with server
+    // Sync override with server. Strip null fields (the tri-state
+    // "inherit" sentinel) so the override only carries fields the user
+    // has actually set.
     try {
       const deviceId = await getDeviceId();
       const ch = channels.find((c) => c.handle === editingChannel);
       if (ch?.channelId) {
-        await setChannelOverride(deviceId, ch.channelId, editingNotif);
+        const overridePayload = Object.fromEntries(
+          Object.entries(editingNotif).filter(([, v]) => v !== null)
+        );
+        await setChannelOverride(deviceId, ch.channelId, overridePayload);
       }
     } catch (e) {
       console.warn('Failed to sync channel override:', e);
@@ -409,6 +416,32 @@ export default function ChannelsScreen() {
               </View>
             )}
 
+            <Text style={styles.modalLabel}>Community posts</Text>
+            <View style={styles.optionGroup}>
+              {[
+                { value: null, label: 'Global' },
+                { value: true, label: 'On' },
+                { value: false, label: 'Off' },
+              ].map(({ value, label }) => {
+                // Tri-state compare: null matches null, true matches true, false matches false.
+                const isActive = editingNotif.includeCommunityPosts === value;
+                return (
+                  <TouchableOpacity
+                    key={label}
+                    style={[styles.option, isActive && styles.optionActive]}
+                    onPress={() => setEditingNotif(n => ({ ...n, includeCommunityPosts: value }))}
+                  >
+                    <Text style={[styles.optionText, isActive && styles.optionTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={styles.modalHint}>
+              Global: use the Include community posts setting from Settings. On/Off: override for this channel only.
+            </Text>
+
             {channelNotifSettings[editingChannel] && (
               <TouchableOpacity style={styles.modalReset} onPress={resetChannelNotif}>
                 <Text style={styles.modalResetText}>Reset to global defaults</Text>
@@ -619,6 +652,12 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: 10,
     marginTop: 16,
+  },
+  modalHint: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    lineHeight: 16,
+    marginTop: 6,
   },
   optionGroup: {
     flexDirection: 'row',

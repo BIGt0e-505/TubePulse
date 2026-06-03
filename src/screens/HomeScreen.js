@@ -76,7 +76,13 @@ export default function HomeScreen({ navigation }) {
               type: v.type,
               unwatched: v.unwatched,
               views: v.views || existingByVideoId.get(v.videoId)?.views || '0',
+              likes: v.likes ?? existingByVideoId.get(v.videoId)?.likes ?? 0,
+              dislikes: v.dislikes ?? existingByVideoId.get(v.videoId)?.dislikes ?? 0,
             }));
+
+            // Posts come from the server already filtered by the global +
+            // per-channel override. Empty array when disabled or absent.
+            const posts = serverChannel.posts || [];
 
             // Use the ref so this callback stays stable across renders
             const existingEntry = cacheRef.current[handle] || {};
@@ -88,6 +94,7 @@ export default function HomeScreen({ navigation }) {
               name: serverChannel.meta?.name || existingEntry.name,
               avatar: serverChannel.meta?.avatarUrl || existingEntry.avatar || null,
               videos: mergedVideos,
+              posts,
               latestVideo: mergedVideos[0] || null,
               channelId: serverChannel.channelId,
               lastChecked: serverChannel.meta?.addedAt ? new Date(serverChannel.meta.addedAt).toISOString() : existingEntry.lastChecked,
@@ -211,6 +218,12 @@ export default function HomeScreen({ navigation }) {
     return [...vids].sort((a, b) => new Date(b.published) - new Date(a.published));
   };
 
+  const getPosts = (handle) => {
+    const cached = cache[handle];
+    if (!cached || !cached.posts) return [];
+    return [...cached.posts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+  };
+
   const getUnseenVideos = (handle) => {
     const seenIds = lastSeen[handle]?.seenIds || [];
     return getVideos(handle).filter(v => !seenIds.includes(v.videoId));
@@ -235,6 +248,18 @@ export default function HomeScreen({ navigation }) {
     await saveLastSeen(updatedLastSeen);
     setLastSeen(updatedLastSeen);
 
+    // Server clear-all also wipes post entries (they share the
+    // deviceState.unwatched list), so update the local cache to keep
+    // the UI consistent before the next /feed refresh.
+    const cached = cacheRef.current[key];
+    if (cached?.posts?.some((p) => p.unwatched)) {
+      const updatedPosts = cached.posts.map((p) => ({ ...p, unwatched: false }));
+      const updatedCache = { ...cacheRef.current, [key]: { ...cached, posts: updatedPosts } };
+      cacheRef.current = updatedCache;
+      setCache(updatedCache);
+      try { await saveChannelCache(updatedCache); } catch {}
+    }
+
     const deviceId = await getDeviceId();
     markSeen(deviceId, channel.channelId, [], true).catch(() => {});
 
@@ -256,6 +281,16 @@ export default function HomeScreen({ navigation }) {
       updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
+
+      // Server clear-all wipes post entries too. Mirror that locally.
+      const cached = cacheRef.current[key];
+      if (cached?.posts?.some((p) => p.unwatched)) {
+        const updatedPosts = cached.posts.map((p) => ({ ...p, unwatched: false }));
+        const updatedCache = { ...cacheRef.current, [key]: { ...cached, posts: updatedPosts } };
+        cacheRef.current = updatedCache;
+        setCache(updatedCache);
+        try { await saveChannelCache(updatedCache); } catch {}
+      }
 
       const deviceId = await getDeviceId();
       markSeen(deviceId, channel.channelId, [], true).catch(() => {});
@@ -304,7 +339,37 @@ export default function HomeScreen({ navigation }) {
     } catch {}
   };
 
-  const isNew = (handle) => unseenCount(handle) > 0;
+  const handlePostTap = async (channel, post) => {
+    // Mark as seen server-side. The activityId is namespaced with
+    // "post:" in the server's unwatched list so it doesn't collide
+    // with video IDs. We update the local cache immediately for a
+    // snappy UI; the next /feed refresh will reconcile any drift.
+    const key = channel.handle;
+    const postKey = `post:${post.activityId}`;
+    const cached = cacheRef.current[key];
+    if (cached?.posts) {
+      const updatedPosts = cached.posts.map((p) =>
+        p.activityId === post.activityId ? { ...p, unwatched: false } : p
+      );
+      const updatedCache = { ...cacheRef.current, [key]: { ...cached, posts: updatedPosts } };
+      cacheRef.current = updatedCache;
+      setCache(updatedCache);
+      try {
+        await saveChannelCache(updatedCache);
+      } catch {}
+    }
+
+    const deviceId = await getDeviceId();
+    markSeen(deviceId, channel.channelId, [postKey]).catch(() => {});
+
+    Linking.openURL(post.link);
+  };
+
+  const getUnseenPosts = (handle) => {
+    return getPosts(handle).filter((p) => p.unwatched);
+  };
+
+  const isNew = (handle) => unseenCount(handle) > 0 || getUnseenPosts(handle).length > 0;
 
   const timeAgo = (dateStr) => {
     if (!dateStr) return '';
@@ -332,6 +397,7 @@ export default function HomeScreen({ navigation }) {
     const unseenVids = getUnseenVideos(item.handle);
     const latestVideo = getVideos(item.handle)[0] || null;
     const videosToShow = unseenVids.length > 0 ? [...unseenVids].reverse() : (latestVideo ? [latestVideo] : []);
+    const posts = getPosts(item.handle);
 
     return (
       <View style={[styles.channelSection, hasNew && styles.channelSectionNew]}>
@@ -357,6 +423,60 @@ export default function HomeScreen({ navigation }) {
             </Text>
           </TouchableOpacity>
         </View>
+
+        {posts.length > 0 && (
+          <View style={styles.postsGroupHeader}>
+            <Text style={styles.postsGroupHeaderText}>Posts</Text>
+          </View>
+        )}
+
+        {posts.map((post) => {
+          // Server-driven: post.unwatched reflects the device's
+          // per-channel state. No local seenIds lookup.
+          const isSeen = !post.unwatched;
+          return (
+            <TouchableOpacity
+              key={post.activityId}
+              style={styles.postRow}
+              onPress={() => handlePostTap(item, post)}
+              activeOpacity={0.7}
+            >
+              {post.thumbnail ? (
+                <Image source={{ uri: post.thumbnail }} style={styles.postThumbnail} />
+              ) : (
+                <View style={styles.postPlaceholder}>
+                  {cached?.avatar ? (
+                    <Image source={{ uri: cached.avatar }} style={styles.postPlaceholderAvatar} />
+                  ) : (
+                    <View style={[styles.postPlaceholderAvatar, styles.avatarPlaceholder]}>
+                      <Text style={styles.postPlaceholderLetter}>
+                        {displayName.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                  {/* Speech-bubble tail (decorative) */}
+                  <View style={styles.postPlaceholderTail} />
+                </View>
+              )}
+
+              <View style={styles.postInfo}>
+                <Text style={styles.postHeader} numberOfLines={1}>
+                  {post.kind === 'poll' ? 'Posted a poll' : post.kind === 'image' ? 'Posted an image' : 'Posted'}
+                </Text>
+                <Text
+                  style={[styles.postBody, !isSeen && { color: COLORS.text, fontWeight: '600' }]}
+                  numberOfLines={3}
+                >
+                  {post.text}
+                </Text>
+                <View style={styles.videoMeta}>
+                  <Text style={styles.timeAgo}>{post.publishedAt ? timeAgo(post.publishedAt) : ''}</Text>
+                </View>
+              </View>
+              {!isSeen && <View style={styles.newDot} />}
+            </TouchableOpacity>
+          );
+        })}
 
         {videosToShow.map((video) => {
           const isSeen = !getUnseenVideos(item.handle).find(v => v.videoId === video.videoId);
@@ -546,5 +666,82 @@ const styles = StyleSheet.create({
     color: COLORS.accent,
     fontSize: 14,
     marginTop: 8,
+  },
+  // Posts
+  postsGroupHeader: {
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 2,
+  },
+  postsGroupHeaderText: {
+    color: COLORS.textDim,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  postRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  postThumbnail: {
+    width: 85,
+    height: 48,
+    borderRadius: 4,
+  },
+  postPlaceholder: {
+    width: 85,
+    height: 48,
+    borderRadius: 4,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  postPlaceholderAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    opacity: 0.6,
+  },
+  postPlaceholderLetter: {
+    color: COLORS.textDim,
+    fontSize: 14,
+    fontWeight: '700',
+    textAlign: 'center',
+    lineHeight: 24,
+  },
+  // Small triangular "tail" in the bottom-left corner of the bubble,
+  // giving it the speech-bubble silhouette. Decorative only.
+  postPlaceholderTail: {
+    position: 'absolute',
+    bottom: -1,
+    left: 6,
+    width: 8,
+    height: 8,
+    backgroundColor: COLORS.surface,
+    borderLeftWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: COLORS.border,
+    transform: [{ rotate: '45deg' }],
+  },
+  postInfo: {
+    flex: 1,
+    marginLeft: 8,
+  },
+  postHeader: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  postBody: {
+    color: COLORS.textDim,
+    fontSize: 13,
+    marginTop: 2,
+    lineHeight: 17,
   },
 });
