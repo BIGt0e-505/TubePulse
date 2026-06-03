@@ -229,13 +229,21 @@ export default function App() {
     // Handle notification tap (app opened from notification)
     const handleNotificationTap = async (remoteMessage) => {
       const data = remoteMessage?.data;
-      if (!data?.videoId && !data?.channelId) return;
+      if (!data?.videoId && !data?.channelId && !data?.activityId) return;
 
       try {
         const settings = await getSettings();
         const deviceId = deviceIdRef.current || await getDeviceId();
+        const isPost = data.type === 'post' && data.activityId;
 
-        if (data.type === 'batch' || settings.tapAction === 'channel') {
+        if (isPost) {
+          // Post taps always mark the post as seen and open the
+          // community tab. The user's tapAction preference doesn't
+          // change post behaviour — there's no per-post tapAction to
+          // apply (videos and posts share the same screen).
+          await markSeen(deviceId, data.channelId, [`post:${data.activityId}`]);
+          Linking.openURL(`https://www.youtube.com/channel/${data.channelId}/community`);
+        } else if (data.type === 'batch' || settings.tapAction === 'channel') {
           // Channel tap or batch — mark all unwatched for this channel
           await markSeen(deviceId, data.channelId, [], true);
 

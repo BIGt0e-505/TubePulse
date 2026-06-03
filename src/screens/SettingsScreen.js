@@ -136,19 +136,18 @@ export default function SettingsScreen() {
         </>
       )}
 
-      {/* Community Posts placeholder */}
+      {/* Community Posts toggle */}
       <Text style={styles.sectionTitle}>Content types</Text>
       <View style={styles.dndRow}>
         <View style={styles.switchLabelWrap}>
           <Text style={styles.dndLabel}>Include community posts</Text>
-          <Text style={styles.switchSubtitle}>Coming soon — not yet detectable via RSS</Text>
+          <Text style={styles.switchSubtitle}>Show channel community posts in your feed</Text>
         </View>
         <Switch
           value={settings.includeCommunityPosts || false}
           onValueChange={(v) => updateSetting('includeCommunityPosts', v)}
           trackColor={{ false: COLORS.border, true: COLORS.accent }}
           thumbColor={settings.includeCommunityPosts ? COLORS.bg : COLORS.textDim}
-          disabled
         />
       </View>
 
