@@ -439,11 +439,17 @@ Reason values you may see:
 
 ### 11.1 Device-ID migration on `register`
 
-The client-side `getDeviceId()` is a stable identifier for a given install — but its source has changed over time. v3.0.18 used a UUID stored in AsyncStorage (prone to races that could mint two UUIDs for the same install). v3.0.19+ uses Android's `Application.getAndroidId()` which is per-app-install and stable. When an existing user upgrades from v3.0.18 to v3.0.19+, their `deviceId` changes — but the FCM token stays the same. Without migration, the user's channels would appear "lost" on upgrade.
+The client-side `getDeviceId()` is a stable identifier for a given install — but its source has changed over time:
+
+- **v3.0.18**: random UUID stored in AsyncStorage (prone to races that could mint two UUIDs for the same install)
+- **v3.0.19**: Android's `Application.getAndroidId()` (per-app-install, stable, but fingerprintable)
+- **v3.0.20+**: `expo-secure-store` UUID (random, encrypted in Android Keystore / iOS Keychain, hardware-backed on most devices, wiped on uninstall)
+
+When an existing user upgrades across a version boundary, their `deviceId` changes (e.g. `android:abc...` → `secure:xyz...`), but the FCM token stays the same. Without migration, the user's channels would appear "lost" on upgrade.
 
 `/register` runs a two-phase migration to handle this:
 
-1. **Fast path — `fcm:lookup:{fcmToken}` index**: read the index. If it points to a different `deviceId` than the one currently registering, call `migrateDevice(oldId, newId, env)`. This is the common case for the v3.0.18 → v3.0.19+ upgrade.
+1. **Fast path — `fcm:lookup:{fcmToken}` index**: read the index. If it points to a different `deviceId` than the one currently registering, call `migrateDevice(oldId, newId, env)`. This is the common case for cross-version upgrades (v3.0.18→v3.0.19, v3.0.19→v3.0.20).
 2. **Slow path — full profile scan**: if the lookup is missing (e.g. rotated FCM token wiped the lookup, or the old device was registered before the index existed), `kv.list({ prefix: 'device:' })` and inspect each profile. For every profile whose `fcmToken` matches the registering token, call `migrateDevice(oldId, newId, env)`. This catches:
    - The v3.0.18 duplicate-UUID race (two old devices, same FCM token) — both get merged into the new device
    - Any case where a user's previous install was on a build that didn't maintain the lookup index
