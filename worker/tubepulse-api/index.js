@@ -77,6 +77,10 @@ const key = {
   nag:              (bucket)    => `nag:${bucket}`,
   channelsActive:   ()          => `channels:active`,
   handle:           (lc)        => `handle:${lc}`,
+  // List of all currently-scheduled live events. Append-only on
+  // detection in this worker; the cron's runPrewarnCron reads it and
+  // prunes events past their scheduledFor + 24h.
+  upcomingEvents:   ()          => `upcoming:events:list`,
 };
 
 async function getKV(kv, k) { return await kv.get(k, 'json'); }
@@ -1577,35 +1581,29 @@ async function handleWebSubPush(request, env, ctx) {
         }
 
         if (entry.type === 'live_scheduled') {
-          // Schedule upcoming bucket entries
+          // v3.1: no bucket writes. Prewarn is fired by the cron's
+          // runPrewarnCron at the user's preferred prewarn time
+          // (driven by the upcoming:events:list, not by a
+          // hardcoded 30-min bucket). At live time the video is
+          // re-detected as type 'live' below and added to
+          // channelRecent as a normal new video — no separate
+          // "live now!" push.
           const publishedTime = new Date(entry.publishedAt).getTime();
 
-          // 30-min heads-up
-          const headsUpTime = publishedTime - 30 * 60 * 1000;
-          if (headsUpTime > Date.now()) {
-            const bucket = upcomingBucket(new Date(headsUpTime).toISOString());
-            const bucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(bucket)) || [];
-            bucketData.push({
+          // Append to the global scheduled-events list so the
+          // cron's runPrewarnCron can iterate and fire per-device
+          // prewarns. Idempotent — skip if this videoId is already
+          // in the list.
+          const events = await getKV(env.TUBEPULSE_KV, key.upcomingEvents()) || [];
+          if (!events.some((e) => e.videoId === entry.videoId)) {
+            events.push({
               channelId,
               videoId: entry.videoId,
-              type: 'live_scheduled',
               scheduledFor: publishedTime,
-              headsUp: true,
+              addedAt: Date.now(),
             });
-            await putKV(env.TUBEPULSE_KV, key.upcoming(bucket), bucketData);
+            await putKV(env.TUBEPULSE_KV, key.upcomingEvents(), events);
           }
-
-          // Live-now detection at scheduled time
-          const liveBucket = upcomingBucket(new Date(publishedTime).toISOString());
-          const liveBucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(liveBucket)) || [];
-          liveBucketData.push({
-            channelId,
-            videoId: entry.videoId,
-            type: 'live_scheduled',
-            scheduledFor: publishedTime,
-            headsUp: false,
-          });
-          await putKV(env.TUBEPULSE_KV, key.upcoming(liveBucket), liveBucketData);
 
           // Don't send immediate notification for scheduled events
           continue;

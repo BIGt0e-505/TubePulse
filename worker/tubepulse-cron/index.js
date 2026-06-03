@@ -17,6 +17,8 @@ const key = {
   channelSubs:      (channelId) => `channel:${channelId}:subscribers`,
   channelWebsub:    (channelId) => `channel:${channelId}:websub`,
   channelRecent:    (channelId) => `channel:${channelId}:recent`,
+  channelRecentPosts: (channelId) => `channel:${channelId}:recent:posts`,
+  firstPollAtPosts: (channelId) => `channel:${channelId}:firstPollAt:posts`,
   deviceProfile:    (deviceId)  => `device:${deviceId}:profile`,
   deviceSettings:   (deviceId)  => `device:${deviceId}:settings`,
   deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
@@ -25,6 +27,15 @@ const key = {
   upcoming:         (bucket)    => `upcoming:${bucket}`,
   nag:              (bucket)    => `nag:${bucket}`,
   channelsActive:   ()          => `channels:active`,
+  // Per-user prewarn tracking. Set to the prewarnMinutes value when the
+  // prewarn push has been sent. Keyed by (event videoId, deviceId) so
+  // each device gets at most one prewarn per event. Cleaned up when
+  // the event is past.
+  prewarnSent:      (videoId, deviceId) => `upcoming:prewarn:${videoId}:${deviceId}`,
+  // List of all currently-scheduled live events. Append-only on
+  // detection; cleaned in runUpcomingCron when an event is past its
+  // scheduledFor + 24h.
+  upcomingEvents:   ()          => `upcoming:events:list`,
 };
 
 // KV operation counters — incremented on every get/put/delete and logged
@@ -503,145 +514,219 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   return { sent: true, deadToken: false };
 }
 
-// ─── Job 1: Upcoming events (every 5 min) ───────────────────────────────
+// ─── Job 1: Upcoming events (drain only, every 5 min) ─────────────────
+//
+// In v3.1 the upcoming bucket scheme is no longer used. The cron's
+// prewarn logic is driven by the global `upcoming:events:list` (see
+// runPrewarnCron below), not by per-event 5-min time buckets.
+//
+// This function remains as a drain: it reads the current 5-min bucket
+// and deletes it without firing anything. Stale buckets left over from
+// pre-v3.1 deploys are cleared this way on the first tick after
+// upgrade, so the old "going live soon" / "is live now!" pushes can
+// never fire for events that were scheduled before the upgrade.
 
 async function runUpcomingCron(env, ctx) {
   const bucket = currentUpcomingBucket();
   const entries = await getKV(env.TUBEPULSE_KV, key.upcoming(bucket));
 
   if (!entries || entries.length === 0) {
-    console.log(`[Upcoming] No events at ${bucket}`);
-    return { fired: 0 };
+    return { drained: 0 };
   }
 
-  console.log(`[Upcoming] ${entries.length} event(s) at ${bucket}`);
+  console.log(`[Upcoming] Draining ${entries.length} stale bucket entry(ies) at ${bucket}`);
+  await env.TUBEPULSE_KV.delete(key.upcoming(bucket));
+  return { drained: entries.length };
+}
+
+// ─── Job 1b: Prewarn (per-device pre-notification before live) ──────────
+//
+// Iterates the global list of currently-scheduled live events and
+// fires a per-device "going live in N minutes/hours/days" push to
+// each subscriber whose prewarn window is currently active (within
+// 5-min slack of `scheduledFor - prewarnMinutes`).
+//
+// The prewarn time is per-device: a per-channel override
+// (`prewarnMinutes`) takes precedence, otherwise the device's global
+// `prewarnMinutes` setting is used, otherwise the default (60 min).
+//
+// Sent-state is tracked in `upcoming:prewarn:{videoId}:{deviceId}` so
+// we don't double-send if the cron runs again within the slack window.
+//
+// Events older than `scheduledFor + 24h` are pruned from the list and
+// their per-device sent keys are cleaned up.
+
+const DEFAULT_PREWARN_MINUTES = 60;
+const PREWARN_OPTIONS_MINUTES = [15, 30, 60, 120, 240, 1440]; // 15m, 30m, 1h, 2h, 4h, 1d
+const PREWARN_SLACK_MS = 5 * 60 * 1000;
+const PREWARN_GRACE_MS = 24 * 60 * 60 * 1000; // 24h after scheduledFor
+
+function prewarnLabel(minutes) {
+  if (minutes < 60) return `${minutes} minutes`;
+  if (minutes === 60) return '1 hour';
+  if (minutes < 1440) return `${minutes / 60} hours`;
+  return '1 day';
+}
+
+async function runPrewarnCron(env, ctx) {
+  const start = Date.now();
+  const events = await getKV(env.TUBEPULSE_KV, key.upcomingEvents()) || [];
+  if (events.length === 0) {
+    return { checked: 0, fired: 0, pruned: 0 };
+  }
 
   let accessToken;
   try {
     accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
   } catch (err) {
-    console.error('[Upcoming] FCM token error:', err);
-    return { fired: 0 };
+    console.error('[Prewarn] FCM token error:', err);
+    return { checked: events.length, fired: 0, pruned: 0, error: 'fcm_token' };
   }
-
   const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
   const projectId = sa.project_id;
+
+  const now = Date.now();
+  const stillValid = [];
   let fired = 0;
+  let pruned = 0;
 
-  for (const entry of entries) {
-    // Get channel meta
-    const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(entry.channelId));
-    const channelName = meta?.name || entry.channelId;
+  for (const event of events) {
+    const scheduledFor = new Date(event.scheduledFor).getTime();
+    if (isNaN(scheduledFor)) {
+      // Malformed event — drop it.
+      pruned++;
+      continue;
+    }
 
-    // Get subscribers for this channel
-    const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(entry.channelId)) || [];
+    // Past the grace window — remove from the list and clean up sent keys.
+    if (now > scheduledFor + PREWARN_GRACE_MS) {
+      pruned++;
+      const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(event.channelId)) || [];
+      for (const deviceId of subs) {
+        await env.TUBEPULSE_KV.delete(key.prewarnSent(event.videoId, deviceId));
+      }
+      continue;
+    }
+
+    stillValid.push(event);
+
+    // Past the scheduled time + slack — the regular RSS-poll push
+    // for the now-live video has already fired. No prewarn needed.
+    // Keep the event in the list until the grace window for cleanup.
+    if (now > scheduledFor + PREWARN_SLACK_MS) continue;
+
+    const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(event.channelId));
+    const channelName = meta?.name || event.channelId;
+    const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(event.channelId)) || [];
 
     for (const deviceId of subs) {
+      const sent = await getKV(env.TUBEPULSE_KV, key.prewarnSent(event.videoId, deviceId));
+      if (sent !== null) continue; // already sent
+
       const [profile, settings, override] = await Promise.all([
         getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId)),
         getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)),
-        getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, entry.channelId)),
+        getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, event.channelId)),
       ]);
-
       if (!profile?.fcmToken) continue;
 
-      const effective = {
-        mode: override?.mode || settings?.mode || 'chill',
-        nagInterval: override?.nagInterval || settings?.nagInterval || 15,
-        dndEnabled: settings?.dndEnabled || false,
-        dndStart: settings?.dndStart || '22:00',
-        dndEnd: settings?.dndEnd || '07:00',
-        dndTimezone: settings?.dndTimezone || 'UTC',
-        dndBypass: override?.dndBypass || false,
-        muted: override?.muted || false,
+      // Prewarn time: per-channel override > global > default
+      const prewarnMinutes = override?.prewarnMinutes
+        ?? settings?.prewarnMinutes
+        ?? DEFAULT_PREWARN_MINUTES;
+      if (!PREWARN_OPTIONS_MINUTES.includes(prewarnMinutes)) {
+        // Unknown / invalid value — treat as default. Don't write to KV;
+        // the user just hasn't set a valid value yet.
+      }
+      const effectiveMinutes = PREWARN_OPTIONS_MINUTES.includes(prewarnMinutes)
+        ? prewarnMinutes
+        : DEFAULT_PREWARN_MINUTES;
+
+      const prewarnTime = scheduledFor - effectiveMinutes * 60 * 1000;
+      if (prewarnTime > now) {
+        // Prewarn time is in the future. Wait for a later tick.
+        continue;
+      }
+      // Prewarn time is now or in the past. Fire the prewarn.
+      // The cron's 5-min resolution means the prewarn may fire up to
+      // a few minutes late; the body uses the actual remaining time
+      // so the user sees accurate information either way.
+      //
+      // Exception: if the prewarn time is so close to live that the
+      // remaining time rounds to 0 minutes, the prewarn is no longer
+      // useful — the live push is the notification. Mark sent and
+      // skip rather than firing a "starting in 0 minutes" push.
+      const remainingMs = Math.max(0, scheduledFor - now);
+      if (remainingMs < 30000) {
+        await putKV(env.TUBEPULSE_KV, key.prewarnSent(event.videoId, deviceId), effectiveMinutes);
+        continue;
+      }
+
+      // DND / mute checks
+      if (override?.muted) {
+        await putKV(env.TUBEPULSE_KV, key.prewarnSent(event.videoId, deviceId), effectiveMinutes);
+        continue;
+      }
+      const dndEnabled = settings?.dndEnabled || false;
+      const dndStart = settings?.dndStart || '22:00';
+      const dndEnd = settings?.dndEnd || '07:00';
+      const dndTimezone = settings?.dndTimezone || 'UTC';
+      const dndActive = dndEnabled && isDndActive(dndStart, dndEnd, dndTimezone);
+      if (dndActive && !override?.dndBypass) {
+        // Don't mark as sent — DND might end before the event; we'll
+        // re-evaluate on the next tick. But cap retries: if we're
+        // within 5 min of the event start, give up.
+        if (now > scheduledFor - PREWARN_SLACK_MS) {
+          await putKV(env.TUBEPULSE_KV, key.prewarnSent(event.videoId, deviceId), effectiveMinutes);
+        }
+        continue;
+      }
+
+      // Fire the prewarn. The body shows the actual remaining time
+      // (live - now), not the configured prewarnMinutes — the cron
+      // is 5-min so the prewarn can fire up to a few minutes late,
+      // and we want the user to see accurate information.
+      const remainingMinutes = Math.round(remainingMs / 60000);
+      const notifPayload = {
+        notification: {
+          title: `${channelName} going live soon`,
+          body: `Scheduled event starting in ${prewarnLabel(remainingMinutes)}`,
+        },
+        data: {
+          type: 'prewarn',
+          videoId: event.videoId,
+          channelId: event.channelId,
+          channelName,
+          scheduledFor: String(scheduledFor),
+          prewarnMinutes: String(effectiveMinutes),
+        },
+        tag: `video-${event.videoId}`,
       };
 
-      if (effective.muted) continue;
-
-      const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
-      if (dndActive && !effective.dndBypass) continue;
-
-      let title, body;
-      if (entry.headsUp) {
-        title = `${channelName} going live soon`;
-        body = 'Scheduled event starting in 30 minutes';
-      } else {
-        title = `${channelName} is live now!`;
-        body = 'The scheduled event has started';
-      }
-
-      const result = await sendFCMPush(accessToken, projectId, profile.fcmToken, {
-        title,
-        body,
-        data: {
-          videoId: entry.videoId,
-          channelId: entry.channelId,
-          channelName,
-          type: entry.headsUp ? 'upcoming' : 'new_video',
-        },
-        tag: `video-${entry.videoId}`,
-      });
-
-      if (result.sent) {
-        fired++;
-      } else if (result.deadToken) {
-        // FCM has confirmed the device is gone. Run the full cleanup —
-        // remove the device from every channel's subscribers, clean up
-        // any channel that goes empty, delete the device's profile.
-        // Don't block the upcoming-events tick on this.
-        console.log(`[Upcoming] Pruning dead device: ${deviceId}`);
-        ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
-      }
-    }
-
-    // If this was the "live now" event (headsUp=false), also move video into nag system
-    if (!entry.headsUp) {
-      const subs2 = await getKV(env.TUBEPULSE_KV, key.channelSubs(entry.channelId)) || [];
-      for (const deviceId of subs2) {
-        const [settings2, override2] = await Promise.all([
-          getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)),
-          getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, entry.channelId)),
-        ]);
-
-        const mode = override2?.mode || settings2?.mode || 'chill';
-        const nagInterval = override2?.nagInterval || settings2?.nagInterval || 15;
-        const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, entry.channelId)) || {
-          unwatched: [],
-          lastNagAt: null,
-          nagCount: 0,
-        };
-
-        // Ensure video is in unwatched
-        if (!state.unwatched.includes(entry.videoId)) {
-          state.unwatched.push(entry.videoId);
+      try {
+        const result = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+        if (result.sent) {
+          fired++;
+          await putKV(env.TUBEPULSE_KV, key.prewarnSent(event.videoId, deviceId), effectiveMinutes);
+        } else if (result.deadToken) {
+          console.log(`[Prewarn] Pruning dead device: ${deviceId}`);
+          ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
+          await putKV(env.TUBEPULSE_KV, key.prewarnSent(event.videoId, deviceId), effectiveMinutes);
         }
-        state.lastNagAt = Date.now();
-        await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, entry.channelId), state);
-
-        // Schedule next nag
-        const nextNagTime = mode === 'chill'
-          ? Date.now() + 4 * 60 * 60 * 1000
-          : Date.now() + nagInterval * 60 * 1000;
-
-        const nb = nagBucket(nextNagTime);
-        const bucketData = await getKV(env.TUBEPULSE_KV, key.nag(nb)) || [];
-        const exists = bucketData.some((e) => e.deviceId === deviceId && e.channelId === entry.channelId);
-        if (!exists) {
-          bucketData.push({
-            deviceId,
-            channelId: entry.channelId,
-            videoIds: [...state.unwatched],
-          });
-          await putKV(env.TUBEPULSE_KV, key.nag(nb), bucketData);
-        }
+      } catch (err) {
+        console.error(`[Prewarn] FCM push failed for ${deviceId}:`, err?.message || err);
       }
     }
   }
 
-  // Clear the processed bucket
-  await env.TUBEPULSE_KV.delete(key.upcoming(bucket));
+  // Persist the pruned list.
+  if (stillValid.length !== events.length) {
+    await putKV(env.TUBEPULSE_KV, key.upcomingEvents(), stillValid);
+  }
 
-  return { fired };
+  const elapsed = Date.now() - start;
+  console.log(`[Prewarn] ${events.length} event(s) checked, ${fired} prewarn(s) fired, ${pruned} pruned in ${elapsed}ms`);
+  return { checked: events.length, fired, pruned };
 }
 
 // ─── Job 2: Nag cycle (every 15 min) ────────────────────────────────────
@@ -1164,31 +1249,29 @@ async function runRssPollCron(env, ctx) {
           }
 
           if (video.type === 'live_scheduled') {
-            // Schedule upcoming bucket entries
+            // v3.1: no bucket writes. Prewarn is fired by
+            // runPrewarnCron at the user's preferred prewarn time
+            // (driven by the upcoming:events:list, not by a
+            // hardcoded 30-min bucket). At live time the video is
+            // re-detected as type 'live' below and added to
+            // channelRecent as a normal new video — no separate
+            // "live now!" push.
             const publishedTime = new Date(video.publishedAt).getTime();
-            const headsUpTime = publishedTime - 30 * 60 * 1000;
-            if (headsUpTime > Date.now()) {
-              const bucket = upcomingBucket(new Date(headsUpTime).toISOString());
-              const bucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(bucket)) || [];
-              bucketData.push({
+
+            // Append to the global scheduled-events list so
+            // runPrewarnCron can iterate and fire per-device
+            // prewarns. Idempotent — skip if this videoId is
+            // already in the list.
+            const events = await getKV(env.TUBEPULSE_KV, key.upcomingEvents()) || [];
+            if (!events.some((e) => e.videoId === video.videoId)) {
+              events.push({
                 channelId,
                 videoId: video.videoId,
-                type: 'live_scheduled',
                 scheduledFor: publishedTime,
-                headsUp: true,
+                addedAt: Date.now(),
               });
-              await putKV(env.TUBEPULSE_KV, key.upcoming(bucket), bucketData);
+              await putKV(env.TUBEPULSE_KV, key.upcomingEvents(), events);
             }
-            const liveBucket = upcomingBucket(new Date(video.publishedAt).toISOString());
-            const liveBucketData = await getKV(env.TUBEPULSE_KV, key.upcoming(liveBucket)) || [];
-            liveBucketData.push({
-              channelId,
-              videoId: video.videoId,
-              type: 'live_scheduled',
-              scheduledFor: publishedTime,
-              headsUp: false,
-            });
-            await putKV(env.TUBEPULSE_KV, key.upcoming(liveBucket), liveBucketData);
             continue;
           }
 
@@ -1297,6 +1380,13 @@ export default {
     // Upcoming events: every 5 minutes (minute % 5 === 0)
     if (mins % 5 === 0) {
       results.upcoming = await runUpcomingCron(env, ctx);
+    }
+
+    // Prewarn: every 5 minutes (minute % 5 === 0) — iterates the
+    // scheduled-events list and fires per-device prewarns when each
+    // device's window is active.
+    if (mins % 5 === 0) {
+      results.prewarn = await runPrewarnCron(env, ctx);
     }
 
     // RSS poll: every 5 minutes (minute % 5 === 0) — fallback for WebSub

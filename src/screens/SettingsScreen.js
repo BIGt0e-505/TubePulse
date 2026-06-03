@@ -4,7 +4,7 @@ import {
   Platform, Switch, ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { COLORS, DEFAULT_SETTINGS, NAG_INTERVALS } from '../utils/constants';
+import { COLORS, DEFAULT_SETTINGS, NAG_INTERVALS, PREWARN_OPTIONS } from '../utils/constants';
 import TimeSpinner from '../components/TimeSpinner';
 import { getSettings, saveSettings } from '../utils/storage';
 import { updateSettings, getDeviceId } from '../utils/api';
@@ -135,6 +135,25 @@ export default function SettingsScreen() {
           </View>
         </>
       )}
+
+      {/* Prewarn time for scheduled livestreams */}
+      <Text style={styles.sectionTitle}>Prewarn time</Text>
+      <View style={styles.optionGroup}>
+        {PREWARN_OPTIONS.map(({ label, value }) => (
+          <TouchableOpacity
+            key={value}
+            style={[styles.option, settings.prewarnMinutes === value && styles.optionActive]}
+            onPress={() => updateSetting('prewarnMinutes', value)}
+          >
+            <Text style={[styles.optionText, settings.prewarnMinutes === value && styles.optionTextActive]}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <Text style={styles.guidance}>
+        How early to be notified before a scheduled livestream goes live.
+      </Text>
 
       {/* Community Posts toggle */}
       <Text style={styles.sectionTitle}>Content types</Text>
