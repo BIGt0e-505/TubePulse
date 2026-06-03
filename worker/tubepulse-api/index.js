@@ -117,6 +117,14 @@ async function cleanupDeadChannel(channelId, env, reason = 'unsubscribe_last') {
   deletedKeys++;
   await kv.delete(key.channelWebsub(channelId));
   deletedKeys++;
+  // Also delete the subscribers list. The list was already empty (or
+  // about to be — this helper is called when the last subscriber just
+  // left), and leaving it as an empty `[]` orphans a key in KV. Cost:
+  // one extra delete per channel cleanup, which is fine — the cleanup
+  // is rare (event-driven, only on last-subscriber-leaves or FCM
+  // UNREGISTERED).
+  await kv.delete(key.channelSubs(channelId));
+  deletedKeys++;
 
   const active = await getKV(kv, key.channelsActive()) || [];
   const filtered = active.filter((id) => id !== channelId);
