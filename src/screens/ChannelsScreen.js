@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 import { useFocusEffect } from '@react-navigation/native';
-import { COLORS } from '../utils/constants';
+import { COLORS, PREWARN_OPTIONS } from '../utils/constants';
 import {
   getChannels, saveChannels,
   getChannelCache, saveChannelCache,
@@ -36,6 +36,9 @@ const DEFAULT_CHANNEL_NOTIF = {
   dndEnd: '07:00',
   // Tri-state for community posts: null = inherit from global, true = on, false = off.
   includeCommunityPosts: null,
+  // Tri-state for prewarn: null = inherit from global prewarnMinutes,
+  // number = override (one of PREWARN_OPTIONS values).
+  prewarnMinutes: null,
 };
 
 export default function ChannelsScreen() {
@@ -440,6 +443,38 @@ export default function ChannelsScreen() {
             </View>
             <Text style={styles.modalHint}>
               Global: use the Include community posts setting from Settings. On/Off: override for this channel only.
+            </Text>
+
+            <Text style={styles.modalLabel}>Prewarn time</Text>
+            <View style={styles.dndRow}>
+              <Text style={styles.dndLabel}>Override global prewarn</Text>
+              <Switch
+                value={editingNotif.prewarnMinutes !== null}
+                onValueChange={(v) => setEditingNotif(n => ({
+                  ...n,
+                  prewarnMinutes: v ? (n.prewarnMinutes ?? 60) : null,
+                }))}
+                trackColor={{ false: COLORS.border, true: COLORS.accent }}
+                thumbColor={editingNotif.prewarnMinutes !== null ? COLORS.bg : COLORS.textDim}
+              />
+            </View>
+            {editingNotif.prewarnMinutes !== null && (
+              <View style={styles.optionGroup}>
+                {PREWARN_OPTIONS.map(({ label, value }) => (
+                  <TouchableOpacity
+                    key={value}
+                    style={[styles.option, editingNotif.prewarnMinutes === value && styles.optionActive]}
+                    onPress={() => setEditingNotif(n => ({ ...n, prewarnMinutes: value }))}
+                  >
+                    <Text style={[styles.optionText, editingNotif.prewarnMinutes === value && styles.optionTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+            <Text style={styles.modalHint}>
+              How early to be notified before a scheduled livestream. Off: use the global setting.
             </Text>
 
             {channelNotifSettings[editingChannel] && (

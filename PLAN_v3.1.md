@@ -132,31 +132,84 @@ quota units/day. Plus retry overhead, ~100 units/day. **1% of the
 
 ### Commit 4 — Prewarn time for live events
 
-- **Server**: extend `runUpcomingCron` to fire prewarn notifications.
-  For each upcoming event, check if `now + prewarn_minutes ===
-  starts_at` (within 5-min slack). If yes, send a prewarn push and
-  mark it as sent.
-- **Server**: new key `upcoming:prewarn:{eventId}:{window}` to track
-  which prewarns have been sent (so we don't double-send). Cleaned
-  when the event is over.
-- **Server**: per-channel override: add `prewarnMinutes` to the
-  channel override object. If per-channel notifications are enabled
-  AND the override has a value, use that instead of the global.
-- **App**: global prewarn setting in `SettingsScreen` near the DND
-  toggle. Roller spinner with the 6 options.
-- **App**: per-channel prewarn in the per-channel override card (if
-  enabled), as a roller spinner next to the DND one.
-- **App**: new `PrewarnSpinner` component (or just inline the
-  options in `TimeSpinner`).
+Design clarification (after build): **every new video gets a
+notified-push when it appears**, including livestreams. The prewarn
+is an *additional* advance notification fired at the user's chosen
+offset (default 1h) before the scheduled time. At the moment the
+livestream goes live, the regular RSS-poll path fires a normal
+new-video push — there is no separate "is live now!" notification.
+The prewarn is the heads-up; the regular push is the "this just
+appeared" notification.
+
+Behaviour matrix:
+- Detect 6h before, 1h prewarn: prewarn fires 1h before live (cron
+  resolution may make it 1h-5min to 1h+0min). Regular push fires at
+  live time. **Two pushes.**
+- Detect 30min before, 1h prewarn: prewarn time is 30min in the past.
+  Fire immediately (better late than never) — prewarn body says
+  "starting in 30 minutes". Regular push fires at live time.
+  **Two pushes, prewarn is "late".**
+- Detect 30min before, 30min prewarn: prewarn time is now. The
+  prewarn window and the live time are too close together; we skip
+  the prewarn entirely (don't fire a "starting in 0 minutes" push).
+  Regular push at live time. **One push.**
+- Detect at live time, any prewarn: the video is now `type: 'live'`
+  and never enters `upcoming:events:list`. No prewarn is fired; the
+  regular RSS-poll push is the notification. **One push.**
+
+Implementation:
+- **Server (cron)**: new `runPrewarnCron` function (separate from
+  `runUpcomingCron` because the per-user prewarn is per-device and
+  doesn't fit the bucket scheme). Iterates `upcoming:events:list`,
+  for each (event, subscriber) pair computes the per-device prewarn
+  time (per-channel override → global setting → default 60min), and
+  fires a "going live soon" push if `prewarnTime <= now`. Tracks
+  sent state in `upcoming:prewarn:{videoId}:{deviceId}`. Prunes
+  events past `scheduledFor + 24h` and cleans up their sent keys.
+  Wired into the 5-min cron tick.
+- **Server (cron)**: `runUpcomingCron` is repurposed as a **drain**
+  — it reads the current 5-min `upcoming:` bucket and deletes it
+  without firing anything. Stale pre-v3.1 bucket entries are cleared
+  this way on the first tick after upgrade, so the old "going live
+  in 30 minutes" / "is live now!" pushes cannot fire for events
+  scheduled before the upgrade.
+- **Server (cron & API)**: when a `live_scheduled` video is detected
+  by the RSS poll (cron) or WebSub push (API), it is appended to
+  `upcoming:events:list` (idempotent — checks videoId presence).
+  Bucket writes for `headsUp: true` and `headsUp: false` are
+  removed.
+- **Server (cron)**: at live time, the existing RSS poll re-detects
+  the video as `type: 'live'`, adds it to `channelRecent`, marks
+  it as `unwatched`, and fires a normal new-video push (the
+  "uploaded" payload). For `live` videos, `isLivestream = true` so
+  DND is bypassed — the live push always fires.
+- **App**: new global setting `prewarnMinutes` in SettingsScreen
+  (default 60) with the 6 options (15m, 30m, 1h, 2h, 4h, 1d).
+- **App**: per-channel override `prewarnMinutes` in the
+  ChannelsScreen modal — "Override global prewarn" switch + 6-option
+  picker, tri-state (`null` = inherit, number = override). Save
+  logic strips `null` from the override payload (same pattern as
+  community posts).
+- **App**: prewarn push taps (data.type === 'prewarn') open the
+  YouTube watch URL for the scheduled video. The video is NOT
+  marked as seen on tap — the prewarn is just a reminder, the
+  "live now" regular push will still fire later.
 
 **Files touched**:
-- `worker/tubepulse-cron/index.js` (extend `runUpcomingCron`)
-- `src/screens/SettingsScreen.js` (global prewarn spinner)
-- `src/screens/ChannelsScreen.js` or wherever per-channel overrides
-  live (per-channel prewarn spinner)
+- `worker/tubepulse-cron/index.js` (new `runPrewarnCron`,
+  `runUpcomingCron` repurposed as drain, `live_scheduled` block
+  simplified, key map extended)
+- `worker/tubepulse-api/index.js` (bucket writes removed, events
+  list append added, key map extended)
+- `src/utils/constants.js` (`prewarnMinutes` in DEFAULT_SETTINGS,
+  `PREWARN_OPTIONS` export)
+- `src/screens/SettingsScreen.js` (global prewarn picker)
+- `src/screens/ChannelsScreen.js` (per-channel prewarn override)
+- `App.js` (prewarn push tap handler)
 
 **Cost**: zero new API calls. The prewarn logic reuses the existing
-upcoming-events iteration (already running every 5 min).
+5-min cron tick and the WebSub/RSS-poll path that already populates
+`upcoming:events:list` (the same list the posts cron reads).
 
 ## Build and release
 
@@ -223,7 +276,24 @@ After all four commits:
       gets a tri-state picker (Global / On / Off). App.js handles
       post-push taps by marking the post seen and opening the
       YouTube community tab.
-- [ ] Commit 4: Prewarn time
+- [x] Commit 4: Prewarn time for live events — **DONE** (commit
+  pending, on `master`, unbuilt; see §"Commit 4 — Prewarn time for
+  live events" above for the corrected design)
+  - **Server**: new `runPrewarnCron` fires per-device prewarn pushes
+      at the user's chosen offset (default 1h, options 15m–1d).
+      Driven by `upcoming:events:list`, sent state tracked in
+      `upcoming:prewarn:{videoId}:{deviceId}`. Events pruned 24h
+      after live time. `runUpcomingCron` repurposed as a drain
+      (clears stale pre-v3.1 bucket entries without firing). The
+      old hardcoded 30-min "going live in 30 minutes" / "is live
+      now!" pushes are gone — prewarn is the heads-up, the regular
+      new-video push at live time is the "this just appeared"
+      notification (DND bypassed for `type: 'live'`).
+  - **App**: global prewarn picker in SettingsScreen (6 options).
+      Per-channel override in ChannelsScreen modal (Override
+      switch + 6-option picker; null = inherit, number = override).
+      Pre-warning push taps open the YouTube watch URL without
+      marking the video as seen.
 - [ ] Build and release v3.1.0
 
 ### Commit 3 follow-ups (post-deploy)

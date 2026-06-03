@@ -235,6 +235,7 @@ export default function App() {
         const settings = await getSettings();
         const deviceId = deviceIdRef.current || await getDeviceId();
         const isPost = data.type === 'post' && data.activityId;
+        const isPrewarn = data.type === 'prewarn' && data.videoId;
 
         if (isPost) {
           // Post taps always mark the post as seen and open the
@@ -243,6 +244,12 @@ export default function App() {
           // apply (videos and posts share the same screen).
           await markSeen(deviceId, data.channelId, [`post:${data.activityId}`]);
           Linking.openURL(`https://www.youtube.com/channel/${data.channelId}/community`);
+        } else if (isPrewarn) {
+          // Prewarn taps open the scheduled video's watch URL. We do
+          // NOT mark it as seen — the user is just being reminded it
+          // exists; the "live now" push will fire later and the nag
+          // cycle should still prompt if they ignore it.
+          Linking.openURL(`https://www.youtube.com/watch?v=${data.videoId}`);
         } else if (data.type === 'batch' || settings.tapAction === 'channel') {
           // Channel tap or batch — mark all unwatched for this channel
           await markSeen(deviceId, data.channelId, [], true);

@@ -39,7 +39,17 @@ export const DEFAULT_SETTINGS = {
   dndEnd: '07:00',
   perChannelNotifications: false,  // enable per-channel notification overrides
   dndTimezone: 'UTC',              // IANA tz string; overridden at runtime via Intl.DateTimeFormat
+  prewarnMinutes: 60,              // minutes before a scheduled livestream to fire a prewarn push (15, 30, 60, 120, 240, 1440)
 };
+
+export const PREWARN_OPTIONS = [
+  { value: 15,   label: '15m' },
+  { value: 30,   label: '30m' },
+  { value: 60,   label: '1h' },
+  { value: 120,  label: '2h' },
+  { value: 240,  label: '4h' },
+  { value: 1440, label: '1d' },
+];
 
 export const COLORS = {
   bg: '#0D0D0D',
