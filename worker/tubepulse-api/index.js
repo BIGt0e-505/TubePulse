@@ -1444,6 +1444,13 @@ async function handleWebSubPush(request, env, ctx) {
           thumbnail: entry.thumbnail,
           type: classifyVideo(entry),
           link: entry.link,
+          // Views/likes/dislikes are populated by the cron worker on the
+          // next RSS poll (it parses the same media:community block from
+          // the channel's feed). Default to 0 so the structure is
+          // consistent from creation.
+          views: 0,
+          likes: 0,
+          dislikes: 0,
         });
       }
     }
