@@ -67,6 +67,11 @@ const key = {
   deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
   deviceOverride:   (deviceId, channelId) => `device:${deviceId}:override:${channelId}`,
   deviceState:      (deviceId, channelId) => `device:${deviceId}:state:${channelId}`,
+  // FCM-token → deviceId index. Written on every /register that includes
+  // a real FCM token, deleted when the device is cleaned up. Used to
+  // detect "same install, new deviceId" events (e.g. v3.0.18 UUID-based
+  // deviceId → v3.0.19 Android-ID-based deviceId) and migrate state.
+  fcmLookup:        (fcmToken)  => `fcm:lookup:${fcmToken}`,
   upcoming:         (bucket)    => `upcoming:${bucket}`,
   nag:              (bucket)    => `nag:${bucket}`,
   channelsActive:   ()          => `channels:active`,
@@ -142,6 +147,15 @@ async function cleanupDeadChannel(channelId, env, reason = 'unsubscribe_last') {
 async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
   const kv = env.TUBEPULSE_KV;
 
+  // 0. Read the profile so we can clean the FCM-lookup index below.
+  //    This also acts as a no-op guard — if there's no profile, there's
+  //    nothing to clean.
+  const profile = await getKV(kv, key.deviceProfile(deviceId));
+  if (!profile) {
+    // Already cleaned up; nothing to do.
+    return { channelsCleaned: 0, devicesDeleted: 0 };
+  }
+
   // 1. Find every channel this device was on.
   const channels = await getKV(kv, key.deviceChannels(deviceId)) || [];
   let channelsCleaned = 0;
@@ -173,6 +187,15 @@ async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
     devicesDeleted++;
   }
 
+  // 3a. If we have a profile in memory, also clean up the FCM-lookup
+  //     index so a future /register doesn't try to migrate from a
+  //     dead device. (We may not have the profile here if called from
+  //     migrateDevice, which is fine — the lookup gets rewritten by
+  //     the new device's register call anyway.)
+  if (profile && profile.fcmToken) {
+    await kv.delete(key.fcmLookup(profile.fcmToken));
+  }
+
   // 4. Delete per-channel state + override. We don't know the channel
   //    list any more (we just deleted :channels), so iterate the list
   //    we captured in step 1.
@@ -184,6 +207,99 @@ async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
 
   console.log(`[Cleanup] device ${deviceId}: reason=${reason} channelsAffected=${channels.length} channelsCleaned=${channelsCleaned} devicesDeleted=${devicesDeleted}`);
   return { channelsCleaned, devicesDeleted };
+}
+
+/**
+ * Migrate state from one deviceId to another. Used when the same FCM
+ * token registers with a new deviceId — the typical case is a client
+ * app upgrade that changes its device-ID source (e.g. v3.0.18 random
+ * UUID → v3.0.19 Android ID), or a debug/release build switch on the
+ * same physical device. The new deviceId inherits the old device's
+ * channel subscriptions, settings, and per-channel state. The old
+ * deviceId is then cleaned up.
+ *
+ * Both the FCM-lookup index and the channel-subscribers lists are
+ * rewritten to point at the new deviceId. After migration, the old
+ * deviceId's profile, settings, channels, state:*, override:* keys
+ * are deleted (via cleanupDeadDevice).
+ *
+ * Idempotent — safe to call when the new deviceId already has the same
+ * state (will be a no-op for those channels).
+ *
+ * @param {string} oldDeviceId
+ * @param {string} newDeviceId
+ * @param {object} env
+ * @returns {Promise<{channelsMigrated: number, settingsMigrated: boolean}>}
+ */
+async function migrateDevice(oldDeviceId, newDeviceId, env) {
+  if (oldDeviceId === newDeviceId) {
+    return { channelsMigrated: 0, settingsMigrated: false };
+  }
+  const kv = env.TUBEPULSE_KV;
+
+  // 1. Read old device's state.
+  const oldChannels = await getKV(kv, key.deviceChannels(oldDeviceId)) || [];
+  const oldSettings = await getKV(kv, key.deviceSettings(oldDeviceId));
+  const newChannels = await getKV(kv, key.deviceChannels(newDeviceId)) || [];
+
+  // 2. Merge channels (union, dedupe).
+  const mergedChannels = [...new Set([...newChannels, ...oldChannels])];
+
+  // 3. For each channel the old device was on, add the new device to
+  //    the subscribers list (if not already there) and copy the
+  //    per-channel state + override to the new device.
+  let channelsMigrated = 0;
+  for (const channelId of oldChannels) {
+    const subs = await getKV(kv, key.channelSubs(channelId)) || [];
+    if (!subs.includes(newDeviceId)) {
+      const filtered = subs.filter((id) => id !== oldDeviceId);
+      filtered.push(newDeviceId);
+      await putKV(kv, key.channelSubs(channelId), filtered);
+    } else {
+      // New device already on this channel — just remove the old one.
+      const filtered = subs.filter((id) => id !== oldDeviceId);
+      await putKV(kv, key.channelSubs(channelId), filtered);
+    }
+
+    // Copy per-channel state (don't overwrite if new device already has one).
+    const newStateExists = await getKV(kv, key.deviceState(newDeviceId, channelId)) !== null;
+    if (!newStateExists) {
+      const oldState = await getKV(kv, key.deviceState(oldDeviceId, channelId));
+      if (oldState) {
+        await putKV(kv, key.deviceState(newDeviceId, channelId), oldState);
+      }
+    }
+
+    // Copy per-channel override (new device takes precedence if it has one).
+    const newOverrideExists = await getKV(kv, key.deviceOverride(newDeviceId, channelId)) !== null;
+    if (!newOverrideExists) {
+      const oldOverride = await getKV(kv, key.deviceOverride(oldDeviceId, channelId));
+      if (oldOverride) {
+        await putKV(kv, key.deviceOverride(newDeviceId, channelId), oldOverride);
+      }
+    }
+
+    channelsMigrated++;
+  }
+
+  // 4. Write the merged channel list to the new device.
+  await putKV(kv, key.deviceChannels(newDeviceId), mergedChannels);
+
+  // 5. Migrate settings (new device takes precedence if it already has settings).
+  let settingsMigrated = false;
+  const newSettingsExists = await getKV(kv, key.deviceSettings(newDeviceId)) !== null;
+  if (!newSettingsExists && oldSettings) {
+    await putKV(kv, key.deviceSettings(newDeviceId), oldSettings);
+    settingsMigrated = true;
+  }
+
+  // 6. Clean up the old device. This deletes the old profile/settings/
+  //    channels/state/override and ensures it's not in any subscribers
+  //    list (we already did that in step 3).
+  await cleanupDeadDevice(oldDeviceId, env, 'migrated_to_new_device');
+
+  console.log(`[Migrate] ${oldDeviceId} → ${newDeviceId}: channels=${channelsMigrated} settings=${settingsMigrated}`);
+  return { channelsMigrated, settingsMigrated };
 }
 
 // ─── DND logic ──────────────────────────────────────────────────────────
@@ -647,6 +763,56 @@ async function handleRegister(request, env) {
   const now = Date.now();
   const existing = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
 
+  // ─── FCM-token migration: same install, new deviceId ─────────────
+  // If the FCM token is already known and points to a different deviceId,
+  // this is a "same install, new deviceId" event — typically caused by
+  // a client-side device-ID source change (e.g. v3.0.18 random UUID →
+  // v3.0.19 Android ID), or a debug/release build switch on the same
+  // physical device. Migrate the old device's state to the new deviceId
+  // before we register the new one, so the user doesn't lose their
+  // channels on upgrade.
+  //
+  // Two-phase check:
+  //   1. Fast path: read the FCM-lookup index. If it points to a
+  //      different deviceId, migrate that one.
+  //   2. Slow path: if the lookup wasn't there (e.g. the lookup was
+  //      lost on a prior FCM token rotation, or the old device was
+  //      registered before the lookup index existed), scan all device
+  //      profiles for the same FCM token and migrate any matches.
+  //      This is the case that catches the v3.0.18 duplicate-deviceId
+  //      race — both old UUIDs have the same FCM token, and we want
+  //      to merge them into the new device on upgrade.
+  if (fcmToken && fcmToken.length > 0) {
+    let migrated = false;
+    const lookupDeviceId = await getKV(env.TUBEPULSE_KV, key.fcmLookup(fcmToken));
+    if (lookupDeviceId && lookupDeviceId !== deviceId) {
+      console.log(`[Register] FCM token lookup → ${lookupDeviceId}, migrating to new deviceId ${deviceId}`);
+      await migrateDevice(lookupDeviceId, deviceId, env);
+      migrated = true;
+    }
+
+    // Slow path: scan for any other devices with the same FCM token.
+    // This is one extra `kv.list` per register, which is fine even
+    // at free tier (~1 op per app launch, well under our 100k/day
+    // budget). Necessary because the lookup index can be stale or
+    // missing for the rare case where multiple old devices share
+    // the same FCM token (e.g. the v3.0.18 duplicate-UUID race).
+    const list = await env.TUBEPULSE_KV.list({ prefix: 'device:' });
+    for (const k of list.keys) {
+      if (migrated && !k.name.endsWith(':profile')) continue; // optimization
+      // We only care about profile keys
+      if (!k.name.endsWith(':profile')) continue;
+      const oldId = k.name.slice('device:'.length, -':profile'.length);
+      if (oldId === deviceId) continue;
+      if (oldId === lookupDeviceId) continue; // already migrated
+      const prof = await getKV(env.TUBEPULSE_KV, key.deviceProfile(oldId));
+      if (prof?.fcmToken === fcmToken) {
+        console.log(`[Register] Found orphan ${oldId} with matching FCM token, migrating`);
+        await migrateDevice(oldId, deviceId, env);
+      }
+    }
+  }
+
   // Preserve existing fcmToken if the new one is missing or null —
   // this lets the app re-register on app launch with the current token
   // (which may be the same or a refreshed one) without overwriting
@@ -664,6 +830,22 @@ async function handleRegister(request, env) {
   };
 
   await putKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId), profile);
+
+  // Maintain the FCM-token → deviceId index so future migrations can
+  // find this install even if the deviceId changes. Only update if we
+  // have a real FCM token (the lookup is meaningless for null tokens).
+  if (effectiveFcmToken) {
+    await putKV(env.TUBEPULSE_KV, key.fcmLookup(effectiveFcmToken), deviceId);
+
+    // If the FCM token rotated (we have a new token, the old one still
+    // has a lookup pointing to us), clean up the old lookup. Otherwise
+    // it sits in KV forever pointing to a token no one uses.
+    if (existing?.fcmToken && existing.fcmToken !== effectiveFcmToken) {
+      await env.TUBEPULSE_KV.delete(key.fcmLookup(existing.fcmToken));
+      console.log(`[Register] FCM token rotated for ${deviceId}, cleaned up old lookup`);
+    }
+  }
+
   return json({ ok: true, createdAt: profile.createdAt, fcmTokenPresent: effectiveFcmToken !== null });
 }
 

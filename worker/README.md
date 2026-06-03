@@ -172,10 +172,13 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 | `nag:{bucket}` | JSON array | pending nag entries | Cron (nag fire, reschedule) | Cron (nag cron) |
 | `channels:active` | JSON array | `[channelId, ...]` — index of channels with ≥1 subscriber | API (subscribe, unsubscribe) | Cron (RSS poll) |
 | `handle:{lowercase}` | JSON | `{ channelId, cachedAt }` | API (resolve) | API (resolve) |
+| `fcm:lookup:{fcmToken}` | string | `deviceId` — reverse index from FCM token to the device that owns it | API (register) | API (register, migration) |
 
 **`channels:active` is the secret sauce.** It replaces a `KV.list()` call — the only way to know "which channels have at least one subscriber" without scanning the entire namespace. The cron reads this list, processes each channel, done. No `list()`.
 
-**Key lifecycle (cleanup):** channel and device keys are deleted by two helpers, `cleanupDeadChannel()` and `cleanupDeadDevice()` — see §11. Channel keys (`meta`/`recent`/`websub` + the `channels:active` membership) are deleted when the last subscriber leaves or is detected as dead. Device keys (`profile`/`settings`/`channels`/`state:*`/`override:*`) are deleted only when the FCM token is reported dead.
+**`fcm:lookup:*` is the deviceId-migration index.** When the same FCM token registers with a new `deviceId` (e.g. a v3.0.18 UUID-based install upgrades to v3.0.19's Android-ID-based install), the server uses this index to find the old device and migrate its state. See §11.1.
+
+**Key lifecycle (cleanup):** channel and device keys are deleted by two helpers, `cleanupDeadChannel()` and `cleanupDeadDevice()` — see §11. Channel keys (`meta`/`recent`/`websub` + the `channels:active` membership) are deleted when the last subscriber leaves or is detected as dead. Device keys (`profile`/`settings`/`channels`/`state:*`/`override:*`) are deleted only when the FCM token is reported dead. The `fcm:lookup:*` key is deleted as part of the device cleanup.
 
 ---
 
@@ -362,7 +365,7 @@ worker/
 ├── README.md                  ← you are here
 ├── index.js                   ← legacy/older single-worker file (not deployed)
 ├── tubepulse-api/
-│   ├── index.js               ← API worker source (~1525 lines)
+│   ├── index.js               ← API worker source (~1700 lines)
 │   └── wrangler.toml          ← deployment config
 └── tubepulse-cron/
     ├── index.js               ← cron worker source (~1166 lines)
@@ -431,3 +434,31 @@ Reason values you may see:
 - `last_subscriber_dead` — fired inside `cleanupDeadDevice` when removing a dead device empties a channel
 
 **Manually triggering cleanup for testing:** neither worker exposes a public endpoint for this (we don't want arbitrary callers able to nuke device state). For dev/test, use a one-shot script that reads a real FCM token, calls the FCM `tokens:batchDelete` API to kill it, then triggers a WebSub push. The `v3.0.18` release verified the helper end-to-end via a temporary `/_test_cleanup` endpoint that was removed before final deploy.
+
+### 11.1 Device-ID migration on `register`
+
+The client-side `getDeviceId()` is a stable identifier for a given install — but its source has changed over time. v3.0.18 used a UUID stored in AsyncStorage (prone to races that could mint two UUIDs for the same install). v3.0.19+ uses Android's `Application.getAndroidId()` which is per-app-install and stable. When an existing user upgrades from v3.0.18 to v3.0.19+, their `deviceId` changes — but the FCM token stays the same. Without migration, the user's channels would appear "lost" on upgrade.
+
+`/register` runs a two-phase migration to handle this:
+
+1. **Fast path — `fcm:lookup:{fcmToken}` index**: read the index. If it points to a different `deviceId` than the one currently registering, call `migrateDevice(oldId, newId, env)`. This is the common case for the v3.0.18 → v3.0.19+ upgrade.
+2. **Slow path — full profile scan**: if the lookup is missing (e.g. rotated FCM token wiped the lookup, or the old device was registered before the index existed), `kv.list({ prefix: 'device:' })` and inspect each profile. For every profile whose `fcmToken` matches the registering token, call `migrateDevice(oldId, newId, env)`. This catches:
+   - The v3.0.18 duplicate-UUID race (two old devices, same FCM token) — both get merged into the new device
+   - Any case where a user's previous install was on a build that didn't maintain the lookup index
+
+The scan is one `kv.list` per `register` call, costing ~1 KV op per app launch. Negligible against the 100k/day free tier.
+
+**`migrateDevice(oldId, newId, env)`** does the following atomically:
+- Reads old device's `channels`, `settings`, and per-channel `state:*` / `override:*`
+- For each channel the old device was on: ensures the new device is in that channel's `subscribers` list (and the old device is removed from it)
+- Copies per-channel `state:*` and `override:*` to the new device (new device takes precedence if it already has a value)
+- Writes the union of old + new channel lists to `device:{newId}:channels`
+- Copies old device's `settings` to the new device (new device takes precedence)
+- Calls `cleanupDeadDevice(oldId, env, 'migrated_to_new_device')` to clean up the old device's profile/settings/channels/state/override and its `fcm:lookup` entry
+
+**Settings merge rule:** when both old and new devices have settings, the new device's settings are kept. Rationale: the user just installed the new version, so the latest settings (which may have been edited through the new version) are what they want.
+
+**What survives the migration:** the new device's `profile.fcmToken`, `profile.platform`, `profile.appVersion`, `profile.createdAt`, `profile.lastSeenAt`. Migration does NOT copy the old profile — only the channels, settings, and per-channel state. The new device is the canonical install going forward.
+
+**Verified end-to-end** during the v3.0.19 development cycle: two stale device profiles (`974444b4-...`, `5ffc51a1-...`) from the v3.0.18 duplicate-UUID race, both pointing to the same FCM token, were merged into a single new `android:*` device in a single `register` call. All 4 channels survived. The scan-based migration found both old devices and the lookup-based migration found the most recently registered one — they cooperated correctly.
+
