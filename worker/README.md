@@ -390,7 +390,9 @@ Both workers implement the same two helpers to remove state for channels and dev
 
 ```js
 async function cleanupDeadChannel(channelId, env, reason)
-// Deletes channel:{id}:meta, channel:{id}:recent, channel:{id}:websub
+// Deletes channel:{id}:meta, channel:{id}:recent, channel:{id}:websub,
+// channel:{id}:subscribers (the empty list left after the last
+// subscriber left — v3.0.19 fix to avoid KV orphans)
 // Removes channelId from channels:active
 // Idempotent. Safe to call on a never-cached channel.
 
