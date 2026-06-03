@@ -447,8 +447,16 @@ function parseWebSubPush(xmlText) {
     const viewsMatch = e.match(/<media:statistics[^>]*views="(\d+)"/);
     const views = viewsMatch ? viewsMatch[1] : '0';
 
+    // Likes / dislikes live in media:community/media:starRating/@_count
+    // and a `dislikes` attribute on media:statistics. We accept both
+    // layouts defensively — many feeds only carry likes on starRating.
+    const likesMatch = e.match(/<media:starRating[^>]*count="(\d+)"/);
+    const likes = likesMatch ? likesMatch[1] : '0';
+    const dislMatch = e.match(/<media:statistics[^>]*dislikes="(\d+)"/);
+    const dislikes = dislMatch ? dislMatch[1] : '0';
+
     if (videoId) {
-      entries.push({ videoId, title, link, published, updated, thumbnail, description, views });
+      entries.push({ videoId, title, link, published, updated, thumbnail, description, views, likes, dislikes });
     }
   }
 
@@ -936,8 +944,9 @@ async function handleSubscribeChannel(request, env, ctx) {
     }
 
     // Step 2: Fetch recent videos via RSS — primary path, 0 quota cost.
-    // RSS provides videoId, title, publishedAt, thumbnail, link, and views
-    // (from media:statistics). Cron takes over from here.
+    // RSS provides videoId, title, publishedAt, thumbnail, link, and
+    // views + likes + dislikes (from media:statistics / starRating).
+    // Cron takes over from here.
     if (!recent) {
       try {
         const rssResult = await fetchYouTubeRSS(channelId);
@@ -950,6 +959,8 @@ async function handleSubscribeChannel(request, env, ctx) {
             type: classifyVideo(v),
             link: v.link,
             views: v.views || '0',
+            likes: v.likes || '0',
+            dislikes: v.dislikes || '0',
           }));
 
           if (!meta) {

@@ -339,8 +339,25 @@ function parseRSSFeed(xmlText) {
     const viewsMatch = e.match(/<media:statistics[^>]*views="(\d+)"/);
     const views = viewsMatch ? viewsMatch[1] : '0';
 
+    // Likes / dislikes live in media:community/media:starRating/@_count
+    // and @_dislikes (per YouTube's RSS 2.0 extension). The starRating
+    // block looks like:
+    //   <media:starRating count="123" average="4.5" min="1" max="5"/>
+    // while dislikes is a sibling attribute on media:statistics:
+    //   <media:statistics views="123" dislikes="4"/>
+    // — but the historical-and-most-common shape is:
+    //   <media:starRating count="123" average="4.5" min="1" max="5"/>
+    //   <media:statistics views="123"/>
+    // i.e. count on starRating = likes, dislikes absent in many feeds.
+    // We accept both layouts defensively.
+    const likesMatch = e.match(/<media:starRating[^>]*count="(\d+)"/);
+    const likes = likesMatch ? likesMatch[1] : null;
+    let dislikes = null;
+    const dislAttrMatch = e.match(/<media:statistics[^>]*dislikes="(\d+)"/);
+    if (dislAttrMatch) dislikes = dislAttrMatch[1];
+
     if (videoId) {
-      entries.push({ videoId, title, link, published, updated, thumbnail, description, views });
+      entries.push({ videoId, title, link, published, updated, thumbnail, description, views, likes, dislikes });
     }
   }
 
@@ -1132,17 +1149,31 @@ async function runRssPollCron(env, ctx) {
       const latestFromRss = latest && rssByVideoId.get(latest.videoId);
       const currentHour = Math.floor(Date.now() / 3600000);
 
-      if (latest && latestFromRss && latestFromRss.views) {
+      if (latest && latestFromRss) {
         const oldViews = parseInt(latest.views || '0', 10);
-        const newViews = parseInt(latestFromRss.views, 10);
+        const newViews = parseInt(latestFromRss.views || '0', 10);
         // Only consider refreshing on the top of a new hour, AND only
         // if the count changed by more than 5% (or it's a new video
         // we haven't counted yet).
-        if (
+        const viewsChanged = (
           !isNaN(oldViews) && !isNaN(newViews) &&
           currentHour !== latest.viewsLastCheckedHour &&
           (oldViews === 0 || Math.abs(newViews - oldViews) / Math.max(oldViews, 1) > 0.05)
-        ) {
+        );
+
+        // Likes / dislikes: also refresh hourly on the latest video.
+        // Use a simple "any change" rule — likes/dislikes are cheap to
+        // store and useful to see updated.
+        const oldLikes = latest.likes;
+        const newLikes = latestFromRss.likes != null ? String(latestFromRss.likes) : null;
+        const oldDislikes = latest.dislikes;
+        const newDislikes = latestFromRss.dislikes != null ? String(latestFromRss.dislikes) : null;
+        const likesChanged = (
+          currentHour !== latest.viewsLastCheckedHour &&
+          ((newLikes != null && newLikes !== oldLikes) || (newDislikes != null && newDislikes !== oldDislikes))
+        );
+
+        if (viewsChanged) {
           refreshedPrev[0] = { ...latest, views: String(newViews), viewsLastCheckedHour: currentHour };
           recentChanged = true;
         } else if (latest.viewsLastCheckedHour === undefined) {
@@ -1150,6 +1181,18 @@ async function runRssPollCron(env, ctx) {
           // re-check on the next tick. Don't write yet; wait for an
           // actual change.
           refreshedPrev[0] = { ...latest, viewsLastCheckedHour: currentHour };
+          recentChanged = true;
+        }
+
+        if (likesChanged) {
+          // Apply likes/dislikes to the latest video (merged on top of
+          // any views change we just made).
+          refreshedPrev[0] = {
+            ...refreshedPrev[0],
+            likes: newLikes != null ? newLikes : (latest.likes || '0'),
+            dislikes: newDislikes != null ? newDislikes : (latest.dislikes || '0'),
+            likesLastCheckedHour: currentHour,
+          };
           recentChanged = true;
         }
       }
@@ -1166,15 +1209,26 @@ async function runRssPollCron(env, ctx) {
       // Prior videos keep their last-stored view counts (we don't bother
       // refreshing them in this path either, even on new-video ticks,
       // because the new video is the one that matters for the user).
-      const enrichedNew = newVideos.map((v) => ({
-        videoId: v.videoId,
-        title: v.title,
-        publishedAt: v.published,
-        thumbnail: v.thumbnail,
-        type: classifyVideo(v),
-        link: v.link,
-        views: v.views || '0',
-      }));
+      //
+      // Likes / dislikes: also pulled from RSS for new videos, and for
+      // the latest existing video when they change (refreshed hourly on
+      // the same cadence as views). Older videos keep their last stored
+      // counts.
+      const rssByVideoIdLatest = new Map(uploads.map((u) => [u.videoId, u]));
+      const enrichedNew = newVideos.map((v) => {
+        const rss = rssByVideoIdLatest.get(v.videoId) || v;
+        return {
+          videoId: v.videoId,
+          title: v.title,
+          publishedAt: v.published,
+          thumbnail: v.thumbnail,
+          type: classifyVideo(v),
+          link: v.link,
+          views: v.views || '0',
+          likes: rss.likes != null ? String(rss.likes) : '0',
+          dislikes: rss.dislikes != null ? String(rss.dislikes) : '0',
+        };
+      });
 
       const updatedRecent = [...enrichedNew, ...refreshedPrev].slice(0, 15);
       await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent);
