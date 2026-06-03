@@ -11,11 +11,24 @@ import {
   ActivityIndicator,
   AppState,
 } from 'react-native';
+import { SvgXml } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
 import { fetchFeed, markSeen, getDeviceId } from '../utils/api';
+
+const THUMB_UP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7 22V11" />
+  <path d="M3 11h4v11H3z" />
+  <path d="M7 11l4.5-8.5c.6-.1 1.2.1 1.6.5.4.5.5 1.1.4 1.7L12.5 9H20c.8 0 1.5.7 1.5 1.5l-1.5 9c-.1.7-.7 1.2-1.4 1.2H7" />
+</svg>`;
+
+const THUMB_DOWN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="rotate(180 12 12)">
+  <path d="M7 22V11" />
+  <path d="M3 11h4v11H3z" />
+  <path d="M7 11l4.5-8.5c.6-.1 1.2.1 1.6.5.4.5.5 1.1.4 1.7L12.5 9H20c.8 0 1.5.7 1.5 1.5l-1.5 9c-.1.7-.7 1.2-1.4 1.2H7" />
+</svg>`;
 
 export default function HomeScreen({ navigation }) {
   const [channels, setChannels] = useState([]);
@@ -390,6 +403,15 @@ export default function HomeScreen({ navigation }) {
     return `${n} views`;
   };
 
+  // For likes/dislikes: just the compact number, no "views" suffix
+  const formatCount = (n) => {
+    const num = parseInt(n, 10);
+    if (isNaN(num)) return '';
+    if (num >= 1000000) return `${(num / 1000000).toFixed(1).replace(/\.0$/, '')}M`;
+    if (num >= 1000) return `${(num / 1000).toFixed(1).replace(/\.0$/, '')}K`;
+    return `${num}`;
+  };
+
   const renderChannel = ({ item }) => {
     const cached = cache[item.handle];
     const hasNew = isNew(item.handle);
@@ -501,10 +523,10 @@ export default function HomeScreen({ navigation }) {
                   <View style={styles.videoMeta}>
                     <Text style={styles.timeAgo}>{video.published ? timeAgo(video.published) : ''}</Text>
                     {video.likes && video.likes !== '0' && (
-                      <Text style={styles.timeAgo}>{"\u00B7 "}👍︎ {formatViews(video.likes)}</Text>
+                      <Text style={styles.timeAgo}>{"\u00B7 "}<SvgXml xml={THUMB_UP_SVG} width={12} height={12} /> {formatCount(video.likes)}</Text>
                     )}
                     {video.dislikes && video.dislikes !== '0' && (
-                      <Text style={styles.timeAgo}>{"\u00B7 "}👎︎ {formatViews(video.dislikes)}</Text>
+                      <Text style={styles.timeAgo}>{"\u00B7 "}<SvgXml xml={THUMB_DOWN_SVG} width={12} height={12} /> {formatCount(video.dislikes)}</Text>
                     )}
                     {video.views && video.views !== '0' && (
                       <Text style={styles.timeAgo}>{"\u00B7 "}{formatViews(video.views)}</Text>

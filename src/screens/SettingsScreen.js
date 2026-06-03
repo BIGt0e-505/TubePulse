@@ -137,12 +137,12 @@ export default function SettingsScreen() {
       )}
 
       {/* Prewarn time for scheduled livestreams */}
-      <Text style={styles.sectionTitle}>Prewarn time</Text>
-      <View style={styles.optionGroup}>
+      <Text style={styles.sectionTitle}>Live stream prewarn time</Text>
+      <View style={styles.optionGroupNarrow}>
         {PREWARN_OPTIONS.map(({ label, value }) => (
           <TouchableOpacity
             key={value}
-            style={[styles.option, settings.prewarnMinutes === value && styles.optionActive]}
+            style={[styles.optionNarrow, settings.prewarnMinutes === value && styles.optionActive]}
             onPress={() => updateSetting('prewarnMinutes', value)}
           >
             <Text style={[styles.optionText, settings.prewarnMinutes === value && styles.optionTextActive]}>
@@ -227,9 +227,23 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 6,
   },
+  optionGroupNarrow: {
+    flexDirection: 'row',
+    gap: 4,
+  },
   option: {
     flex: 1,
     minWidth: 60,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  optionNarrow: {
+    flex: 1,
     paddingVertical: 9,
     borderRadius: 8,
     backgroundColor: COLORS.surface,
