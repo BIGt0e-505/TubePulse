@@ -11,6 +11,7 @@ import { getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCac
 import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNotificationOpenedApp, getInitialNotification, setBackgroundMessageHandler } from './src/utils/fcm';
 import { registerDevice, markSeen, getDeviceId, subscribeChannel, updateSettings, bootstrapChannel } from './src/utils/api';
 import { setupNotificationChannel } from './src/utils/notifications';
+import { ConfirmHost } from './src/components/Confirm';
 
 const Stack = createNativeStackNavigator();
 
@@ -366,6 +367,10 @@ export default function App() {
           <Stack.Screen name="Settings" component={SettingsScreen} />
         </Stack.Navigator>
       </NavigationContainer>
+      {/* ConfirmHost is a global modal host. Any `confirm()` call from
+          anywhere in the app will resolve here, drawing the themed
+          ConfirmDialog above whatever screen is currently visible. */}
+      <ConfirmHost />
     </GestureHandlerRootView>
   );
 }

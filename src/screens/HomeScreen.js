@@ -497,11 +497,17 @@ export default function HomeScreen({ navigation }) {
                 <Text style={[styles.videoTitle, !isSeen && { color: COLORS.text, fontWeight: 'bold' }]} numberOfLines={2}>
                   {video.title}
                 </Text>
-                {(video.published || video.views) && (
+                {(video.published || video.views || video.likes || video.dislikes) && (
                   <View style={styles.videoMeta}>
                     <Text style={styles.timeAgo}>{video.published ? timeAgo(video.published) : ''}</Text>
+                    {video.likes && video.likes !== '0' && (
+                      <Text style={styles.timeAgo}>{"\u00B7 "}👍︎ {formatViews(video.likes)}</Text>
+                    )}
+                    {video.dislikes && video.dislikes !== '0' && (
+                      <Text style={styles.timeAgo}>{"\u00B7 "}👎︎ {formatViews(video.dislikes)}</Text>
+                    )}
                     {video.views && video.views !== '0' && (
-                      <Text style={styles.timeAgo}>{formatViews(video.views)}</Text>
+                      <Text style={styles.timeAgo}>{"\u00B7 "}{formatViews(video.views)}</Text>
                     )}
                   </View>
                 )}

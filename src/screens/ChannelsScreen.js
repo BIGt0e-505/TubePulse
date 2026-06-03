@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
@@ -27,6 +26,7 @@ import {
 import { resolveHandle, subscribeChannel, unsubscribeChannel, registerDevice, getDeviceId, setChannelOverride, bootstrapChannel } from '../utils/api';
 import { getFCMToken } from '../utils/fcm';
 import TimeSpinner from '../components/TimeSpinner';
+import { confirm } from '../components/Confirm';
 
 // Default per-channel settings (mirrors global defaults)
 const DEFAULT_CHANNEL_NOTIF = {
@@ -255,33 +255,28 @@ export default function ChannelsScreen() {
   };
 
   const removeChannel = (handle) => {
-    Alert.alert(
-      'Remove channel',
-      `Remove @${handle} from your list?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: async () => {
-            const removed = channels.find((c) => c.handle === handle);
-            const updated = channels.filter((c) => c.handle !== handle);
-            await saveChannels(updated);
-            setChannels(updated);
+    confirm({
+      title: 'Remove channel',
+      message: `Remove @${handle} from your list?`,
+      confirmText: 'Remove',
+      destructive: true,
+    }).then(async (ok) => {
+      if (!ok) return;
+      const removed = channels.find((c) => c.handle === handle);
+      const updated = channels.filter((c) => c.handle !== handle);
+      await saveChannels(updated);
+      setChannels(updated);
 
-            // Unsubscribe from server
-            try {
-              const deviceId = await getDeviceId();
-              if (removed?.channelId) {
-                await unsubscribeChannel(deviceId, removed.channelId);
-              }
-            } catch (e) {
-              console.warn('Failed to unsubscribe from server:', e);
-            }
-          },
-        },
-      ]
-    );
+      // Unsubscribe from server
+      try {
+        const deviceId = await getDeviceId();
+        if (removed?.channelId) {
+          await unsubscribeChannel(deviceId, removed.channelId);
+        }
+      } catch (e) {
+        console.warn('Failed to unsubscribe from server:', e);
+      }
+    });
   };
 
   const onDragEnd = async ({ data }) => {
