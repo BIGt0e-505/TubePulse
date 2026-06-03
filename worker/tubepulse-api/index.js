@@ -1113,7 +1113,7 @@ async function handleSeen(request, env) {
  * @param {boolean} globalInclude — global setting from deviceSettings
  * @returns {Promise<Array>}
  */
-async function getFeedPostsForChannel(channelId, deviceId, globalInclude) {
+async function getFeedPostsForChannel(env, channelId, deviceId, globalInclude) {
   // Per-channel override takes precedence. If the user has explicitly
   // set it (true or false), use that. Otherwise fall back to the global.
   const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
@@ -1164,7 +1164,7 @@ async function handleFeed(request, env) {
 
     // Posts: empty array when disabled at both global and per-channel level.
     // getFeedPostsForChannel handles the override-precedence logic.
-    const posts = await getFeedPostsForChannel(channelId, deviceId, globalIncludePosts);
+    const posts = await getFeedPostsForChannel(env, channelId, deviceId, globalIncludePosts);
 
     return {
       channelId,
