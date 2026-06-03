@@ -204,43 +204,43 @@ After all four commits:
   (commit `5043c69`, on `master`, unbuilt at time of writing)
   - New `src/components/ConfirmDialog.js`
   - Replaces `Alert.alert` in `ChannelsScreen.removeChannel`
-- [ ] Commit 3: Community posts
+- [x] Commit 3: Community posts — **DONE** (commit `3630a80`,
+  on `master`, server unbuilt and unbuilt-and-undeployed at time of
+  writing; server changes need to be deployed and the app needs to
+  be built + installed before end-to-end testing)
+  - **Server**: `runCommunityPostsCron` wired into the hourly tick,
+      adds `post:{activityId}` entries to each subscriber's
+      deviceState.unwatched list (so posts are first-class for
+      new/seen, sharing the array with videos), respects the global
+      `includeCommunityPosts` setting in addition to the per-channel
+      override. `/feed` returns `posts: [...]` per channel with each
+      post carrying an `unwatched` flag. Post IDs go through `/seen`
+      the same way video IDs do (string match, namespaced).
+  - **App**: SettingsScreen toggle enabled. HomeScreen renders post
+      rows with thumbnail or speech-bubble placeholder, "Posts"
+      mini-header, blue dot driven by `post.unwatched`. Channel
+      "isNew" considers both videos and posts. Per-channel modal
+      gets a tri-state picker (Global / On / Off). App.js handles
+      post-push taps by marking the post seen and opening the
+      YouTube community tab.
 - [ ] Commit 4: Prewarn time
 - [ ] Build and release v3.1.0
 
-### Commit 3 sub-progress (in flight, uncommitted at time of writing)
+### Commit 3 follow-ups (post-deploy)
 
-- [x] Server cron: `runCommunityPostsCron` polls
-      `activities.list` hourly per active channel, captures posts
-      (text/image/poll), first-run guard, fires FCM to subscribers
-      that haven't opted out at the channel level. **Uncommitted in
-      working tree** of `worker/tubepulse-cron/index.js`.
-- [x] Server API: `getFeedPostsForChannel` helper + `posts: []`
-      field in `/feed` response. Per-channel override
-      (`includeCommunityPosts: true|false`) takes precedence over
-      global `includeCommunityPosts` setting. **Uncommitted in
-      working tree** of `worker/tubepulse-api/index.js`. Note: the
-      initial helper commit only added the helper; the `posts` field
-      is wired into the `handleFeed` response as part of the app-side
-      work in this commit.
-- [x] App: `includeCommunityPosts` toggle enabled in SettingsScreen
-      (was `disabled` with "Coming soon" subtitle). **Uncommitted.**
-- [x] App: Post rendering in HomeScreen — post row with image
-      thumbnail OR speech-bubble placeholder (greyscale shrunk channel
-      avatar inside rounded-rect bubble with a small triangular tail),
-      "Posts" mini-header above the post group, blue dot for unseen
-      posts (local-only seen tracking via `post:{activityId}` in the
-      seenIds list — server doesn't yet have a mark-seen endpoint for
-      posts), taps open the community tab on YouTube.
-      **Uncommitted.**
-- [x] App: Per-channel post opt-out in ChannelsScreen modal — tri-state
-      picker (Global / On / Off). "Global" leaves the field out of the
-      override payload (inherit). "On" sets `includeCommunityPosts:
-      true`. "Off" sets `includeCommunityPosts: false`. Server already
-      supports all three states. **Uncommitted.**
-- [ ] **Server: commit the worker changes** (cron + API) and deploy.
-- [ ] **App: build v3.1.0-rc APK with the SettingsScreen toggle,
-      HomeScreen post cards, and per-channel modal picker, and test
-      end-to-end** (add a channel, wait for posts cron, verify push
-      arrives, tap into YouTube community tab, verify the per-channel
-      Off override hides posts in the feed).
+- [ ] Deploy the cron and API worker changes to Cloudflare.
+- [ ] Build v3.1.0-rc APK and test on a real device:
+      - Add a channel, wait for the hourly posts cron to fire,
+        verify a push arrives.
+      - Open the app, verify the post shows in the feed with a blue
+        dot.
+      - Tap the post, verify it opens the YouTube community tab and
+        the blue dot clears.
+      - Set the global `includeCommunityPosts` toggle off, verify
+        posts disappear from the feed.
+      - Set the per-channel "Off" override, verify posts are hidden
+        for that channel only.
+- [ ] **Known limitation**: posts do not enter the nag cycle — only
+      the initial push fires, no 4-hour reminders. Plan did not
+      require it; adding it would need a parallel nag bucket and FCM
+      payload differentiation. Flagged for v3.2.
