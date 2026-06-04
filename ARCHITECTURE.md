@@ -1,7 +1,7 @@
 # TubePulse — Architecture Specification
 
-**Version:** v3.0 (as shipped)
-**Date:** 2026-04-19 (initial), updated 2026-06-02
+**Version:** v3.1 (superset of v3.0 — this spec covers the v3.0 base; v3.1 deltas are summarised in §13)
+**Date:** 2026-04-19 (initial), updated 2026-06-02 (v3.0), 2026-06-04 (v3.1 delta)
 **Status:** Live — matches deployed code
 
 ---
@@ -635,6 +635,57 @@ Workers update this key in batches (e.g. flushed every 5 minutes from worker mem
 - Logging format (be consistent, but use whatever)
 
 These can vary with implementation and will appear in the codebase as they're built.
+
+---
+
+## 14. v3.1 deltas (2026-06-04)
+
+v3.1 is a strict superset of v3.0 — the channel-first, zero-`KV.list()`, time-bucket architecture in §§1-12 is unchanged. The following sections were added or modified for the v3.1 release. For full design notes see [PLAN_v3.1.md](PLAN_v3.1.md); for the current shipping state see [STATUS.md](STATUS.md).
+
+### 14.1 Likes + dislikes
+
+- **RSS parser** in both workers extracts `media:starRating/@_count` (likes) and `media:statistics/@_dislikes` into the recent list and per-video state. Dislike counts from YouTube's public feed are zeroed out for almost all videos since Nov 2021 — captured for completeness, expected to be `0`.
+- **Throttle**: same hourly top-of-list policy as view counts (§6.4 in [worker/README.md](worker/README.md)), but likes/dislikes write on **any change** (not the 5% threshold for views), since they're useful at any scale.
+- **Backfill**: videos with `likes: 0, dislikes: 0` from pre-v3.1.1 are refreshed within an hour of the v3.1.1 deploy, the first time their channel's top video's metrics change.
+- **App**: HomeScreen meta row now renders `age · likes · dislikes · views` with greyscale outline thumb icons (U+FE0E text-presentation + `COLORS.textDim` color). Zero values are skipped to keep the row tight.
+
+### 14.2 Community posts
+
+- **New KV key** `channel:{channelId}:recent:posts` — last 30 posts: `{ activityId, kind, text, thumbnail, link, publishedAt }`.
+- **New KV key** `channel:{channelId}:firstPollAt:posts` — ISO timestamp of the first posts-cron run, drives the first-run guard (populate recent without notifying on first install or feature enable).
+- **New cron job** `runCommunityPostsCron` — `mins === 0` (every hour). Polls YouTube Data API `activities.list` for each channel in `channels:active`. ~1 unit/channel/hour.
+- **First-run guard**: on first poll for a channel, recent list is populated but no pushes fire. Subsequent polls notify on genuinely new posts.
+- **Post IDs share `device:{id}:state:{channelId}.unwatched` with videos** via the `post:{activityId}` namespace — no separate state array, no separate seen endpoint, `/seen` accepts the namespaced IDs transparently.
+- **Settings**:
+  - Global `includeCommunityPosts` (boolean, default off, v3.1+). Toggled on in SettingsScreen.
+  - Per-channel `includeCommunityPosts` override (tri-state null/true/false) — null inherits global.
+- **App**: new post card in HomeScreen with thumbnail (or speech-bubble placeholder for text-only posts). "Posts" mini-header above post cards. Post tap → mark seen + open community tab.
+- **Posts do NOT enter the nag cycle** — only the initial push fires. The plan did not require post nagging; adding it would need a parallel nag bucket and FCM payload differentiation. Flagged for v3.2.
+
+### 14.3 Prewarn for scheduled livestreams
+
+- **New KV key** `upcoming:events:list` — JSON array of currently-scheduled live events `{ channelId, videoId, scheduledFor, addedAt }`. Replaces the pre-v3.1 `upcoming:{bucket}` scheme.
+- **New KV key** `upcoming:prewarn:{videoId}:{deviceId}` — set to the prewarnMinutes value when a prewarn push has been sent for that (event, device). Acts as a sentinel to prevent double-send.
+- **New cron job** `runPrewarnCron` — every 5 min. Iterates `upcoming:events:list`, computes the per-device prewarn time (per-channel override → global setting → default 60 min), fires an FCM push if the window is open. Events pruned 24 h after `scheduledFor` along with their sent keys.
+- **Repurposed** `runUpcomingCron` is now a **drain-only** job — reads the current `upcoming:{bucket}` and deletes it. This clears any pre-v3.1 bucket entries on the first tick after upgrade so the old "going live in 30 minutes" / "is live now!" pushes cannot fire for events scheduled before the upgrade.
+- **Design**: the prewarn is the heads-up; the regular new-video push at live time is the "this just appeared" notification. There is no separate "is live now!" push. `type: 'live'` videos bypass DND by default.
+- **Settings**:
+  - Global `prewarnMinutes` (default 60, options 15/30/60/120/240/1440). 6-option picker in SettingsScreen.
+  - Per-channel `prewarnMinutes` override (tri-state null/number) — null inherits global.
+- **App**: prewarn push tap opens the YouTube watch URL for the scheduled video. The video is **not** marked as seen on tap — the prewarn is a reminder, the live-time push will still fire later.
+
+### 14.4 Custom ConfirmDialog
+
+- New `src/components/ConfirmDialog.js` — themed modal with dark backdrop, `COLORS.surface` card, `COLORS.danger` destructive button.
+- New `src/components/Confirm.js` — promise-based `confirm({ title, message, confirmText, cancelText, destructive })` helper. Singleton state; reentrant calls queue (replace current prompt).
+- Replaces `Alert.alert` for the channel-removal flow in `ChannelsScreen.removeChannel`. `App.js` mounts `<ConfirmHost />` inside `GestureHandlerRootView` (after the `NavigationContainer`) so the dialog can overlay any screen.
+- Pure UI change, no server work, no new dependencies.
+
+### 14.5 v3.1.1 bug fixes (shipped post-v3.1.0)
+
+- **API `getFeedPostsForChannel` env bug**: the function was defined without an `env` parameter but referenced `env.TUBEPULSE_KV` inside, throwing `ReferenceError: env is not defined` on every `/feed` call. Fixed in commit `f985845` — the function now takes `env` as the first parameter, matching every other KV-touching helper.
+- **Cron RSS likes/dislikes wiring**: the v3.1.0 likes/dislikes commit only modified the API's WebSub path. The cron's RSS parser (the actual hot path for new-video detection) never got `media:community` extraction, so all v3.1.0 videos had `likes: 0, dislikes: 0` stored. Fixed in commit `a4cc838` — `parseRSSFeed` now extracts likes/dislikes and the new-video enrichment writes them into `channel:{id}:recent` alongside views.
+- **ConfirmDialog wiring**: v3.1.0 created the `ConfirmDialog` component but never wired it up. `ChannelsScreen.removeChannel` still called `Alert.alert` and `App.js` never mounted `<ConfirmHost />`. Fixed in `a4cc838` — `removeChannel` now uses `confirm({ destructive: true })` and `App.js` mounts the host.
 
 ---
 

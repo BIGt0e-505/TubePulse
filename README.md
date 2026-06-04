@@ -30,7 +30,7 @@ TubePulse detects new uploads via a **YouTube RSS feed poller** running on a Clo
 - **RSS-based polling** — cron hits `https://www.youtube.com/feeds/videos.xml?channel_id=...` every 5 min for every channel with at least one subscriber
 - **Zero YouTube Data API quota cost** — RSS is a free public feed
 - **Latency** — up to 5 min between upload and detection
-- **Includes view counts, likes & dislikes** — RSS carries `media:community/media:statistics` so we get all three engagement metrics at no extra cost
+- **Includes view counts, likes & dislikes** — RSS carries `media:statistics/@_views`, `media:starRating/@_count` (likes), and `media:statistics/@_dislikes` (usually `0` since YouTube removed public dislike counts in Nov 2021, but the field is still captured)
 - **The YouTube Data API is reserved for subscribe-time only** — handle→channelId resolve (1 unit, cached 7 days) and avatar fetch (1 unit per new channel, cached forever). The community-posts polling in v3.1 is the only other API consumer (1 unit/channel/hour, ~100 units/day for 4 channels).
 
 **WebSub (dormant):** the `/websub` endpoints and handler code remain in the workers for:
@@ -58,7 +58,7 @@ TubePulse's notification system is built around **nagging**, not polling. You co
 - **Chill mode** (default) — notify once, then nudge every 4 hours until you watch it
 - **Relentless mode** — re-nag every nag interval until you watch the video
 - **Per-channel overrides** — set different notification modes, DND, prewarn time, and post opt-out per creator
-- **DND scheduling** — blocks all pushes during custom silent hours (default 22:00–07:00). Videos that arrive during DND are held and delivered when DND ends by the nag cycle.
+- **DND scheduling** — blocks non-livestream pushes during custom silent hours (default 22:00–07:00). Livestreams (`type: 'live'`) bypass DND by default; regular new-video, prewarn, and post pushes respect DND unless the per-channel override sets `dndBypass: true`. Videos that arrive during DND are held and delivered when DND ends by the nag cycle.
 - **DND batching** — when DND ends and multiple unwatched videos are pending for the same channel, TubePulse sends a single per-channel summary (e.g. `ChannelName - 3 unwatched`) instead of flooding you with individual notifications. The batch groups by channel — you'll get one notification per channel with its unwatched count, not one per video.
 
 When the RSS poller detects a new video (every 5 min), TubePulse immediately notifies all eligible devices (unless DND is active). The nag cycle then handles re-notifications on the user's chosen schedule.
@@ -129,7 +129,7 @@ The central Cloudflare Worker. Handles:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/register` | POST | Register/update device profile. `fcmToken` is optional (null accepted since v3.0.14.1, so a user who denied notification permission can still subscribe channels and use the app). Idempotent — safe to call on every launch and on FCM token refresh. |
+| `/register` | POST | Register/update device profile. `fcmToken` is optional (null accepted so a user who denied notification permission can still subscribe channels and use the app). Idempotent — safe to call on every launch and on FCM token refresh. |
 | `/subscribe-channel` | POST | Add a channel to this device. Triggers Data API avatar fetch (one-time, cached forever) + RSS bootstrap for the recent list. |
 | `/unsubscribe` | POST | Remove a channel from this device. Removes the device from the channel's subscriber list; if the subscriber list goes empty, the channel is removed from the `channels:active` index. |
 | `/seen` | POST | Mark videos/posts as watched. `{ channelId, ids: [videoId, "post:activityId", ...] }` for taps, `{ channelId, clearAll: true }` for channel-tap. Post IDs are namespaced with `post:` so they share the `deviceState.unwatched` array with videos without collision. |
@@ -166,7 +166,7 @@ Iterates `upcoming:events:list` and fires per-device "going live soon" pushes wh
 
 #### Job 3: YouTube RSS Polling — **active new-video detection**
 
-Iterates `channels:active` and fetches `https://www.youtube.com/feeds/videos.xml?channel_id=...` for each. Parses the Atom feed (videoId, title, publishedAt, thumbnail, link, **views** + **likes** + **dislikes** from `media:community/media:statistics`). Diffs against `channel:{channelId}:recent` to find new videoIds. For each new video, looks up subscribers and writes an entry to the API Worker for fan-out to FCM.
+Iterates `channels:active` and fetches `https://www.youtube.com/feeds/videos.xml?channel_id=...` for each. Parses the Atom feed (videoId, title, publishedAt, thumbnail, link, **views** from `media:community/media:statistics/@_views`, **likes** from `media:starRating/@_count`, **dislikes** from `media:statistics/@_dislikes`). Diffs against `channel:{channelId}:recent` to find new videoIds. For each new video, looks up subscribers and writes an entry to the API Worker for fan-out to FCM.
 
 For `type: 'live_scheduled'` entries: append to `upcoming:events:list` (so the prewarn cron can iterate them) but do not write to the `upcoming:` bucket and do not fire any push immediately. The prewarn and live-time pushes are handled separately.
 
@@ -201,7 +201,7 @@ WebSub subscriptions would expire (typically 4–10 days) if active. Currently a
 | `channel:{channelId}:meta` | Channel name, avatarUrl, lastVideoId, addedAt |
 | `channel:{channelId}:subscribers` | Array of deviceIds tracking this channel |
 | `channel:{channelId}:websub` | WebSub state: leaseExpiresAt, hmacSecret, lastVerified (dormant — no longer used) |
-| `channel:{channelId}:recent` | Last 15 videos: videoId, title, publishedAt, type, thumbnail, link, **views** + **likes** + **dislikes** (from RSS `media:statistics`), **viewsLastCheckedHour** (wall-clock hour of last engagement-metric refresh) |
+| `channel:{channelId}:recent` | Last 15 videos: videoId, title, publishedAt, type, thumbnail, link, **views** (from RSS `media:statistics/@_views`), **likes** (from `media:starRating/@_count`), **dislikes** (from `media:statistics/@_dislikes`), **viewsLastCheckedHour** (wall-clock hour of last engagement-metric refresh) |
 | `channel:{channelId}:recent:posts` | Last 30 community posts: activityId, kind, text, thumbnail, link, publishedAt |
 | `channel:{channelId}:firstPollAt:posts` | ISO timestamp of first posts-cron run for this channel (drives the first-run guard) |
 | `device:{deviceId}:profile` | fcmToken (nullable), platform, appVersion, createdAt, lastSeenAt |
@@ -309,7 +309,8 @@ TubePulse/
 │   │   ├── TubePulseWidget.js     # Android home screen widget
 │   │   ├── widgetTaskHandler.js   # Widget render handler — reads from AsyncStorage
 │   │   ├── TimeSpinner.js         # DND time picker
-│   │   └── ConfirmDialog.js       # Custom themed confirmation dialog (v3.1, replaces Alert.alert)
+│   │   ├── ConfirmDialog.js       # Themed modal dialog (v3.1, replaces Alert.alert)
+│   │   └── Confirm.js             # Promise-based confirm({...}) helper that renders ConfirmDialog (v3.1)
 │   ├── utils/
 │   │   ├── api.js                 # REST client for the Cloudflare Worker (v3 endpoints)
 │   │   ├── notifications.js       # Android notification channels
@@ -354,7 +355,7 @@ TubePulse/
 | `dndEnabled` | boolean | false | Block all notifications during DND hours |
 | `dndStart` | HH:MM | 22:00 | DND start time |
 | `dndEnd` | HH:MM | 07:00 | DND end time |
-| `dndTimezone` | IANA tz string | device's local tz | IANA timezone used to evaluate DND (e.g. `Europe/London`). Without this, the worker would evaluate DND in UTC and notifications would fire at the wrong local time. Sent automatically by the app via `getLocalTimezone()`. |
+| `dndTimezone` | IANA tz string | `UTC` | IANA timezone used to evaluate DND (e.g. `Europe/London`). The shipped `DEFAULT_SETTINGS` is `'UTC'`; the app overrides this on first launch via `getLocalTimezone()` (Intl API) and sends it to the server on every `/register` and `/settings`, so by the time DND is actually checked the device's local zone is in use. Without this, the worker would evaluate DND in UTC and notifications would fire at the wrong local time. |
 | `perChannelNotifications` | boolean | false | Enable per-channel notification overrides |
 | `includeCommunityPosts` | boolean | false | Show channel community posts in your feed (v3.1) |
 | `prewarnMinutes` | 15 / 30 / 60 / 120 / 240 / 1440 | 60 | How early to fire a prewarn push before a scheduled livestream (v3.1) |

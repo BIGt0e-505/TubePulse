@@ -37,9 +37,11 @@ This document describes the TubePulse backend: the two Cloudflare Workers, the C
 
 | Component | URL | Purpose |
 |-----------|-----|---------|
-| `tubepulse-api` | `https://tubepulse-api.jimothyoakley55.workers.dev` | HTTP API for the app + dormant WebSub callback |
-| `tubepulse-cron` | `https://tubepulse-cron.jimothyoakley55.workers.dev` | Scheduled jobs (every 5 min): upcoming events, RSS poll, nag cycle |
+| `tubepulse-api` | n/a — no public route | HTTP API for the app + dormant WebSub callback (callable from cron via service binding or `wrangler dev` only) |
+| `tubepulse-cron` | n/a — scheduled trigger only | Scheduled jobs (every 5 min): upcoming-events drain, prewarn, RSS poll, community posts, nag cycle, WebSub lease renewal |
 | `TUBEPULSE_KV` | KV namespace `52e77ca9f5f6493e89d2478c8d3055ec` | All persistent state |
+
+> **Note:** Both workers are deployed but have no public HTTP routes. `tubepulse-cron` is scheduled-trigger only; `tubepulse-api` has `routes = []` in `wrangler.toml`. The `*.workers.dev` URLs listed in older docs are no longer reachable. The API is callable from the cron worker via a service binding (when configured) or directly via `wrangler dev` / `wrangler tail`.
 
 The two workers share the **same KV namespace** so they can read each other's writes. The cron writes `channel:{id}:recent` and `channel:{id}:meta`; the API reads them when serving `/feed`.
 
@@ -59,18 +61,20 @@ Both workers use the same KV namespace, so the cron can write state that the API
 
 ## 3. The cron worker
 
-`worker/tubepulse-cron/index.js` — deployed via `wrangler deploy` in `worker/tubepulse-cron/`.
+`worker/tubepulse-cron/index.js` — deployed via `wrangler deploy` in `worker/tubepulse-cron/`. **1503 lines** as of v3.1.6.
 
 **Schedule:** `*/5 * * * *` (every 5 minutes), configured in `wrangler.toml`.
 
-The worker has **one** `scheduled()` handler that dispatches to four jobs based on the current minute:
+The worker has **one** `scheduled()` handler that dispatches to six jobs based on the current minute:
 
-| Job | Trigger | Function | What it does |
-|-----|---------|----------|--------------|
-| 1. Upcoming events | every 5 min | `runUpcomingCron` | Reads `upcoming:{bucket}` for the current 5-min window. Fires "live soon" and "is live" FCM pushes for scheduled livestreams. |
-| 2. RSS poll | every 5 min | `runRssPollCron` | Reads `channels:active`, fetches RSS feed for each channel, diffs against `channel:{id}:recent`. New videos → FCM fan-out. |
-| 3. Nag cycle | every 15 min | `runNagCron` | Reads `nag:{bucket}` for the current 15-min window. Re-notifies devices about unwatched videos per their nag settings. |
-| 4. Lease renewal | every 6 hours | `runLeaseCron` | **Dormant no-op** — Google's PubSubHubbub hub was shut down in 2024. Code path remains for future revival. |
+| # | Job | Trigger | Function | What it does |
+|---|-----|---------|----------|--------------|
+| 1 | Upcoming-events drain | every 5 min | `runUpcomingCron` | Reads `upcoming:{bucket}` for the current 5-min window and deletes it. **Drain-only since v3.1** — clears any pre-v3.1 bucket entries so the old "going live in 30 minutes" / "is live now!" pushes cannot fire for events scheduled before the upgrade. No new pushes are written to buckets. |
+| 2 | Prewarn (v3.1) | every 5 min | `runPrewarnCron` | Iterates `upcoming:events:list` and fires a per-device "going live soon" FCM push when each device's prewarn window opens. The prewarn offset is per-device: per-channel override → global setting → default 60 min. Sent state tracked in `upcoming:prewarn:{videoId}:{deviceId}` to prevent double-send. Events pruned 24 h after `scheduledFor`. |
+| 3 | RSS poll | every 5 min | `runRssPollCron` | Reads `channels:active`, fetches the RSS feed for each channel, diffs against `channel:{id}:recent`. New videos → FCM fan-out. **Active new-video detection path** since the 2024 WebSub hub shutdown. |
+| 4 | Community posts (v3.1) | every hour (`mins === 0`) | `runCommunityPostsCron` | Polls YouTube Data API `activities.list` for each channel in `channels:active`. Captures text, image, and poll community posts. First-run guard populates the recent list without firing notifications. Cost: ~1 unit/channel/hour. |
+| 5 | Nag cycle | every 15 min | `runNagCron` | Reads `nag:{bucket}` for the current 15-min window. Re-notifies devices about unwatched videos per their nag settings. Posts do not enter the nag cycle. |
+| 6 | Lease renewal | every 6 h | `runLeaseCron` | **Dormant no-op** — Google's PubSubHubbub hub was shut down in 2024. Code path remains for future revival. |
 
 ### 3.1 RSS poll — the active new-video detection path
 
@@ -80,7 +84,7 @@ Since WebSub hub shutdown, the cron detects new videos by polling YouTube's publ
 https://www.youtube.com/feeds/videos.xml?channel_id=UCxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Each entry in the Atom feed carries: `videoId`, `title`, `publishedAt`, `thumbnail`, `link`, and **view count** (from `media:community/media:statistics/@_views`).
+Each entry in the Atom feed carries: `videoId`, `title`, `publishedAt`, `thumbnail`, `link`, **view count** (from `media:community/media:statistics/@_views`), **like count** (from `media:starRating/@_count`), and **dislike count** (from `media:statistics/@_dislikes` — usually `0` for public videos since YouTube removed public dislike counts in Nov 2021; the field is still captured for completeness).
 
 **Flow per channel per tick:**
 
@@ -93,7 +97,7 @@ Each entry in the Atom feed carries: `videoId`, `title`, `publishedAt`, `thumbna
    - For new videos: write updated `channel:{id}:recent` and `channel:{id}:meta`, then look up subscribers and fan out FCM pushes
 3. Truncate `recent` to 15 entries
 
-**Quota cost: 0 YouTube Data API units.** RSS is a free public feed. Cloudflare KV cost: ~1 read per channel per tick, with writes only when a new video is detected or a view count crosses the 5% threshold (see §6.4 below).
+**Quota cost: 0 YouTube Data API units.** RSS is a free public feed. Cloudflare KV cost: ~1 read per channel per tick, with writes only when a new video is detected, when engagement metrics cross their threshold, or when the top-of-hour top-of-list view refresh runs (see §6.4 below).
 
 ### 3.2 FCM push from the cron
 
@@ -111,41 +115,41 @@ For each new video, the cron does the standard fan-out (which is identical to wh
 
 ## 4. The API worker
 
-`worker/tubepulse-api/index.js` — deployed via `wrangler deploy` in `worker/tubepulse-api/`.
+`worker/tubepulse-api/index.js` — deployed via `wrangler deploy` in `worker/tubepulse-api/`. **1774 lines** as of v3.1.6 (matches `wc -l worker/tubepulse-api/index.js`).
 
-**No schedule** — pure HTTP. The single entry point is `fetch(request, env, ctx)`, which routes by `path` and `request.method`.
+**No public route, no schedule** — the worker is reachable only from within the Cloudflare account (via service binding from the cron, or via `wrangler dev` / `wrangler tail`). The single entry point is `fetch(request, env, ctx)`, which routes by `path` and `request.method`. The `routes = []` line in `tubepulse-api/wrangler.toml` disables the public HTTP route by design.
 
 ### 4.1 Endpoint map
 
-| Method | Path | Auth | Function | Purpose |
-|--------|------|------|----------|---------|
-| `GET`  | `/` | none | `handleRoot` | Health check (returns version + architecture) |
-| `POST` | `/register` | Bearer | `handleRegister` | Create/update device profile (FCM token optional) |
-| `POST` | `/subscribe-channel` | Bearer | `handleSubscribeChannel` | Add a channel, fetch its avatar via Data API, fan-out RSS bootstrap |
-| `POST` | `/unsubscribe` | Bearer | `handleUnsubscribe` | Remove a channel, clean up subscriber list and active index |
-| `POST` | `/seen` | Bearer | `handleSeen` | Mark a video (or all videos on a channel) as watched |
-| `GET`  | `/feed` | Bearer | `handleFeed` | Return recent videos across all subscribed channels |
-| `GET`  | `/resolve` | Bearer | `handleResolve` | `@handle` → channelId (Data API, cached 7 days) |
-| `POST` | `/bootstrap` | Bearer | `handleBootstrap` | On-demand channel meta + recent videos refresh |
-| `POST` | `/settings` | Bearer | `handleSettings` | Update device notification settings |
-| `POST` | `/channel-override` | Bearer | `handleChannelOverride` | Set per-channel notification override |
-| `GET`  | `/websub` | none | `handleWebSubVerification` | WebSub handshake (dormant) |
-| `POST` | `/websub` | HMAC | `handleWebSubPush` | WebSub push delivery (dormant) |
-| `OPTIONS` | * | none | CORS preflight | Allow the Android app to call any path |
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET`  | `/` | none | Health check (inlined — returns `{ status: 'ok', version: '3.0.0', worker: 'tubepulse-api', architecture: 'channel-first' }`). The `version` field is a stale label; bump when changed. |
+| `POST` | `/register` | Bearer | `handleRegister` — create/update device profile (FCM token optional). Two-phase deviceId migration for cross-version upgrades (see §11.1). |
+| `POST` | `/subscribe-channel` | Bearer | `handleSubscribeChannel` — add a channel, fetch its avatar via Data API (first-subscribe only), RSS bootstrap (zero quota) |
+| `POST` | `/unsubscribe` | Bearer | `handleUnsubscribe` — remove a channel, clean up subscriber list and active index, call `cleanupDeadChannel` if the device was the last subscriber |
+| `POST` | `/seen` | Bearer | `handleSeen` — mark videos / posts as watched. `ids: [videoId, "post:activityId", ...]` for individual marks; `clearAll: true` for channel-tap (clears all videos and posts for that channel) |
+| `GET`  | `/feed` | Bearer | `handleFeed` — return recent videos + community posts for all subscribed channels, with per-device `unwatched` flags merged in |
+| `GET`  | `/resolve` | Bearer | `handleResolve` — `@handle` → channelId (Data API, cached 7 days in `handle:*`) |
+| `POST` | `/bootstrap` | Bearer | `handleBootstrap` — on-demand channel meta + recent videos refresh (RSS primary, Data API fallback for the rare unreachable-RSS case) |
+| `POST` | `/settings` | Bearer | `handleSettings` — update device notification settings. Accepts `prewarnMinutes` and `includeCommunityPosts` (v3.1) |
+| `POST` | `/channel-override` | Bearer | `handleChannelOverride` — set per-channel override. Accepts `prewarnMinutes` and `includeCommunityPosts` (v3.1, tri-state null/value) |
+| `GET`  | `/websub` | none | `handleWebSubVerification` — WebSub handshake (dormant) |
+| `POST` | `/websub` | HMAC | `handleWebSubPush` — WebSub push delivery (dormant) |
+| `OPTIONS` | * | none | CORS preflight — allow any path |
 
-**Auth model:** Every authenticated endpoint requires `Authorization: Bearer <deviceId>`. The `deviceId` is a UUID generated on first launch and stored in `AsyncStorage`. There is no login — the deviceId *is* the auth token. This is acceptable because the KV is private and the deviceId is unguessable (UUIDv4).
+**Auth model:** Every authenticated endpoint requires `Authorization: Bearer <deviceId>`. The `deviceId` is a UUID generated on first launch (via `expo-secure-store` since v3.0.20; previously a random UUID, then `Application.getAndroidId()`). There is no login — the deviceId *is* the auth token. This is acceptable because the KV is private and the deviceId is unguessable (UUIDv4 / Android-ID / secure-store UUID).
 
 ### 4.2 Bootstrap-on-subscribe (the most important code path)
 
 When a new device subscribes to a channel, the API worker does **the only work that uses the YouTube Data API at subscribe time**:
 
-1. **Resolve channel via Data API** (`channels.list?part=snippet&forHandle=...` or `forUsername=...`) — 1 quota unit, returns channelId + name + avatar URL in one call
-2. **Fetch recent videos via RSS** — 0 quota units, returns up to 15 videos with view counts
+1. **Resolve channel via Data API** (`channels.list?part=snippet&forHandle=...` or `forUsername=...`) — 1 quota unit, returns channelId + name + avatar URL in one call. Only runs if `meta` is missing.
+2. **Fetch recent videos via RSS** — 0 quota units, returns up to 15 videos with view counts, like counts, and dislike counts (from `media:community`, `media:starRating`, and `media:statistics`)
 3. Cache the channel meta + recent list in KV
 4. Add the channel to `channels:active` (if this device is the first subscriber)
 5. Try a dormant WebSub subscription (no quota cost, just a POST that 404s — kept for future hub revival)
 
-**The YouTube Data API is called twice in the worst case** (resolve + search), but both results are cached: handle→channelId is cached 7 days, channel meta+avatar is cached forever in `channel:{id}:meta`. **After subscribe, the cron takes over and never touches the Data API again.**
+**The YouTube Data API is called at most once per new channel** (the avatar resolve, on the very first subscribe for that channel). After that, all writes to `channel:{id}:meta` and `channel:{id}:recent` come from the cron worker via RSS, which costs 0 quota units.
 
 ### 4.3 WebSub (dormant)
 
@@ -162,16 +166,20 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 | `channel:{channelId}:meta` | JSON | `{ name, avatarUrl, lastVideoId, addedAt, viewsLastCheckedHour? }` | API (subscribe), Cron (new video + view refresh) | API (feed, bootstrap) |
 | `channel:{channelId}:subscribers` | JSON array | `[deviceId, ...]` | API (subscribe, unsubscribe) | Cron (FCM fan-out), API (unsubscribe cleanup) |
 | `channel:{channelId}:websub` | JSON | `{ leaseExpiresAt, hmacSecret, lastVerified }` | API (subscribe, dormant) | (none — never used) |
-| `channel:{channelId}:recent` | JSON array | `[{ videoId, title, publishedAt, thumbnail, type, link, views, viewsLastCheckedHour? }]` | Cron (RSS poll) | API (feed, bootstrap), API (subscribe for first-time populate) |
+| `channel:{channelId}:recent` | JSON array | `[{ videoId, title, publishedAt, thumbnail, type, link, views, likes, dislikes, viewsLastCheckedHour? }]` — **v3.1**: `likes` + `dislikes` extracted from `media:starRating` and `media:statistics` | Cron (RSS poll) | API (feed, bootstrap), API (subscribe for first-time populate) |
+| `channel:{channelId}:recent:posts` | JSON array | `[{ activityId, kind, text, thumbnail, link, publishedAt }, ...]` — last 30 community posts (**v3.1**) | Cron (community posts) | API (feed) |
+| `channel:{channelId}:firstPollAt:posts` | string | ISO timestamp of the first posts-cron run for this channel — drives the first-run guard (**v3.1**) | Cron (community posts) | Cron (community posts) |
 | `device:{deviceId}:profile` | JSON | `{ fcmToken, platform, appVersion, createdAt, lastSeenAt }` | API (register) | API (any auth call), Cron (FCM fan-out) |
-| `device:{deviceId}:settings` | JSON | `{ mode, nagInterval, dndEnabled, dndStart, dndEnd, dndTimezone, dndBypass, tapAction, ... }` | API (settings) | Cron (FCM fan-out filter) |
+| `device:{deviceId}:settings` | JSON | `{ mode, nagInterval, dndEnabled, dndStart, dndEnd, dndTimezone, dndBypass, tapAction, includeCommunityPosts (v3.1), prewarnMinutes (v3.1), ... }` | API (settings) | Cron (FCM fan-out filter) |
 | `device:{deviceId}:channels` | JSON array | `[channelId, ...]` | API (subscribe, unsubscribe) | API (feed filter) |
-| `device:{deviceId}:override:{channelId}` | JSON | per-channel notification override | API (channel-override) | Cron (FCM fan-out filter) |
-| `device:{deviceId}:state:{channelId}` | JSON | `{ unwatched: [videoId], lastNagAt, nagCount }` | Cron (new video, nag fire) | Cron (nag fire, seen cleanup) |
-| `upcoming:{bucket}` | JSON array | scheduled livestream entries | Cron (RSS poll, new video) | Cron (upcoming cron) |
-| `nag:{bucket}` | JSON array | pending nag entries | Cron (nag fire, reschedule) | Cron (nag cron) |
-| `channels:active` | JSON array | `[channelId, ...]` — index of channels with ≥1 subscriber | API (subscribe, unsubscribe) | Cron (RSS poll) |
-| `handle:{lowercase}` | JSON | `{ channelId, cachedAt }` | API (resolve) | API (resolve) |
+| `device:{deviceId}:override:{channelId}` | JSON | per-channel notification override. May include `mode?`, `nagInterval?`, `dndBypass?`, `muted?`, `includeCommunityPosts?` (**v3.1**, tri-state null/true/false), `prewarnMinutes?` (**v3.1**, tri-state null/number) | API (channel-override) | Cron (FCM fan-out filter) |
+| `device:{deviceId}:state:{channelId}` | JSON | `{ unwatched: [...], lastNagAt, nagCount }` — `unwatched` holds plain videoIds and `post:{activityId}` for community posts (**v3.1** shares the array via `post:` namespace) | Cron (new video, nag fire) | Cron (nag fire, seen cleanup) |
+| `upcoming:events:list` | JSON array | `[{ channelId, videoId, scheduledFor, addedAt }, ...]` — currently-scheduled live events, pruned 24h after live (**v3.1**, replaces the pre-v3.1 `upcoming:{bucket}` scheme) | Cron (RSS poll) | Cron (prewarn cron) |
+| `upcoming:prewarn:{videoId}:{deviceId}` | number | `prewarnMinutes` value at send-time, sentinel for "prewarn sent for this (event, device)" (**v3.1**) | Cron (prewarn fire) | Cron (prewarn fire) |
+| `upcoming:{bucket}` | JSON array | pre-v3.1 scheduled-livestream entries | (legacy writes only) | Cron (`runUpcomingCron` drain-only) |
+| `nag:{bucket}` | JSON array | pending nag entries (15-min window) | Cron (nag fire, reschedule) | Cron (nag cron) |
+| `channels:active` | JSON array | `[channelId, ...]` — index of channels with ≥1 subscriber | API (subscribe, unsubscribe) | Cron (RSS poll, community posts) |
+| `handle:{lowercase}` | JSON | `{ channelId, cachedAt }` — 7-day TTL | API (resolve) | API (resolve) |
 | `fcm:lookup:{fcmToken}` | string | `deviceId` — reverse index from FCM token to the device that owns it | API (register) | API (register, migration) |
 
 **`channels:active` is the secret sauce.** It replaces a `KV.list()` call — the only way to know "which channels have at least one subscriber" without scanning the entire namespace. The cron reads this list, processes each channel, done. No `list()`.
@@ -191,8 +199,9 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 | `/resolve` (`channels.list?part=snippet&forHandle=...`) | 1 unit | Per unique handle, cached 7 days |
 | `handle:*` cache hit | 0 units | Subsequent lookups for the same handle |
 | Subscribe-time avatar fetch (in `/subscribe-channel`) | 1 unit | Per new channel added (one-time, cached forever in `channel:{id}:meta`) |
-| Cron tick (RSS-based) | **0 units** | RSS feed has no API key requirement |
-| **Total steady-state** | **~0 units/day** | Only spend units on first-subscribe events |
+| Cron tick — RSS-based video detection | **0 units** | RSS feed has no API key requirement |
+| Cron tick — community posts (`runCommunityPostsCron`, **v3.1**) | 1 unit / channel / hour | Per active channel, hourly |
+| **Total steady-state (4 channels)** | **~96 units/day** | 4 channels × 1/hour × 24h = 96 units for posts. New-channel adds are one-time, ~2 units each. |
 
 ### 6.2 Cloudflare Workers (free tier: 100,000 requests/day, 10ms CPU per invocation)
 
@@ -218,7 +227,7 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 
 **Deletes per day (cleanup):** dead-device cleanup is event-driven, not scheduled — it only fires when FCM reports a token as `UNREGISTERED`. Steady-state cost is ~0 deletes/day. A single cleanup of a device subscribed to N channels costs roughly `1 + 5N + 3N` KV ops (1 read of `device:{id}:channels` + N reads + N writes of subscriber lists + 3 + 2N deletes). In practice this is one user uninstalling every few months, well under free tier. See §11.
 
-### 6.4 View-count write throttle (since v3.0.18)
+### 6.4 Engagement-metric write throttle (since v3.0.18, refined v3.1)
 
 Originally, the cron re-stamped view counts on every video in the recent list on every 5-min tick, causing **~576 writes/day for 4 channels** — about 58% of the free tier just for view counts.
 
@@ -227,6 +236,7 @@ New policy:
 - Only evaluated at the top of a new hour (gated by `currentHour !== viewsLastCheckedHour`)
 - Only writes if the count changed by **more than 5%** from the last stored value
 - Prior videos (index 1-14) keep their last-stored view counts — view counts are slightly stale on older videos, which is fine because the newest video is the one the user actually looks at
+- **v3.1**: likes and dislikes follow the same hourly top-of-list rule but with a **stricter** threshold (any change) — they're useful at any scale, so we don't wait for a 5% swing
 
 Net effect: cron writes drop from ~576/day to ~96/day worst case, often much less.
 
@@ -315,7 +325,7 @@ Live-streamed logs from the deployed worker. Useful for watching a cron tick fir
 ### Adding a new endpoint to the API worker
 
 1. Add the handler function in `worker/tubepulse-api/index.js` (use the existing `handleX(request, env, ctx)` pattern)
-2. Add a route entry in the main router near line 1490 (look for `path === '/...'` blocks)
+2. Add a route entry in the main router near line 1729 (look for `path === '/...'` blocks)
 3. Test with `npx wrangler dev` and curl
 4. Deploy with `npx wrangler deploy`
 
@@ -332,7 +342,7 @@ Live-streamed logs from the deployed worker. Useful for watching a cron tick fir
 2. Save the new JSON to `secrets/fcm-service-account.json` (overwrite)
 3. Verify the new key is the right size: `node -e "const k=JSON.parse(require('fs').readFileSync('secrets/fcm-service-account.json','utf8')); const b=Buffer.from(k.private_key.replace(/-----[^-]+-----|\n/g,''),'base64'); console.log('PKCS8 DER bytes:', b.length);"` — should print `1217`. Anything else is corrupted.
 4. Push: `./secrets/set-worker-secrets.sh tubepulse-api && ./secrets/set-worker-secrets.sh tubepulse-cron`
-5. Test by triggering a push (next cron tick with a new video, or manually: `curl -X POST https://tubepulse-api.jimothyoakley55.workers.dev/register` etc.)
+5. Test by triggering a push (next cron tick with a new video, or manually: `curl -X POST https://tubepulse-api.jimothyoakley55.workers.dev/register` etc. — note: this URL is no longer reachable since the API worker has `routes = []`; use `wrangler dev` or invoke from the cron via a service binding instead)
 
 ### Debugging KV state
 
@@ -365,10 +375,10 @@ worker/
 ├── README.md                  ← you are here
 ├── index.js                   ← legacy/older single-worker file (not deployed)
 ├── tubepulse-api/
-│   ├── index.js               ← API worker source (~1700 lines)
+│   ├── index.js               ← API worker source (1774 lines as of v3.1.6)
 │   └── wrangler.toml          ← deployment config
 └── tubepulse-cron/
-    ├── index.js               ← cron worker source (~1166 lines)
+    ├── index.js               ← cron worker source (1503 lines as of v3.1.6)
     └── wrangler.toml          ← deployment config
 
 secrets/                       ← live credentials, ALL gitignored
@@ -443,7 +453,9 @@ The client-side `getDeviceId()` is a stable identifier for a given install — b
 
 - **v3.0.18**: random UUID stored in AsyncStorage (prone to races that could mint two UUIDs for the same install)
 - **v3.0.19**: Android's `Application.getAndroidId()` (per-app-install, stable, but fingerprintable)
-- **v3.0.20+**: `expo-secure-store` UUID (random, encrypted in Android Keystore / iOS Keychain, hardware-backed on most devices, wiped on uninstall)
+- **v3.0.20** → **v3.1.x (current)**: `expo-secure-store` UUID (random, encrypted in Android Keystore / iOS Keychain, hardware-backed on most devices, wiped on uninstall). The current shipping app uses this.
+
+When an existing user upgrades across a version boundary, their `deviceId` changes (e.g. `android:abc...` → `secure:xyz...`), but the FCM token stays the same. Without migration, the user's channels would appear "lost" on upgrade.
 
 When an existing user upgrades across a version boundary, their `deviceId` changes (e.g. `android:abc...` → `secure:xyz...`), but the FCM token stays the same. Without migration, the user's channels would appear "lost" on upgrade.
 
