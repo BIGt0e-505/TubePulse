@@ -18,13 +18,13 @@ import { COLORS } from '../utils/constants';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
 import { fetchFeed, markSeen, getDeviceId } from '../utils/api';
 
-const THUMB_UP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+const THUMB_UP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#666666" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
   <path d="M7 22V11" />
   <path d="M3 11h4v11H3z" />
   <path d="M7 11l4.5-8.5c.6-.1 1.2.1 1.6.5.4.5.5 1.1.4 1.7L12.5 9H20c.8 0 1.5.7 1.5 1.5l-1.5 9c-.1.7-.7 1.2-1.4 1.2H7" />
 </svg>`;
 
-const THUMB_DOWN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="rotate(180 12 12)">
+const THUMB_DOWN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#666666" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="rotate(180 12 12)">
   <path d="M7 22V11" />
   <path d="M3 11h4v11H3z" />
   <path d="M7 11l4.5-8.5c.6-.1 1.2.1 1.6.5.4.5.5 1.1.4 1.7L12.5 9H20c.8 0 1.5.7 1.5 1.5l-1.5 9c-.1.7-.7 1.2-1.4 1.2H7" />
@@ -521,15 +521,15 @@ export default function HomeScreen({ navigation }) {
                 </Text>
                 {(video.published || video.views || video.likes || video.dislikes) && (
                   <View style={styles.videoMeta}>
-                    <Text style={styles.timeAgo}>{video.published ? timeAgo(video.published) : ''}</Text>
-                    {video.likes && video.likes !== '0' && (
-                      <Text style={styles.timeAgo}>{"\u00B7 "}<SvgXml xml={THUMB_UP_SVG} width={12} height={12} /> {formatCount(video.likes)}</Text>
-                    )}
-                    {video.dislikes && video.dislikes !== '0' && (
-                      <Text style={styles.timeAgo}>{"\u00B7 "}<SvgXml xml={THUMB_DOWN_SVG} width={12} height={12} /> {formatCount(video.dislikes)}</Text>
-                    )}
+                    <View style={styles.metaLeft}>
+                      {video.published ? <Text style={styles.timeAgo}>{timeAgo(video.published)}</Text> : null}
+                      <Text style={styles.timeAgo}><SvgXml xml={THUMB_UP_SVG} width={12} height={12} style={styles.metaIcon} /> {formatCount(video.likes || 0)}</Text>
+                      {video.dislikes && video.dislikes !== '0' && (
+                        <Text style={styles.timeAgo}><SvgXml xml={THUMB_DOWN_SVG} width={12} height={12} style={styles.metaIcon} /> {formatCount(video.dislikes)}</Text>
+                      )}
+                    </View>
                     {video.views && video.views !== '0' && (
-                      <Text style={styles.timeAgo}>{"\u00B7 "}{formatViews(video.views)}</Text>
+                      <Text style={styles.timeAgo}>{formatViews(video.views)}</Text>
                     )}
                   </View>
                 )}
@@ -654,11 +654,20 @@ const styles = StyleSheet.create({
   videoMeta: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     marginTop: 2,
+  },
+  metaLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   timeAgo: {
     color: COLORS.textDim,
     fontSize: 12,
+  },
+  metaIcon: {
+    marginRight: 3,
   },
   videoTitle: {
     color: COLORS.textDim,
