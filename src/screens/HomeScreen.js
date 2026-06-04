@@ -687,7 +687,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   metaIcon: {
-    marginRight: 5,
+    marginRight: 0,
   },
   // Visual group around the thumb + count so we can give the count
   // breathing room from the icon without relying on the icon's
@@ -695,12 +695,11 @@ const styles = StyleSheet.create({
   metaLikeGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingLeft: 2,
   },
   metaLikeCount: {
     color: COLORS.textDim,
     fontSize: 12,
-    marginLeft: 4,
+    marginLeft: 2,
   },
   videoTitle: {
     color: COLORS.textDim,
