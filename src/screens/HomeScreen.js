@@ -537,9 +537,15 @@ export default function HomeScreen({ navigation }) {
                   <View style={styles.videoMeta}>
                     <View style={styles.metaLeft}>
                       {video.published ? <Text style={styles.timeAgo}>{timeAgo(video.published)}</Text> : null}
-                      <Text style={styles.timeAgo}><SvgXml xml={THUMB_UP_SVG} width={12} height={12} style={styles.metaIcon} /> {formatCount(video.likes || 0)}</Text>
+                      <View style={styles.metaLikeGroup}>
+                        <SvgXml xml={THUMB_UP_SVG} width={12} height={12} style={styles.metaIcon} />
+                        <Text style={styles.metaLikeCount}>{formatCount(video.likes || 0)}</Text>
+                      </View>
                       {video.dislikes && video.dislikes !== '0' && (
-                        <Text style={styles.timeAgo}><SvgXml xml={THUMB_DOWN_SVG} width={12} height={12} style={styles.metaIcon} /> {formatCount(video.dislikes)}</Text>
+                        <View style={styles.metaLikeGroup}>
+                          <SvgXml xml={THUMB_DOWN_SVG} width={12} height={12} style={styles.metaIcon} />
+                          <Text style={styles.metaLikeCount}>{formatCount(video.dislikes)}</Text>
+                        </View>
                       )}
                     </View>
                     {video.views && video.views !== '0' && (
@@ -681,7 +687,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   metaIcon: {
-    marginRight: 3,
+    marginRight: 5,
+  },
+  // Visual group around the thumb + count so we can give the count
+  // breathing room from the icon without relying on the icon's
+  // own right-margin (which gets eaten by the parent gap).
+  metaLikeGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 2,
+  },
+  metaLikeCount: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    marginLeft: 4,
   },
   videoTitle: {
     color: COLORS.textDim,
