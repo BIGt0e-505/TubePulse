@@ -238,8 +238,22 @@ export default function HomeScreen({ navigation }) {
   };
 
   const getUnseenVideos = (handle) => {
-    const seenIds = lastSeen[handle]?.seenIds || [];
-    return getVideos(handle).filter(v => !seenIds.includes(v.videoId));
+    // Source of truth: the server's `unwatched` flag on each video in
+    // the cache (populated from the /feed response). The local
+    // `seenIds` is a UI cache used elsewhere (e.g. to display the
+    // "seen" dot), but it is NOT a reliable filter for unseen videos:
+    //   - The loadData sync only ADDS to seenIds (for videos the
+    //     server marks as seen), never REMOVES (when the server
+    //     later un-sees one, e.g. a missed-tap re-add or a cron
+    //     re-classification).
+    //   - A previous markSeen for a videoId that's since been
+    //     re-classified as unseen server-side would still be in the
+    //     local seenIds and would hide the video.
+    // Result: filtering by !seenIds.includes() silently drops videos
+    // the user genuinely hasn't watched yet, making the home screen
+    // fall back to [latestVideo] when seenIds happens to cover
+    // everything.
+    return getVideos(handle).filter(v => v.unwatched === true);
   };
 
   const unseenCount = (handle) => getUnseenVideos(handle).length;
