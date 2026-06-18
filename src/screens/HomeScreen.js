@@ -347,6 +347,15 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleVideoTap = async (channel, video) => {
+    // When tapAction is 'channel', tapping a video row does the
+    // same as tapping the avatar/channel name: mark all seen +
+    // open the channel page. This makes the setting consistent
+    // across notifications, widget, and app feed.
+    if (settings.tapAction === 'channel') {
+      handleChannelOpen(channel);
+      return;
+    }
+
     const key = channel.handle;
     const updatedLastSeen = { ...lastSeen };
     if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };

@@ -63,15 +63,30 @@ setBackgroundMessageHandler(async (remoteMessage) => {
       const handle = local?.handle;
       if (!handle) continue;
       const existing = freshCache[handle] || {};
-      // Only overwrite if server has fresher data (more videos, or a newer lastChecked)
-      if (
-        (feed.videos?.length || 0) > (existing.videos?.length || 0) ||
-        !existing.avatar
-      ) {
+
+      // Detect new content: compare the first videoId (newest) and
+      // check for any post IDs we haven't cached yet.  This replaces
+      // the old "more videos than before" check which never triggered
+      // because the server caps at 15 videos — a new upload pushes
+      // one off the end, so the count stays the same.
+      const serverFirstVideoId = feed.videos?.[0]?.videoId;
+      const cachedFirstVideoId = existing.videos?.[0]?.videoId;
+      const serverPostIds = new Set((feed.posts || []).map(p => p.activityId));
+      const cachedPostIds = new Set((existing.posts || []).map(p => p.activityId));
+      const hasNewPosts = [...serverPostIds].some(id => !cachedPostIds.has(id));
+      const hasNewVideo = serverFirstVideoId && serverFirstVideoId !== cachedFirstVideoId;
+      const hasAvatarGap = !existing.avatar && feed.meta?.avatarUrl;
+
+      if (hasNewVideo || hasNewPosts || hasAvatarGap) {
         freshCache[handle] = {
           name: feed.meta?.name || existing.name || local.name || handle,
           avatar: feed.meta?.avatarUrl || existing.avatar || null,
           videos: feed.videos || existing.videos || [],
+          // Preserve posts from the server response, falling back to
+          // any existing posts we already had (the server always
+          // returns the current set, so this replaces rather than
+          // merges — which is correct).
+          posts: feed.posts || existing.posts || [],
           latestVideo: (feed.videos || [])[0] || existing.latestVideo || null,
           channelId: feed.channelId,
           lastChecked: new Date().toISOString(),

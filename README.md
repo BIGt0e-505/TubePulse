@@ -81,10 +81,11 @@ This is the key interaction: video tap for "I've seen this one", channel tap for
 - Long-press a video to copy its link
 
 ### 📱 Home Screen Widget
-- Android home screen widget showing latest videos
-- Compact video rows with thumbnail, title, and channel avatar
-- Seen videos dimmed so new uploads stand out
-- Tap a row to open the video — no need to open the app
+- Android home screen widget showing latest videos and community posts
+- Compact rows with thumbnail, title, channel avatar, and post cards
+- Seen items dimmed so new uploads stand out
+- Tap video to open in YouTube, tap pfp to open channel, tap post to open community tab
+- Respects `tapAction` setting (channel mode sends all taps to the channel)
 
 ### 🎨 Dark Theme
 - Full dark mode with translucent surfaces
@@ -339,7 +340,7 @@ TubePulse/
 ├── PLAN_v3.1.md                   # v3.1 implementation plan and status
 ├── STATUS.md                      # Project status and version history
 ├── MIGRATION_PLAN.md              # v1→v2→v3 migration plan (historical record)
-├── build-and-release.sh           # WSL-native build: gradle + commit + push + GitHub release
+├── build-and-release.ps1           # Windows-native build: gradle + commit + push + GitHub release
 ├── app.json                       # Expo config
 ├── package.json
 └── .gitignore
@@ -349,7 +350,7 @@ TubePulse/
 
 | Setting | Values | Default | Description |
 |---------|--------|---------|-------------|
-| `tapAction` | `video` / `channel` | `video` | What happens when you tap a notification or feed item |
+| `tapAction` | `video` / `channel` | `video` | `video` = tap video opens video, tap pfp opens channel. `channel` = everything opens the channel. Applies to notifications, app feed, and widget. Posts always open community tab regardless. |
 | `notificationMode` | `chill` / `relentless` | `chill` | Chill = nudge every 4h; Relentless = re-nag every interval |
 | `nagInterval` | 5 / 15 / 30 / 60 / 120 | 15 | Minutes between nag attempts for unwatched videos |
 | `dndEnabled` | boolean | false | Block all notifications during DND hours |

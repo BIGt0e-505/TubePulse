@@ -30,17 +30,19 @@ async function buildWidgetData(fetchFresh = false) {
 
     let activeCache = cache;
 
-    // If cache is empty or a fresh fetch is requested, pull from server
+    // If cache is empty or a fresh fetch is requested, pull from server.
+    // We also fetch fresh on WIDGET_UPDATE because the FCM background
+    // handler may have updated the cache but the server may have even
+    // newer data (e.g. engagement metrics, a second new video that
+    // arrived between the push and the widget render).
     const cacheEmpty = Object.keys(cache).length === 0;
     if ((cacheEmpty || fetchFresh) && channels.length > 0) {
       try {
         const deviceId = await getDeviceId();
         if (deviceId) {
           const result = await fetchFeed(deviceId);
-          // Server returns { channels: [{ channelId, meta, videos, unwatchedCount }] }
           if (result.ok && Array.isArray(result.channels)) {
             const newCache = {};
-            // Build a map of channelId → channel (local) for handle lookup
             const channelById = Object.fromEntries(
               channels.filter(c => c.channelId).map(c => [c.channelId, c])
             );
@@ -52,10 +54,17 @@ async function buildWidgetData(fetchFresh = false) {
                 name: feed.meta?.name || local?.name || handle,
                 avatar: feed.meta?.avatarUrl || null,
                 videos: feed.videos || [],
+                posts: feed.posts || [],
                 latestVideo: feed.videos?.[0] || null,
                 channelId: feed.channelId,
                 lastChecked: new Date().toISOString(),
               };
+            }
+            // Preserve any local-only channels that weren't in the server response
+            for (const ch of channels) {
+              if (!newCache[ch.handle] && cache[ch.handle]) {
+                newCache[ch.handle] = cache[ch.handle];
+              }
             }
             if (Object.keys(newCache).length > 0) {
               await saveChannelCache(newCache);
@@ -68,36 +77,61 @@ async function buildWidgetData(fetchFresh = false) {
       }
     }
 
-    // Build widget channel data with videos
+    // Build widget channel data with videos and posts
     const widgetChannels = channels.map((ch) => {
       const cached = activeCache[ch.handle];
       const seenIds = lastSeen[ch.handle]?.seenIds || [];
 
       // All videos sorted newest-first
       let allVideos = cached?.videos?.length ? cached.videos : (cached?.latestVideo ? [cached.latestVideo] : []);
-      allVideos = [...allVideos].sort((a, b) => new Date(b.published) - new Date(a.published));
+      allVideos = [...allVideos].sort((a, b) => new Date(b.publishedAt || b.published) - new Date(a.publishedAt || a.published));
 
-      // Unseen count
+      // All posts sorted newest-first
+      let allPosts = cached?.posts?.length ? cached.posts : [];
+      allPosts = [...allPosts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+
+      // Unseen videos
       const unseenVideos = allVideos.filter(v => !seenIds.includes(v.videoId));
-      const unseenCount = unseenVideos.length;
+      // Unseen posts (post IDs are namespaced with post: in seenIds,
+      // matching the app's convention)
+      const unseenPosts = allPosts.filter(p => !seenIds.includes(`post:${p.activityId}`));
 
-      // Current video = oldest unseen, or latest if all seen
-      const currentVideo = unseenVideos.length > 0
-        ? unseenVideos[unseenVideos.length - 1]
-        : allVideos[0] || null;
-
+      const unseenCount = unseenVideos.length + unseenPosts.length;
       const hasNew = unseenCount > 0;
 
-      const videoRows = currentVideo ? [{
-        videoId: currentVideo.videoId,
-        title: currentVideo.title,
-        thumbnail: currentVideo.thumbnail,
-        link: currentVideo.link,
-        timeAgo: currentVideo.published ? timeAgo(currentVideo.published) : '',
-        views: currentVideo.views || '',
-        seen: !hasNew,
-        handle: ch.handle,
-      }] : [];
+      // Build video rows — show up to 3 most recent (mix of seen + unseen,
+      // but unseen come first to surface what's new)
+      const videoRows = allVideos.slice(0, 3).map((v) => {
+        const isSeen = seenIds.includes(v.videoId);
+        return {
+          videoId: v.videoId,
+          title: v.title,
+          thumbnail: v.thumbnail,
+          link: v.link,
+          timeAgo: v.publishedAt ? timeAgo(v.publishedAt) : (v.published ? timeAgo(v.published) : ''),
+          views: v.views || '',
+          seen: isSeen,
+          handle: ch.handle,
+          kind: 'video',
+        };
+      });
+
+      // Build post rows — show up to 2 most recent
+      const postRows = allPosts.slice(0, 2).map((p) => {
+        const isSeen = seenIds.includes(`post:${p.activityId}`);
+        return {
+          postId: p.activityId,
+          kind: p.kind || 'text',
+          text: p.text || '',
+          thumbnail: p.thumbnail || null,
+          link: p.link || '',
+          publishedAt: p.publishedAt || '',
+          timeAgo: p.publishedAt ? timeAgo(p.publishedAt) : '',
+          seen: isSeen,
+          handle: ch.handle,
+          type: 'post',
+        };
+      });
 
       return {
         handle: ch.handle,
@@ -108,6 +142,7 @@ async function buildWidgetData(fetchFresh = false) {
         unseenCount,
         tapAction: settings.tapAction || 'video',
         videos: videoRows,
+        posts: postRows,
       };
     });
 
@@ -115,6 +150,19 @@ async function buildWidgetData(fetchFresh = false) {
   } catch {
     return { channels: [] };
   }
+}
+
+// Helper: mark all videos + posts as seen for a channel
+async function markAllSeen(handle) {
+  const cache = await getChannelCache();
+  const lastSeen = await getLastSeen();
+  const allVideos = cache[handle]?.videos || (cache[handle]?.latestVideo ? [cache[handle].latestVideo] : []);
+  const allPosts = cache[handle]?.posts || [];
+  const videoIds = allVideos.map(v => v.videoId);
+  const postIds = allPosts.map(p => `post:${p.activityId}`);
+  const existing = lastSeen[handle]?.seenIds || [];
+  lastSeen[handle] = { seenIds: [...new Set([...existing, ...videoIds, ...postIds])] };
+  await saveLastSeen(lastSeen);
 }
 
 export async function widgetTaskHandler(props) {
@@ -134,22 +182,20 @@ export async function widgetTaskHandler(props) {
     }
     case 'WIDGET_UPDATE':
     case 'WIDGET_RESIZED': {
-      const data = await buildWidgetData();
+      // Always fetch fresh on WIDGET_UPDATE — the FCM push told us
+      // something changed, so reading stale cache defeats the purpose.
+      const data = await buildWidgetData(true);
       props.renderWidget(<Widget {...data} />);
       return;
     }
-    case 'CHANNEL_CLICK': {
-      // Mark ALL videos seen, then open channel
+    case 'CHANNEL_MARK_ALL_CLICK': {
+      // Avatar, channel header, or video row when tapAction='channel':
+      // mark ALL videos + posts seen for this channel, then open channel.
+      // This matches the app's handleChannelOpen behavior.
       const { handle } = props.clickActionData || {};
       if (handle) {
         try {
-          const cache = await getChannelCache();
-          const lastSeen = await getLastSeen();
-          const allVideos = cache[handle]?.videos || (cache[handle]?.latestVideo ? [cache[handle].latestVideo] : []);
-          const allIds = allVideos.map(v => v.videoId);
-          const existing = lastSeen[handle]?.seenIds || [];
-          lastSeen[handle] = { seenIds: [...new Set([...existing, ...allIds])] };
-          await saveLastSeen(lastSeen);
+          await markAllSeen(handle);
           await Linking.openURL(`https://www.youtube.com/@${handle}`);
         } catch {}
       }
@@ -157,24 +203,31 @@ export async function widgetTaskHandler(props) {
       props.renderWidget(<Widget {...data} />);
       return;
     }
-    case 'WIDGET_CLICK': {
+    case 'POST_CLICK': {
+      // Post tap — mark just this post seen, open community tab.
+      // tapAction doesn't change post behaviour (same as the app).
       const clickData = props.clickActionData;
-      const settings = await getSettings();
-
-      if (settings.tapAction === 'channel' && clickData?.handle) {
-        // Mark all seen, open channel
+      if (clickData?.postId && clickData?.handle) {
         try {
-          const cache = await getChannelCache();
           const lastSeen = await getLastSeen();
-          const allVideos = cache[clickData.handle]?.videos || (cache[clickData.handle]?.latestVideo ? [cache[clickData.handle].latestVideo] : []);
-          const allIds = allVideos.map(v => v.videoId);
-          const existing = lastSeen[clickData.handle]?.seenIds || [];
-          lastSeen[clickData.handle] = { seenIds: [...new Set([...existing, ...allIds])] };
-          await saveLastSeen(lastSeen);
-          await Linking.openURL(`https://www.youtube.com/@${clickData.handle}`);
+          const seenIds = lastSeen[clickData.handle]?.seenIds || [];
+          const postKey = `post:${clickData.postId}`;
+          if (!seenIds.includes(postKey)) {
+            lastSeen[clickData.handle] = { seenIds: [...seenIds, postKey] };
+            await saveLastSeen(lastSeen);
+          }
+          await Linking.openURL(`https://www.youtube.com/@${clickData.handle}/community`);
         } catch {}
-      } else if (clickData?.videoId && clickData?.handle) {
-        // Mark this video seen, open it
+      }
+      const data = await buildWidgetData();
+      props.renderWidget(<Widget {...data} />);
+      return;
+    }
+    case 'WIDGET_CLICK': {
+      // Video row tap when tapAction='video' (default):
+      // mark just this video seen, open the video.
+      const clickData = props.clickActionData;
+      if (clickData?.videoId && clickData?.handle) {
         try {
           const lastSeen = await getLastSeen();
           const seenIds = lastSeen[clickData.handle]?.seenIds || [];
@@ -185,7 +238,6 @@ export async function widgetTaskHandler(props) {
           if (clickData.link) await Linking.openURL(clickData.link);
         } catch {}
       }
-
       const data = await buildWidgetData();
       props.renderWidget(<Widget {...data} />);
       return;
