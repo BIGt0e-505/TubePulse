@@ -99,9 +99,10 @@ async function buildWidgetData(fetchFresh = false) {
       const unseenCount = unseenVideos.length + unseenPosts.length;
       const hasNew = unseenCount > 0;
 
-      // Build video rows — show up to 3 most recent (mix of seen + unseen,
-      // but unseen come first to surface what's new)
-      const videoRows = allVideos.slice(0, 3).map((v) => {
+      // Build video rows — show only the latest video (matching the
+      // bootstrap behaviour of 1 video per channel). Seen videos
+      // are dimmed; only genuinely new uploads appear as "New".
+      const videoRows = allVideos.slice(0, 1).map((v) => {
         const isSeen = seenIds.includes(v.videoId);
         return {
           videoId: v.videoId,
@@ -116,8 +117,8 @@ async function buildWidgetData(fetchFresh = false) {
         };
       });
 
-      // Build post rows — show up to 2 most recent
-      const postRows = allPosts.slice(0, 2).map((p) => {
+      // Build post rows — show only the latest post (if any)
+      const postRows = allPosts.slice(0, 1).map((p) => {
         const isSeen = seenIds.includes(`post:${p.activityId}`);
         return {
           postId: p.activityId,
