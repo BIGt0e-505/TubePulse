@@ -111,14 +111,26 @@ if ($Clean) {
     Write-Host "  done"
 }
 
-# --- Step 1: Update version in app.json ---
+# --- Step 1: Update version in app.json and build.gradle ---
 Write-Host ""
-Write-Host "[1/6] Updating app.json to version $Version..."
+Write-Host "[1/6] Updating app.json and build.gradle to version $Version..."
+
+# app.json
 $appJsonPath = "$REPO_DIR\app.json"
 $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
 $appJson.expo.version = $Version
 $appJson | ConvertTo-Json -Depth 10 | Set-Content $appJsonPath -Encoding UTF8
 Write-Host "  app.json: $($appJson.expo.version)  ✓" -ForegroundColor Green
+
+# build.gradle — derive versionCode from version (strip dots)
+# e.g. 3.1.7 -> 317, 3.0.20 -> 320
+$buildGradlePath = "$REPO_DIR\android\app\build.gradle"
+$buildGradle = Get-Content $buildGradlePath -Raw
+$versionCode = $Version -replace '\.', ''
+$buildGradle = $buildGradle -replace 'versionCode \d+', "versionCode $versionCode"
+$buildGradle = $buildGradle -replace 'versionName "[^"]+"', "versionName \"$Version\""
+Set-Content $buildGradlePath -Value $buildGradle -Encoding UTF8
+Write-Host "  build.gradle: versionCode=$versionCode versionName=$Version  ✓" -ForegroundColor Green
 
 # --- Step 2: npm install ---
 Write-Host ""
@@ -148,6 +160,27 @@ if ($gradleExit -ne 0) {
     Write-Host "  Full log: $env:TEMP\gradle-build.log" -ForegroundColor Yellow
     exit 1
 }
+
+# --- Step 3b: Sign the APK ---
+Write-Host ""
+Write-Host "[3b/6] Signing APK with debug keystore..."
+$apksigner = Get-ChildItem "$ANDROID_SDK\build-tools" -Recurse -Filter "apksigner.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $apksigner) {
+    Write-Error "apksigner.bat not found in $ANDROID_SDK\build-tools"
+    exit 1
+}
+$unsignedApk = "$REPO_DIR\android\app\build\outputs\apk\release\app-release.apk"
+$keystore = "$REPO_DIR\android\app\debug.keystore"
+if (-not (Test-Path $keystore)) {
+    Write-Error "debug.keystore not found at $keystore"
+    exit 1
+}
+& $apksigner.FullName sign --ks $keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android $unsignedApk 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "apksigner failed with exit code $LASTEXITCODE"
+    exit 1
+}
+Write-Host "  APK signed (v2/v3)  ✓" -ForegroundColor Green
 
 # --- Step 4: Locate and copy the APK ---
 Write-Host ""
