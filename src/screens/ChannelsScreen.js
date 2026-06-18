@@ -214,28 +214,38 @@ export default function ChannelsScreen() {
         const bootResult = await bootstrapChannel(deviceId, channelId);
 
         if (bootResult?.ok && bootResult.videos?.length > 0) {
-          // Populate cache with fetched videos
+          // Only keep the latest video on channel add.
+          // Everything is marked as seen so the user starts fresh —
+          // only genuinely new uploads will appear as "New".
+          const latestOnly = [bootResult.videos[0]];
           const updatedCache = await getChannelCache();
           updatedCache[handle] = {
             name: bootResult.name || name,
             avatar: bootResult.avatar || avatar,
-            videos: bootResult.videos,
-            latestVideo: bootResult.videos[0] || null,
+            videos: latestOnly,
+            latestVideo: latestOnly[0] || null,
             channelId,
             lastChecked: new Date().toISOString(),
           };
           await saveChannelCache(updatedCache);
           setCache({ ...updatedCache });
 
-          // Mark all fetched videos as seen (so user isn't nagged about old content)
+          // Mark the latest video as seen locally
           const updatedLastSeen = await getLastSeen();
           if (!updatedLastSeen[handle]) updatedLastSeen[handle] = { seenIds: [] };
           const seenIds = new Set(updatedLastSeen[handle].seenIds || []);
-          for (const v of bootResult.videos) {
-            if (v.videoId) seenIds.add(v.videoId);
-          }
+          if (latestOnly[0]?.videoId) seenIds.add(latestOnly[0].videoId);
           updatedLastSeen[handle].seenIds = [...seenIds];
           await saveLastSeen(updatedLastSeen);
+
+          // Mark ALL existing videos as seen on the server too,
+          // so /feed won't flag old uploads as unwatched.
+          try {
+            const { markSeen } = require('../utils/api');
+            await markSeen(deviceId, channelId, [], true);
+          } catch (e) {
+            console.warn('markSeen clearAll failed:', e);
+          }
         }
       } catch (e) {
         console.warn('Bootstrap fetch failed:', e);

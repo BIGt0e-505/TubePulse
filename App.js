@@ -188,26 +188,40 @@ export default function App() {
                   const { saveChannelCache, getLastSeen, saveLastSeen } = require('./src/utils/storage');
                   const freshCache = await getChannelCache();
                   const existingEntry = freshCache[ch.handle] || {};
+                  // Only keep the latest video on first install/bootstrap.
+                  // The server retains the full 15-video recent list for
+                  // future diffing; the client only needs the latest to
+                  // show in the feed/widget. Everything is marked as
+                  // seen so the user isn't spammed with old content.
+                  const latestOnly = [bootResult.videos[0]];
                   freshCache[ch.handle] = {
                     name: bootResult.name || existingEntry.name || ch.name || ch.handle,
                     avatar: bootResult.avatar || existingEntry.avatar || null,
-                    videos: bootResult.videos,
-                    latestVideo: bootResult.videos[0] || null,
+                    videos: latestOnly,
+                    latestVideo: latestOnly[0] || null,
                     channelId: ch.channelId,
                     lastChecked: new Date().toISOString(),
                   };
                   await saveChannelCache(freshCache);
 
-                  // Mark bootstrapped videos as seen so user isn't spammed
-                  // about old content on first install
+                  // Mark the latest video as seen locally
                   const lastSeen = await getLastSeen();
                   if (!lastSeen[ch.handle]) lastSeen[ch.handle] = { seenIds: [] };
                   const seenIds = new Set(lastSeen[ch.handle].seenIds || []);
-                  for (const v of bootResult.videos) {
-                    if (v.videoId) seenIds.add(v.videoId);
-                  }
+                  if (latestOnly[0]?.videoId) seenIds.add(latestOnly[0].videoId);
                   lastSeen[ch.handle].seenIds = [...seenIds];
                   await saveLastSeen(lastSeen);
+
+                  // Mark ALL existing videos as seen on the server too,
+                  // so the /feed response won't flag old uploads as
+                  // unwatched. Only genuinely new uploads (detected by
+                  // the cron after this point) will appear as "New".
+                  try {
+                    const { markSeen } = require('./src/utils/api');
+                    await markSeen(deviceId, ch.channelId, [], true);
+                  } catch (e) {
+                    console.warn(`[Init] markSeen clearAll failed for ${ch.handle}:`, e);
+                  }
                 }
               } catch (e) {
                 console.warn(`[Init] Bootstrap failed for ${ch.handle}:`, e);
