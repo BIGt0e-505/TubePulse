@@ -188,56 +188,52 @@ export async function widgetTaskHandler(props) {
       props.renderWidget(<Widget {...data} />);
       return;
     }
-    case 'CHANNEL_MARK_ALL_CLICK': {
-      // Avatar, channel header, or video row when tapAction='channel':
-      // mark ALL videos + posts seen for this channel, then open channel.
-      // This matches the app's handleChannelOpen behavior.
-      const { handle } = props.clickActionData || {};
-      if (handle) {
-        try {
-          await markAllSeen(handle);
-          await Linking.openURL(`https://www.youtube.com/@${handle}`);
-        } catch {}
-      }
-      const data = await buildWidgetData();
-      props.renderWidget(<Widget {...data} />);
-      return;
-    }
-    case 'POST_CLICK': {
-      // Post tap — mark just this post seen, open community tab.
-      // tapAction doesn't change post behaviour (same as the app).
-      const clickData = props.clickActionData;
-      if (clickData?.postId && clickData?.handle) {
-        try {
-          const lastSeen = await getLastSeen();
-          const seenIds = lastSeen[clickData.handle]?.seenIds || [];
-          const postKey = `post:${clickData.postId}`;
-          if (!seenIds.includes(postKey)) {
-            lastSeen[clickData.handle] = { seenIds: [...seenIds, postKey] };
-            await saveLastSeen(lastSeen);
-          }
-          await Linking.openURL(`https://www.youtube.com/@${clickData.handle}/community`);
-        } catch {}
-      }
-      const data = await buildWidgetData();
-      props.renderWidget(<Widget {...data} />);
-      return;
-    }
     case 'WIDGET_CLICK': {
-      // Video row tap when tapAction='video' (default):
-      // mark just this video seen, open the video.
-      const clickData = props.clickActionData;
-      if (clickData?.videoId && clickData?.handle) {
-        try {
-          const lastSeen = await getLastSeen();
-          const seenIds = lastSeen[clickData.handle]?.seenIds || [];
-          if (!seenIds.includes(clickData.videoId)) {
-            lastSeen[clickData.handle] = { seenIds: [...seenIds, clickData.videoId] };
-            await saveLastSeen(lastSeen);
-          }
-          if (clickData.link) await Linking.openURL(clickData.link);
-        } catch {}
+      // All custom click actions arrive as widgetAction='WIDGET_CLICK'.
+      // The specific action name is in props.clickAction, and its
+      // data is in props.clickActionData.
+      const action = props.clickAction;
+      const clickData = props.clickActionData || {};
+
+      if (action === 'CHANNEL_MARK_ALL_CLICK') {
+        // Avatar, channel header, or video row when tapAction='channel':
+        // mark ALL videos + posts seen, then open channel.
+        if (clickData.handle) {
+          try {
+            await markAllSeen(clickData.handle);
+            await Linking.openURL(`https://www.youtube.com/@${clickData.handle}`);
+          } catch {}
+        }
+      } else if (action === 'POST_CLICK') {
+        // Post tap — mark just this post seen, open community tab.
+        if (clickData.postId && clickData.handle) {
+          try {
+            const lastSeen = await getLastSeen();
+            const seenIds = lastSeen[clickData.handle]?.seenIds || [];
+            const postKey = `post:${clickData.postId}`;
+            if (!seenIds.includes(postKey)) {
+              lastSeen[clickData.handle] = { seenIds: [...seenIds, postKey] };
+              await saveLastSeen(lastSeen);
+            }
+            await Linking.openURL(`https://www.youtube.com/@${clickData.handle}/community`);
+          } catch {}
+        }
+      } else if (action === 'WIDGET_CLICK') {
+        // Video row tap when tapAction='video' (default):
+        // mark just this video seen, open the video.
+        if (clickData.videoId && clickData.handle) {
+          try {
+            const lastSeen = await getLastSeen();
+            const seenIds = lastSeen[clickData.handle]?.seenIds || [];
+            if (!seenIds.includes(clickData.videoId)) {
+              lastSeen[clickData.handle] = { seenIds: [...seenIds, clickData.videoId] };
+              await saveLastSeen(lastSeen);
+            }
+            if (clickData.link) await Linking.openURL(clickData.link);
+          } catch {}
+        }
       }
+
       const data = await buildWidgetData();
       props.renderWidget(<Widget {...data} />);
       return;
