@@ -203,8 +203,8 @@ export default function HomeScreen({ navigation }) {
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
-    }, [loadData])
+      loadData().then(() => refresh());
+    }, [loadData, refresh])
   );
 
   useEffect(() => {
@@ -212,7 +212,6 @@ export default function HomeScreen({ navigation }) {
 
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        loadData();
         refresh();
         try {
           const { requestWidgetUpdate } = require('react-native-android-widget');
