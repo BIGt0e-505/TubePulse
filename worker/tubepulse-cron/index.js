@@ -748,157 +748,206 @@ async function runPrewarnCron(env, ctx) {
 
 // ─── Job 2: Nag cycle (every 15 min) ────────────────────────────────────
 
-// ─── Community posts cron ───────────────────────────────────────────────
-// Polls YouTube's Data API activities.list for each active channel
-// once per hour. Captures community posts (text, images, polls) and
-// notifies subscribers when a new one is detected. Cost: 1 quota
-// unit per channel per hour. With 4 channels and a 10k daily free
-// tier budget, this is ~100 units/day or 1% of the free tier.
+// ─── Community posts via InnerTube ────────────────────────────────────
+// YouTube deprecated community posts (formerly "channel bulletins") from
+// the Data API activities.list endpoint. The `social` activity type is no
+// longer returned. We now use YouTube's internal InnerTube browse API
+// to fetch the Posts tab for each channel.
 //
-// The "first run" guard: when a channel is first polled, the recent
-// posts list is populated but no notifications fire for pre-existing
-// posts. This avoids a flood of notifications on first install or
-// when the feature is first enabled.
+// InnerTube is the same API the YouTube website and Android app use. It
+// requires no API key, no cookies, no consent, and has no documented
+// quota. The response is ~4KB per channel. We use the ANDROID client to
+// mimic the YouTube app.
+//
+// The publishedTimeText from InnerTube is relative ("2 days ago"), not
+// an ISO timestamp. We use detection time (now) as publishedAt — this is
+// the ground truth for "when TubePulse first saw this post" and is
+// accurate to within 5 minutes (the poll interval).
 
-async function runCommunityPostsCron(env, ctx) {
-  const start = Date.now();
-  const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
-  const apiKey = env.YOUTUBE_API_KEY;
-  const results = { channelsPolled: 0, newPosts: 0, errors: [] };
+const INNERTUBE_KEY = 'AIzaSyA8eiZ6LYd7pPjx3MIe3fwGy7GZ1Z2Y3Z4'; // public web client key
+const POSTS_TAB_PARAMS = 'EgVwb3N0c_IGBAoCSgA%3D';
 
-  for (const channelId of channelsActive) {
-    try {
-      results.channelsPolled++;
-      const url = `https://www.googleapis.com/youtube/v3/activities?part=snippet&channelId=${encodeURIComponent(channelId)}&maxResults=20&key=${apiKey}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        const text = await resp.text();
-        results.errors.push(`${channelId}: ${resp.status} ${text.slice(0, 100)}`);
-        continue;
-      }
-      const data = await resp.json();
-      const items = data.items || [];
+async function fetchChannelPostsInnerTube(channelId) {
+  const url = `https://www.youtube.com/youtubei/v1/browse?key=${INNERTUBE_KEY}`;
+  const body = JSON.stringify({
+    context: {
+      client: {
+        clientName: 'ANDROID',
+        clientVersion: '19.09.37',
+        hl: 'en',
+        gl: 'GB',
+      },
+    },
+    browseId: channelId,
+    params: POSTS_TAB_PARAMS,
+  });
 
-      // Filter to community posts (type === 'social') and shape them.
-      const posts = items
-        .filter((it) => it.snippet?.type === 'social')
-        .map((it) => {
-          const snip = it.snippet;
-          const att = (snip.attachments || [])[0];
-          return {
-            activityId: it.id,
-            publishedAt: snip.publishedAt,
-            text: snip.description || '',
-            // Thumbnail only for image posts. Polls, quizzes, and plain
-            // text posts have no usable single-image URL.
-            thumbnail: (att && att.type === 'image' && att.url) ? att.url : null,
-            kind: att ? att.type : 'text',
-            link: `https://www.youtube.com/channel/${channelId}/community`,
-          };
-        });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      console.warn(`[Posts] InnerTube HTTP ${resp.status} for ${channelId}`);
+      return null;
+    }
+    const data = await resp.json();
 
-      // First-run guard: if we've never polled this channel before,
-      // populate the recent list without firing notifications.
-      const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
-      if (!firstPollAt) {
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), posts);
-        await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
-        console.log(`[Posts] first run for ${channelId}: stored ${posts.length} historical posts, no notifications`);
-        continue;
-      }
+    // Navigate: contents.twoColumnBrowseResultsRenderer.tabs → Posts tab →
+    // sectionListRenderer → itemSectionRenderer → backstagePostThreadRenderer
+    const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
+    const postsTab = tabs.find((t) => t.tabRenderer?.title === 'Posts');
+    if (!postsTab) return [];
 
-      // Determine which posts are new.
-      const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
-      const prevIds = new Set(prevRecent.map((p) => p.activityId));
-      const newPosts = posts.filter((p) => !prevIds.has(p.activityId));
+    const sections = postsTab.tabRenderer.content?.sectionListRenderer?.contents || [];
+    const items = sections.flatMap((s) => s.itemSectionRenderer?.contents || []);
+    const threads = items.filter((i) => i.backstagePostThreadRenderer);
 
-      if (newPosts.length > 0) {
-        // Save updated recent list (newest first).
-        const merged = [...newPosts, ...prevRecent].slice(0, 30);
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), merged);
-        results.newPosts += newPosts.length;
-        console.log(`[Posts] ${channelId}: ${newPosts.length} new post(s)`);
+    return threads.map((thread) => {
+      const post = thread.backstagePostThreadRenderer.post?.backstagePostRenderer;
+      if (!post) return null;
 
-        // Notify subscribers. Per-channel opt-out respected: if a
-        // device's channel override has includeCommunityPosts === false,
-        // skip that device. The cron reads each subscriber's profile +
-        // override and fans out a push notification per (new post,
-        // subscriber) pair.
-        const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
-        for (const post of newPosts) {
-          for (const deviceId of subs) {
-            const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
-            if (!profile?.fcmToken) continue;
+      const textRuns = post.contentText?.runs?.map((r) => r.text).join('') || '';
 
-            // Global + per-channel opt-out check. Per-channel override
-            // (true|false) wins; otherwise the global setting applies.
-            const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
-            const overrideValue = override?.includeCommunityPosts;
-            if (overrideValue === false) continue; // explicit channel opt-out
-            if (overrideValue !== true) {
-              // No override → fall back to global. Skip if global is off.
-              const settings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
-              if (!settings.includeCommunityPosts) continue;
-            }
+      // Determine kind and thumbnail from backstageAttachment
+      const att = post.backstageAttachment;
+      let kind = 'text';
+      let thumbnail = null;
 
-            // Track the post as unwatched for this device so the app
-            // shows the blue dot and the server's /seen endpoint can
-            // clear it. activityIds are namespaced with "post:" so they
-            // don't collide with video IDs in the shared unwatched list.
-            const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
-              unwatched: [],
-              nagCount: 0,
-            };
-            const postKey = `post:${post.activityId}`;
-            if (!state.unwatched.includes(postKey)) {
-              state.unwatched.push(postKey);
-              await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
-            }
-
-            const truncated = post.text.length > 100
-              ? post.text.slice(0, 97) + '...'
-              : post.text;
-            const postLabel = post.kind === 'poll' ? 'posted a poll'
-              : post.kind === 'image' ? 'posted an image'
-              : 'posted';
-
-            const notifPayload = {
-              notification: {
-                title: `@${(profile.channelHandle || channelId)} ${postLabel}`,
-                body: truncated || '(no text)',
-              },
-              data: {
-                type: 'post',
-                channelId,
-                activityId: post.activityId,
-                postKind: post.kind,
-              },
-              token: profile.fcmToken,
-            };
-
-            const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
-            const projectId = sa.project_id;
-            try {
-              const accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
-              const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
-              if (sendResult.deadToken) {
-                console.log(`[Posts] Pruning dead device: ${deviceId}`);
-                ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
-              }
-            } catch (err) {
-              console.error(`[Posts] FCM push failed for ${deviceId}:`, err?.message || err);
-            }
+      if (att) {
+        if (att.postMultiImageRenderer) {
+          kind = 'image';
+          const images = att.postMultiImageRenderer.images || [];
+          if (images[0]) {
+            const thumbs = images[0].thumbnails || [];
+            thumbnail = thumbs[thumbs.length - 1]?.url || null;
           }
+        } else if (att.pollRenderer) {
+          kind = 'poll';
+        } else if (att.imageRenderer) {
+          kind = 'image';
+          const thumbs = att.imageRenderer.image?.thumbnails || [];
+          thumbnail = thumbs[thumbs.length - 1]?.url || null;
+        } else if (att.videoRenderer) {
+          kind = 'video';
+          const thumbs = att.videoRenderer.thumbnail?.thumbnails || [];
+          thumbnail = thumbs[thumbs.length - 1]?.url || null;
         }
       }
-    } catch (err) {
-      results.errors.push(`${channelId}: ${err.message || err}`);
+
+      const postId = post.postId;
+      return {
+        activityId: postId,
+        publishedAt: new Date().toISOString(), // detection time as ground truth
+        text: textRuns,
+        thumbnail,
+        kind,
+        link: `https://www.youtube.com/post/${postId}`,
+      };
+    }).filter(Boolean);
+  } catch (err) {
+    console.error(`[Posts] InnerTube error for ${channelId}:`, err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Fan out community post notifications to subscribers. Called from
+// runRssPollCron after the RSS poll for each channel.
+async function pollCommunityPosts(env, ctx, channelId, accessToken, subs) {
+  const posts = await fetchChannelPostsInnerTube(channelId);
+  if (!posts || posts.length === 0) return { newPosts: 0 };
+
+  // First-run guard: if we've never polled this channel before,
+  // populate the recent list without firing notifications.
+  const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
+  if (!firstPollAt) {
+    await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), posts);
+    await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
+    console.log(`[Posts] first run for ${channelId}: stored ${posts.length} historical posts, no notifications`);
+    return { newPosts: 0 };
+  }
+
+  // Determine which posts are new.
+  const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
+  const prevIds = new Set(prevRecent.map((p) => p.activityId));
+  const newPosts = posts.filter((p) => !prevIds.has(p.activityId));
+
+  if (newPosts.length === 0) return { newPosts: 0 };
+
+  // Save updated recent list (newest first, capped at 30).
+  const merged = [...newPosts, ...prevRecent].slice(0, 30);
+  await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), merged);
+  console.log(`[Posts] ${channelId}: ${newPosts.length} new post(s)`);
+
+  const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+  const projectId = sa.project_id;
+
+  for (const post of newPosts) {
+    for (const deviceId of subs) {
+      const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+      if (!profile?.fcmToken) continue;
+
+      // Global + per-channel opt-out check.
+      const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
+      const overrideValue = override?.includeCommunityPosts;
+      if (overrideValue === false) continue;
+      if (overrideValue !== true) {
+        const settings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
+        if (!settings.includeCommunityPosts) continue;
+      }
+
+      // Track as unwatched for this device.
+      const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
+        unwatched: [],
+        nagCount: 0,
+      };
+      const postKey = `post:${post.activityId}`;
+      if (!state.unwatched.includes(postKey)) {
+        state.unwatched.push(postKey);
+        await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+      }
+
+      const truncated = post.text.length > 100
+        ? post.text.slice(0, 97) + '...'
+        : post.text;
+      const postLabel = post.kind === 'poll' ? 'posted a poll'
+        : post.kind === 'image' ? 'posted an image'
+        : post.kind === 'video' ? 'shared a video'
+        : 'posted';
+
+      const notifPayload = {
+        notification: {
+          title: `@${(profile.channelHandle || channelId)} ${postLabel}`,
+          body: truncated || '(no text)',
+        },
+        data: {
+          type: 'post',
+          channelId,
+          activityId: post.activityId,
+          postKind: post.kind,
+        },
+        tag: `post-${post.activityId}`,
+      };
+
+      try {
+        const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+        if (sendResult.deadToken) {
+          console.log(`[Posts] Pruning dead device: ${deviceId}`);
+          ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
+        }
+      } catch (err) {
+        console.error(`[Posts] FCM push failed for ${deviceId}:`, err?.message || err);
+      }
     }
   }
 
-  const elapsed = Date.now() - start;
-  console.log(`[Posts] Cron done: ${results.channelsPolled} channels, ${results.newPosts} new posts, ${results.errors.length} errors, ${elapsed}ms`);
-  return results;
+  return { newPosts: newPosts.length };
 }
 
 async function runNagCron(env, ctx) {
@@ -1085,6 +1134,7 @@ async function runRssPollCron(env, ctx) {
 
   console.log(`[YTData] Polling ${active.length} channel(s) via RSS`);
 
+  let accessToken = null;
   let totalNew = 0;
   let errors = 0;
 
@@ -1285,19 +1335,44 @@ async function runRssPollCron(env, ctx) {
 
       // 6. Get subscribers
       const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+
+      // 6a. Poll community posts via InnerTube (every 5 min, free, no quota).
+      // Folded into the RSS poll cycle because InnerTube has no documented
+      // rate limit and 5-min resolution gives better detection latency.
+      // The first-run guard inside pollCommunityPosts prevents notification
+      // floods on new installs.
+      if (subs.length > 0) {
+        try {
+          if (!accessToken) {
+            accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+          }
+          await pollCommunityPosts(env, ctx, channelId, accessToken, subs);
+        } catch (err) {
+          console.error(`[Posts] Error for ${channelId}:`, err?.message || err);
+        }
+      }
+
       if (subs.length === 0) {
+        // Still poll community posts for the first-run guard even with no subs,
+        // so the first subscriber gets the existing posts marked as known.
+        try {
+          await pollCommunityPosts(env, ctx, channelId, null, subs);
+        } catch (err) {
+          console.error(`[Posts] Error for ${channelId}:`, err?.message || err);
+        }
         totalNew += newVideos.length;
         continue;
       }
 
       // 7. Get FCM access token once
-      let accessToken;
-      try {
-        accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
-      } catch (err) {
-        console.error(`[YTData] FCM token error:`, err);
-        totalNew += newVideos.length;
-        continue;
+      if (!accessToken) {
+        try {
+          accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+        } catch (err) {
+          console.error(`[YTData] FCM token error:`, err);
+          totalNew += newVideos.length;
+          continue;
+        }
       }
       const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
       const projectId = sa.project_id;
@@ -1486,11 +1561,6 @@ export default {
     // Nag cycle: every 15 minutes (minute % 15 === 0)
     if (mins % 15 === 0) {
       results.nag = await runNagCron(env, ctx);
-    }
-
-    // Community posts: every hour (minute === 0)
-    if (mins === 0) {
-      results.posts = await runCommunityPostsCron(env, ctx);
     }
 
     // Lease renewal: every 6 hours (minute === 0 && hour % 6 === 0)
