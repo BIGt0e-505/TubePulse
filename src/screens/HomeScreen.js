@@ -279,12 +279,33 @@ export default function HomeScreen({ navigation }) {
     // deviceState.unwatched list), so update the local cache to keep
     // the UI consistent before the next /feed refresh.
     const cached = cacheRef.current[key];
-    if (cached?.posts?.some((p) => p.unwatched)) {
-      const updatedPosts = cached.posts.map((p) => ({ ...p, unwatched: false }));
-      const updatedCache = { ...cacheRef.current, [key]: { ...cached, posts: updatedPosts } };
-      cacheRef.current = updatedCache;
-      setCache(updatedCache);
-      try { await saveChannelCache(updatedCache); } catch {}
+    if (cached) {
+      const updatedCache = { ...cacheRef.current, [key]: { ...cached } };
+      let changed = false;
+
+      // Mark all videos as watched
+      if (cached.videos?.some((v) => v.unwatched)) {
+        updatedCache[key] = {
+          ...updatedCache[key],
+          videos: cached.videos.map((v) => ({ ...v, unwatched: false })),
+        };
+        changed = true;
+      }
+
+      // Mark all posts as watched
+      if (cached.posts?.some((p) => p.unwatched)) {
+        updatedCache[key] = {
+          ...updatedCache[key],
+          posts: cached.posts.map((p) => ({ ...p, unwatched: false })),
+        };
+        changed = true;
+      }
+
+      if (changed) {
+        cacheRef.current = updatedCache;
+        setCache(updatedCache);
+        try { await saveChannelCache(updatedCache); } catch {}
+      }
     }
 
     const deviceId = await getDeviceId();
@@ -309,14 +330,32 @@ export default function HomeScreen({ navigation }) {
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
 
-      // Server clear-all wipes post entries too. Mirror that locally.
+      // Server clear-all wipes both video and post entries. Mirror that locally.
       const cached = cacheRef.current[key];
-      if (cached?.posts?.some((p) => p.unwatched)) {
-        const updatedPosts = cached.posts.map((p) => ({ ...p, unwatched: false }));
-        const updatedCache = { ...cacheRef.current, [key]: { ...cached, posts: updatedPosts } };
-        cacheRef.current = updatedCache;
-        setCache(updatedCache);
-        try { await saveChannelCache(updatedCache); } catch {}
+      if (cached) {
+        const updatedCache = { ...cacheRef.current, [key]: { ...cached } };
+        let changed = false;
+
+        if (cached.videos?.some((v) => v.unwatched)) {
+          updatedCache[key] = {
+            ...updatedCache[key],
+            videos: cached.videos.map((v) => ({ ...v, unwatched: false })),
+          };
+          changed = true;
+        }
+        if (cached.posts?.some((p) => p.unwatched)) {
+          updatedCache[key] = {
+            ...updatedCache[key],
+            posts: cached.posts.map((p) => ({ ...p, unwatched: false })),
+          };
+          changed = true;
+        }
+
+        if (changed) {
+          cacheRef.current = updatedCache;
+          setCache(updatedCache);
+          try { await saveChannelCache(updatedCache); } catch {}
+        }
       }
 
       const deviceId = await getDeviceId();
