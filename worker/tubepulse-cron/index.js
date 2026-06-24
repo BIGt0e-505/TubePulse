@@ -772,8 +772,8 @@ async function fetchChannelPostsInnerTube(channelId) {
   const body = JSON.stringify({
     context: {
       client: {
-        clientName: 'ANDROID',
-        clientVersion: '19.09.37',
+        clientName: 'WEB',
+        clientVersion: '2.20260624.00.00',
         hl: 'en',
         gl: 'GB',
       },
@@ -1282,6 +1282,26 @@ async function runRssPollCron(env, ctx) {
         }
       }
 
+      // 3a. Poll community posts via InnerTube (every 5 min, free, no quota).
+      // Folded into the RSS poll cycle because InnerTube has no documented
+      // rate limit and 5-min resolution gives better detection latency.
+      // Runs BEFORE the newVideos check so posts are polled even when no
+      // new videos were detected this tick.
+      const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+      try {
+        if (subs.length > 0) {
+          if (!accessToken) {
+            accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+          }
+          await pollCommunityPosts(env, ctx, channelId, accessToken, subs);
+        } else {
+          // Still poll for the first-run guard even with no subs.
+          await pollCommunityPosts(env, ctx, channelId, null, subs);
+        }
+      } catch (err) {
+        console.error(`[Posts] Error for ${channelId}:`, err?.message || err);
+      }
+
       if (newVideos.length === 0) {
         if (recentChanged) {
           await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedPrev);
@@ -1333,33 +1353,8 @@ async function runRssPollCron(env, ctx) {
         await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
       }
 
-      // 6. Get subscribers
-      const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
-
-      // 6a. Poll community posts via InnerTube (every 5 min, free, no quota).
-      // Folded into the RSS poll cycle because InnerTube has no documented
-      // rate limit and 5-min resolution gives better detection latency.
-      // The first-run guard inside pollCommunityPosts prevents notification
-      // floods on new installs.
-      if (subs.length > 0) {
-        try {
-          if (!accessToken) {
-            accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
-          }
-          await pollCommunityPosts(env, ctx, channelId, accessToken, subs);
-        } catch (err) {
-          console.error(`[Posts] Error for ${channelId}:`, err?.message || err);
-        }
-      }
-
+      // 6. Get subscribers (already fetched above for community posts)
       if (subs.length === 0) {
-        // Still poll community posts for the first-run guard even with no subs,
-        // so the first subscriber gets the existing posts marked as known.
-        try {
-          await pollCommunityPosts(env, ctx, channelId, null, subs);
-        } catch (err) {
-          console.error(`[Posts] Error for ${channelId}:`, err?.message || err);
-        }
         totalNew += newVideos.length;
         continue;
       }

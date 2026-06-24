@@ -376,10 +376,14 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handlePostTap = async (channel, post) => {
-    // Mark as seen server-side. The activityId is namespaced with
-    // "post:" in the server's unwatched list so it doesn't collide
-    // with video IDs. We update the local cache immediately for a
-    // snappy UI; the next /feed refresh will reconcile any drift.
+    // When tapAction is 'channel', tapping a post does the same as
+    // tapping a video: mark all seen + open the channel page.
+    if (settings.tapAction === 'channel') {
+      handleChannelOpen(channel);
+      return;
+    }
+
+    // Default: mark this post as seen server-side and open it.
     const key = channel.handle;
     const postKey = `post:${post.activityId}`;
     const cached = cacheRef.current[key];
