@@ -41,6 +41,8 @@ Last worker deploy recorded: 2026-06-25.
 
 The app release/version remains unchanged at `3.2.4` with Android `versionCode 324`. Worker deployment is separate from app APK release; the cron deploy did not create an app release, bump versions, or publish a GitHub Release.
 
+Community-post worker/app support exists in the repo, but runtime community-post polling and `/feed` post rows are gated by `TUBEPULSE_ENABLE_COMMUNITY_POSTS`. The gate is disabled by default when the environment variable is missing or any value other than `1`, `true`, or `yes`. This keeps current workers deployable without re-enabling community-post polling or serving stale post rows until the contract is deliberately re-enabled.
+
 ---
 ## Active Components
 

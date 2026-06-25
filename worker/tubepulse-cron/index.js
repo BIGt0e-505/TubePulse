@@ -51,6 +51,11 @@ async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
 // Note: kv.list() isn't called anywhere in this worker (the channels:active
 // index replaces it). If it ever is, the counter is here and ready.
 
+function isCommunityPostsEnabled(env) {
+  const value = String(env.TUBEPULSE_ENABLE_COMMUNITY_POSTS || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
 // ÔöÇÔöÇÔöÇ Cleanup helpers ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // Identical logic to the API worker's cleanup helpers. Kept in sync so
@@ -778,6 +783,11 @@ async function runPrewarnCron(env, ctx) {
 
 async function runCommunityPostsCron(env, ctx) {
   const start = Date.now();
+  if (!isCommunityPostsEnabled(env)) {
+    console.log('[Posts] disabled by TUBEPULSE_ENABLE_COMMUNITY_POSTS');
+    return { disabled: true, channelsPolled: 0, newPosts: 0, errors: [] };
+  }
+
   const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
   const apiKey = env.YOUTUBE_API_KEY;
   const results = { channelsPolled: 0, newPosts: 0, errors: [] };

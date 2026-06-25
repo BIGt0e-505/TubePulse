@@ -87,6 +87,11 @@ const key = {
 async function getKV(kv, k) { return await kv.get(k, 'json'); }
 async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
 
+function isCommunityPostsEnabled(env) {
+  const value = String(env.TUBEPULSE_ENABLE_COMMUNITY_POSTS || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
 // ─── Cleanup helpers ────────────────────────────────────────────────────
 //
 // These remove state for channels/devices that no longer need it. Both
@@ -1127,9 +1132,12 @@ async function handleSeen(request, env) {
  * @param {string} channelId
  * @param {string} deviceId
  * @param {boolean} globalInclude — global setting from deviceSettings
+ * @param {boolean} communityPostsEnabled
  * @returns {Promise<Array>}
  */
-async function getFeedPostsForChannel(env, channelId, deviceId, globalInclude) {
+async function getFeedPostsForChannel(env, channelId, deviceId, globalInclude, communityPostsEnabled) {
+  if (!communityPostsEnabled) return [];
+
   // Per-channel override takes precedence. If the user has explicitly
   // set it (true or false), use that. Otherwise fall back to the global.
   const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
@@ -1158,6 +1166,7 @@ async function handleFeed(request, env) {
 
   const deviceSettings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
   const globalIncludePosts = !!deviceSettings.includeCommunityPosts;
+  const communityPostsEnabled = isCommunityPostsEnabled(env);
 
   const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
   if (!profile) return errorResponse('Device not registered', 404);
@@ -1178,9 +1187,9 @@ async function handleFeed(request, env) {
       unwatched: unwatched.includes(v.videoId),
     }));
 
-    // Posts: empty array when disabled at both global and per-channel level.
-    // getFeedPostsForChannel handles the override-precedence logic.
-    const posts = await getFeedPostsForChannel(env, channelId, deviceId, globalIncludePosts);
+    // Posts are feature-gated independently of user settings so stale
+    // post cache cannot leak into /feed while the worker contract is off.
+    const posts = await getFeedPostsForChannel(env, channelId, deviceId, globalIncludePosts, communityPostsEnabled);
 
     return {
       channelId,
