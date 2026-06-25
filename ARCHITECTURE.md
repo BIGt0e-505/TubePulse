@@ -254,18 +254,18 @@ channels:active
   Written:  on first subscriber added to a channel
             on last subscriber removed from a channel
   Note: This is the ONLY list-style index. We maintain it manually
-        rather than using KV.list() so list operations stay at zero.
+        rather than using KV.list() in the cron hot path. Note: the current API `/register` path intentionally uses `KV.list({ prefix: 'device:' })` for slow-path FCM-token migration; see [worker/CONTRACTS.md](worker/CONTRACTS.md).
 ```
 
-### 5.4 Why no `KV.list()` anywhere
+### 5.4 `KV.list()` constraints and current exception
 
-Every place the previous version called `KV.list()`, this architecture either:
+Most hot-path places where the previous version called `KV.list()` now either:
 
 1. Has the data already (channel-first means we know which channel triggered the work)
 2. Reads a maintained index key (`channels:active` for lease renewal)
 3. Uses a time-bucketed key the cron reads directly
 
-`KV.list()` calls in the codebase should be treated as a bug.
+New `KV.list()` calls in hot paths should be treated as suspicious. The current `/register` migration exception is documented in [worker/CONTRACTS.md](worker/CONTRACTS.md).
 
 ### 5.5 Read/write costs per operation
 
