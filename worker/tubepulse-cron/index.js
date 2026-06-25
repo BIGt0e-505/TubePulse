@@ -10,7 +10,7 @@
  * Each job reads the bucket for "now" and processes entries.
  */
 
-// ─── Key builders (must match API worker) ────────────────────────────────
+// ÔöÇÔöÇÔöÇ Key builders (must match API worker) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 const key = {
   channelMeta:      (channelId) => `channel:${channelId}:meta`,
@@ -38,7 +38,7 @@ const key = {
   upcomingEvents:   ()          => `upcoming:events:list`,
 };
 
-// KV operation counters — incremented on every get/put/delete and logged
+// KV operation counters ÔÇö incremented on every get/put/delete and logged
 // at the end of each scheduled tick. Lets us watch free-tier usage in
 // the wrangler tail without needing Cloudflare Analytics Engine access.
 // Resets at the start of every scheduled() call.
@@ -50,7 +50,7 @@ async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
 // Note: kv.list() isn't called anywhere in this worker (the channels:active
 // index replaces it). If it ever is, the counter is here and ready.
 
-// ─── Cleanup helpers ────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ Cleanup helpers ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // Identical logic to the API worker's cleanup helpers. Kept in sync so
 // both workers can clean up dead devices/channels the same way.
@@ -91,7 +91,7 @@ async function cleanupDeadChannel(channelId, env, reason = 'last_subscriber_dead
 
 /**
  * Remove a device's full state once FCM has reported it dead (UNREGISTERED).
- * Also cleans up every channel the device was subscribed to — and if any
+ * Also cleans up every channel the device was subscribed to ÔÇö and if any
  * of those channels go from N=1 to N=0 subscribers, the channel is also
  * cleaned via cleanupDeadChannel.
  *
@@ -144,7 +144,7 @@ async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
   return { channelsCleaned, devicesDeleted };
 }
 
-// ─── DND logic ──────────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ DND logic ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 function isDndActive(dndStart, dndEnd, timezone = 'UTC') {
   const [sh, sm] = dndStart.split(':').map(Number);
@@ -178,7 +178,7 @@ function isDndActive(dndStart, dndEnd, timezone = 'UTC') {
   }
 }
 
-// ─── Time bucket helpers ────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ Time bucket helpers ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 function currentUpcomingBucket() {
   const d = new Date();
@@ -208,29 +208,29 @@ function classifyVideo(entry) {
   if (!entry.published) return 'video';
   const publishedTime = new Date(entry.published).getTime();
   const now = Date.now();
-  // Future-dated → live_scheduled (premieres / scheduled livestreams)
+  // Future-dated ÔåÆ live_scheduled (premieres / scheduled livestreams)
   if (publishedTime > now + 5 * 60 * 1000) return 'live_scheduled';
   const title = (entry.title || '').toLowerCase();
-  if (title.startsWith('🔴') || title.includes(' live')) return 'live';
+  if (title.startsWith('­ƒö┤') || title.includes(' live')) return 'live';
   return 'video';
 }
 
-// ─── YouTube Data API helpers (RSS feeds are 404 as of 2024-2025) ──────
+// ÔöÇÔöÇÔöÇ YouTube Data API helpers (RSS feeds are 404 as of 2024-2025) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 // PubSubHubbub (WebSub) hub was also shut down by Google.
-// ╔══════════════════════════════════════════════════════════════════════╗
-// ║  DEAD CODE — v3.0.18                                                 ║
-// ║                                                                      ║
-// ║  These three functions used to power the YouTube Data API poller.   ║
-// ║  runRssPollCron now uses RSS exclusively (see parseRSSFeed +         ║
-// ║  fetchChannelRSS above and runRssPollCron below), so the YouTube    ║
-// ║  Data API is no longer called from the cron worker at all.          ║
-// ║                                                                      ║
-// ║  The cron tick used to cost ~2 quota units per channel per 5-min.   ║
-// ║  It now costs 0 quota units. The YouTube Data API is only used     ║
-// ║  from the API worker, and only at subscribe time (one-time).        ║
-// ║                                                                      ║
-// ║  Kept here for reference. Can be deleted safely.                    ║
-// ╚══════════════════════════════════════════════════════════════════════╝
+// ÔòöÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòù
+// Ôòæ  DEAD CODE ÔÇö v3.0.18                                                 Ôòæ
+// Ôòæ                                                                      Ôòæ
+// Ôòæ  These three functions used to power the YouTube Data API poller.   Ôòæ
+// Ôòæ  runRssPollCron now uses RSS exclusively (see parseRSSFeed +         Ôòæ
+// Ôòæ  fetchChannelRSS above and runRssPollCron below), so the YouTube    Ôòæ
+// Ôòæ  Data API is no longer called from the cron worker at all.          Ôòæ
+// Ôòæ                                                                      Ôòæ
+// Ôòæ  The cron tick used to cost ~2 quota units per channel per 5-min.   Ôòæ
+// Ôòæ  It now costs 0 quota units. The YouTube Data API is only used     Ôòæ
+// Ôòæ  from the API worker, and only at subscribe time (one-time).        Ôòæ
+// Ôòæ                                                                      Ôòæ
+// Ôòæ  Kept here for reference. Can be deleted safely.                    Ôòæ
+// ÔòÜÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòØ
 
 // Fallback: poll YouTube Data API for each active channel every 5 minutes.
 // Cost: 1 unit per channels.list (once per channel to get uploads playlist ID,
@@ -314,7 +314,7 @@ async function fetchViewCounts(apiKey, videoIds) {
   }
 }
 
-// Lightweight RSS/Atom feed parser — extracts videoId, title, published,
+// Lightweight RSS/Atom feed parser ÔÇö extracts videoId, title, published,
 // thumbnail, link, and media:statistics views from a YouTube videos.xml
 // feed. Mirrors parseWebSubPush in tubepulse-api/index.js; both workers
 // can parse feeds without a heavy XML library.
@@ -345,7 +345,7 @@ function parseRSSFeed(xmlText) {
     //   <media:starRating count="123" average="4.5" min="1" max="5"/>
     // while dislikes is a sibling attribute on media:statistics:
     //   <media:statistics views="123" dislikes="4"/>
-    // — but the historical-and-most-common shape is:
+    // ÔÇö but the historical-and-most-common shape is:
     //   <media:starRating count="123" average="4.5" min="1" max="5"/>
     //   <media:statistics views="123"/>
     // i.e. count on starRating = likes, dislikes absent in many feeds.
@@ -400,21 +400,21 @@ async function fetchChannelRSS(channelId) {
   }
 }
 
-// ─── WebSub lease renewal (DISABLED — PubSubHubbub hub is dead) ───────
+// ÔöÇÔöÇÔöÇ WebSub lease renewal (DISABLED ÔÇö PubSubHubbub hub is dead) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 // Google's pubsubhubbub.appspot.com hub was shut down in 2024.
 // WebSub subscriptions can no longer be established or renewed for YouTube.
 // The RSS poller (runRssPollCron above) replaces push notifications entirely.
 // Keep this function for archival; runLeaseCron is now a no-op.
 
 const HUB_URL = 'https://pubsubhubbub.appspot.com/';  // defunct
-const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';  // active — used by fetchChannelRSS above
+const FEED_TEMPLATE = 'https://www.youtube.com/feeds/videos.xml?channel_id=';  // active ÔÇö used by fetchChannelRSS above
 
 async function renewSubscriptions(env, callbackUrl) {
   // No-op: WebSub hub is dead, polling is the active path
   return 0;
 }
 
-// ─── FCM Push ───────────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ FCM Push ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 async function getGoogleAccessToken(serviceAccountJson) {
   const sa = JSON.parse(serviceAccountJson);
@@ -531,7 +531,7 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   return { sent: true, deadToken: false };
 }
 
-// ─── Job 1: Upcoming events (drain only, every 5 min) ─────────────────
+// ÔöÇÔöÇÔöÇ Job 1: Upcoming events (drain only, every 5 min) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // In v3.1 the upcoming bucket scheme is no longer used. The cron's
 // prewarn logic is driven by the global `upcoming:events:list` (see
@@ -556,7 +556,7 @@ async function runUpcomingCron(env, ctx) {
   return { drained: entries.length };
 }
 
-// ─── Job 1b: Prewarn (per-device pre-notification before live) ──────────
+// ÔöÇÔöÇÔöÇ Job 1b: Prewarn (per-device pre-notification before live) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // Iterates the global list of currently-scheduled live events and
 // fires a per-device "going live in N minutes/hours/days" push to
@@ -610,12 +610,12 @@ async function runPrewarnCron(env, ctx) {
   for (const event of events) {
     const scheduledFor = new Date(event.scheduledFor).getTime();
     if (isNaN(scheduledFor)) {
-      // Malformed event — drop it.
+      // Malformed event ÔÇö drop it.
       pruned++;
       continue;
     }
 
-    // Past the grace window — remove from the list and clean up sent keys.
+    // Past the grace window ÔÇö remove from the list and clean up sent keys.
     if (now > scheduledFor + PREWARN_GRACE_MS) {
       pruned++;
       const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(event.channelId)) || [];
@@ -627,7 +627,7 @@ async function runPrewarnCron(env, ctx) {
 
     stillValid.push(event);
 
-    // Past the scheduled time + slack — the regular RSS-poll push
+    // Past the scheduled time + slack ÔÇö the regular RSS-poll push
     // for the now-live video has already fired. No prewarn needed.
     // Keep the event in the list until the grace window for cleanup.
     if (now > scheduledFor + PREWARN_SLACK_MS) continue;
@@ -652,7 +652,7 @@ async function runPrewarnCron(env, ctx) {
         ?? settings?.prewarnMinutes
         ?? DEFAULT_PREWARN_MINUTES;
       if (!PREWARN_OPTIONS_MINUTES.includes(prewarnMinutes)) {
-        // Unknown / invalid value — treat as default. Don't write to KV;
+        // Unknown / invalid value ÔÇö treat as default. Don't write to KV;
         // the user just hasn't set a valid value yet.
       }
       const effectiveMinutes = PREWARN_OPTIONS_MINUTES.includes(prewarnMinutes)
@@ -671,7 +671,7 @@ async function runPrewarnCron(env, ctx) {
       //
       // Exception: if the prewarn time is so close to live that the
       // remaining time rounds to 0 minutes, the prewarn is no longer
-      // useful — the live push is the notification. Mark sent and
+      // useful ÔÇö the live push is the notification. Mark sent and
       // skip rather than firing a "starting in 0 minutes" push.
       const remainingMs = Math.max(0, scheduledFor - now);
       if (remainingMs < 30000) {
@@ -690,7 +690,7 @@ async function runPrewarnCron(env, ctx) {
       const dndTimezone = settings?.dndTimezone || 'UTC';
       const dndActive = dndEnabled && isDndActive(dndStart, dndEnd, dndTimezone);
       if (dndActive && !override?.dndBypass) {
-        // Don't mark as sent — DND might end before the event; we'll
+        // Don't mark as sent ÔÇö DND might end before the event; we'll
         // re-evaluate on the next tick. But cap retries: if we're
         // within 5 min of the event start, give up.
         if (now > scheduledFor - PREWARN_SLACK_MS) {
@@ -700,7 +700,7 @@ async function runPrewarnCron(env, ctx) {
       }
 
       // Fire the prewarn. The body shows the actual remaining time
-      // (live - now), not the configured prewarnMinutes — the cron
+      // (live - now), not the configured prewarnMinutes ÔÇö the cron
       // is 5-min so the prewarn can fire up to a few minutes late,
       // and we want the user to see accurate information.
       const remainingMinutes = Math.round(remainingMs / 60000);
@@ -746,208 +746,159 @@ async function runPrewarnCron(env, ctx) {
   return { checked: events.length, fired, pruned };
 }
 
-// ─── Job 2: Nag cycle (every 15 min) ────────────────────────────────────
+// ÔöÇÔöÇÔöÇ Job 2: Nag cycle (every 15 min) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
-// ─── Community posts via InnerTube ────────────────────────────────────
-// YouTube deprecated community posts (formerly "channel bulletins") from
-// the Data API activities.list endpoint. The `social` activity type is no
-// longer returned. We now use YouTube's internal InnerTube browse API
-// to fetch the Posts tab for each channel.
+// ÔöÇÔöÇÔöÇ Community posts cron ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+// Polls YouTube's Data API activities.list for each active channel
+// once per hour. Captures community posts (text, images, polls) and
+// notifies subscribers when a new one is detected. Cost: 1 quota
+// unit per channel per hour. With 4 channels and a 10k daily free
+// tier budget, this is ~100 units/day or 1% of the free tier.
 //
-// InnerTube is the same API the YouTube website and Android app use. It
-// requires no API key, no cookies, no consent, and has no documented
-// quota. The response is ~4KB per channel. We use the ANDROID client to
-// mimic the YouTube app.
-//
-// The publishedTimeText from InnerTube is relative ("2 days ago"), not
-// an ISO timestamp. We use detection time (now) as publishedAt — this is
-// the ground truth for "when TubePulse first saw this post" and is
-// accurate to within 5 minutes (the poll interval).
+// The "first run" guard: when a channel is first polled, the recent
+// posts list is populated but no notifications fire for pre-existing
+// posts. This avoids a flood of notifications on first install or
+// when the feature is first enabled.
 
-const INNERTUBE_KEY = 'AIzaSyA8eiZ6LYd7pPjx3MIe3fwGy7GZ1Z2Y3Z4'; // public web client key
-const POSTS_TAB_PARAMS = 'EgVwb3N0c_IGBAoCSgA%3D';
+async function runCommunityPostsCron(env, ctx) {
+  const start = Date.now();
+  const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
+  const apiKey = env.YOUTUBE_API_KEY;
+  const results = { channelsPolled: 0, newPosts: 0, errors: [] };
 
-async function fetchChannelPostsInnerTube(channelId) {
-  const url = `https://www.youtube.com/youtubei/v1/browse?key=${INNERTUBE_KEY}`;
-  const body = JSON.stringify({
-    context: {
-      client: {
-        clientName: 'WEB',
-        clientVersion: '2.20260624.00.00',
-        hl: 'en',
-        gl: 'GB',
-      },
-    },
-    browseId: channelId,
-    params: POSTS_TAB_PARAMS,
-  });
+  for (const channelId of channelsActive) {
+    try {
+      results.channelsPolled++;
+      const url = `https://www.googleapis.com/youtube/v3/activities?part=snippet&channelId=${encodeURIComponent(channelId)}&maxResults=20&key=${apiKey}`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        const text = await resp.text();
+        results.errors.push(`${channelId}: ${resp.status} ${text.slice(0, 100)}`);
+        continue;
+      }
+      const data = await resp.json();
+      const items = data.items || [];
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
-  try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      signal: controller.signal,
-    });
-    if (!resp.ok) {
-      console.warn(`[Posts] InnerTube HTTP ${resp.status} for ${channelId}`);
-      return null;
-    }
-    const data = await resp.json();
+      // Filter to community posts (type === 'social') and shape them.
+      const posts = items
+        .filter((it) => it.snippet?.type === 'social')
+        .map((it) => {
+          const snip = it.snippet;
+          const att = (snip.attachments || [])[0];
+          return {
+            activityId: it.id,
+            publishedAt: snip.publishedAt,
+            text: snip.description || '',
+            // Thumbnail only for image posts. Polls, quizzes, and plain
+            // text posts have no usable single-image URL.
+            thumbnail: (att && att.type === 'image' && att.url) ? att.url : null,
+            kind: att ? att.type : 'text',
+            link: `https://www.youtube.com/channel/${channelId}/community`,
+          };
+        });
 
-    // Navigate: contents.twoColumnBrowseResultsRenderer.tabs → Posts tab →
-    // sectionListRenderer → itemSectionRenderer → backstagePostThreadRenderer
-    const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
-    const postsTab = tabs.find((t) => t.tabRenderer?.title === 'Posts');
-    if (!postsTab) return [];
+      // First-run guard: if we've never polled this channel before,
+      // populate the recent list without firing notifications.
+      const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
+      if (!firstPollAt) {
+        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), posts);
+        await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
+        console.log(`[Posts] first run for ${channelId}: stored ${posts.length} historical posts, no notifications`);
+        continue;
+      }
 
-    const sections = postsTab.tabRenderer.content?.sectionListRenderer?.contents || [];
-    const items = sections.flatMap((s) => s.itemSectionRenderer?.contents || []);
-    const threads = items.filter((i) => i.backstagePostThreadRenderer);
+      // Determine which posts are new.
+      const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
+      const prevIds = new Set(prevRecent.map((p) => p.activityId));
+      const newPosts = posts.filter((p) => !prevIds.has(p.activityId));
 
-    return threads.map((thread) => {
-      const post = thread.backstagePostThreadRenderer.post?.backstagePostRenderer;
-      if (!post) return null;
+      if (newPosts.length > 0) {
+        // Save updated recent list (newest first).
+        const merged = [...newPosts, ...prevRecent].slice(0, 30);
+        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), merged);
+        results.newPosts += newPosts.length;
+        console.log(`[Posts] ${channelId}: ${newPosts.length} new post(s)`);
 
-      const textRuns = post.contentText?.runs?.map((r) => r.text).join('') || '';
+        // Notify subscribers. Per-channel opt-out respected: if a
+        // device's channel override has includeCommunityPosts === false,
+        // skip that device. The cron reads each subscriber's profile +
+        // override and fans out a push notification per (new post,
+        // subscriber) pair.
+        const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+        for (const post of newPosts) {
+          for (const deviceId of subs) {
+            const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
+            if (!profile?.fcmToken) continue;
 
-      // Determine kind and thumbnail from backstageAttachment
-      const att = post.backstageAttachment;
-      let kind = 'text';
-      let thumbnail = null;
+            // Global + per-channel opt-out check. Per-channel override
+            // (true|false) wins; otherwise the global setting applies.
+            const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
+            const overrideValue = override?.includeCommunityPosts;
+            if (overrideValue === false) continue; // explicit channel opt-out
+            if (overrideValue !== true) {
+              // No override ÔåÆ fall back to global. Skip if global is off.
+              const settings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
+              if (!settings.includeCommunityPosts) continue;
+            }
 
-      if (att) {
-        if (att.postMultiImageRenderer) {
-          kind = 'image';
-          const images = att.postMultiImageRenderer.images || [];
-          if (images[0]) {
-            const thumbs = images[0].thumbnails || [];
-            thumbnail = thumbs[thumbs.length - 1]?.url || null;
+            // Track the post as unwatched for this device so the app
+            // shows the blue dot and the server's /seen endpoint can
+            // clear it. activityIds are namespaced with "post:" so they
+            // don't collide with video IDs in the shared unwatched list.
+            const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
+              unwatched: [],
+              nagCount: 0,
+            };
+            const postKey = `post:${post.activityId}`;
+            if (!state.unwatched.includes(postKey)) {
+              state.unwatched.push(postKey);
+              await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+            }
+
+            const truncated = post.text.length > 100
+              ? post.text.slice(0, 97) + '...'
+              : post.text;
+            const postLabel = post.kind === 'poll' ? 'posted a poll'
+              : post.kind === 'image' ? 'posted an image'
+              : 'posted';
+
+            const notifPayload = {
+              notification: {
+                title: `@${(profile.channelHandle || channelId)} ${postLabel}`,
+                body: truncated || '(no text)',
+              },
+              data: {
+                type: 'post',
+                channelId,
+                activityId: post.activityId,
+                postKind: post.kind,
+              },
+              token: profile.fcmToken,
+            };
+
+            const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+            const projectId = sa.project_id;
+            try {
+              const accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+              const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+              if (sendResult.deadToken) {
+                console.log(`[Posts] Pruning dead device: ${deviceId}`);
+                ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
+              }
+            } catch (err) {
+              console.error(`[Posts] FCM push failed for ${deviceId}:`, err?.message || err);
+            }
           }
-        } else if (att.pollRenderer) {
-          kind = 'poll';
-        } else if (att.imageRenderer) {
-          kind = 'image';
-          const thumbs = att.imageRenderer.image?.thumbnails || [];
-          thumbnail = thumbs[thumbs.length - 1]?.url || null;
-        } else if (att.videoRenderer) {
-          kind = 'video';
-          const thumbs = att.videoRenderer.thumbnail?.thumbnails || [];
-          thumbnail = thumbs[thumbs.length - 1]?.url || null;
         }
       }
-
-      const postId = post.postId;
-      return {
-        activityId: postId,
-        publishedAt: new Date().toISOString(), // detection time as ground truth
-        text: textRuns,
-        thumbnail,
-        kind,
-        link: `https://www.youtube.com/post/${postId}`,
-      };
-    }).filter(Boolean);
-  } catch (err) {
-    console.error(`[Posts] InnerTube error for ${channelId}:`, err.message);
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Fan out community post notifications to subscribers. Called from
-// runRssPollCron after the RSS poll for each channel.
-async function pollCommunityPosts(env, ctx, channelId, accessToken, subs) {
-  const posts = await fetchChannelPostsInnerTube(channelId);
-  if (!posts || posts.length === 0) return { newPosts: 0 };
-
-  // First-run guard: if we've never polled this channel before,
-  // populate the recent list without firing notifications.
-  const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
-  if (!firstPollAt) {
-    await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), posts);
-    await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
-    console.log(`[Posts] first run for ${channelId}: stored ${posts.length} historical posts, no notifications`);
-    return { newPosts: 0 };
-  }
-
-  // Determine which posts are new.
-  const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
-  const prevIds = new Set(prevRecent.map((p) => p.activityId));
-  const newPosts = posts.filter((p) => !prevIds.has(p.activityId));
-
-  if (newPosts.length === 0) return { newPosts: 0 };
-
-  // Save updated recent list (newest first, capped at 30).
-  const merged = [...newPosts, ...prevRecent].slice(0, 30);
-  await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), merged);
-  console.log(`[Posts] ${channelId}: ${newPosts.length} new post(s)`);
-
-  const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
-  const projectId = sa.project_id;
-
-  for (const post of newPosts) {
-    for (const deviceId of subs) {
-      const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
-      if (!profile?.fcmToken) continue;
-
-      // Global + per-channel opt-out check.
-      const override = await getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId));
-      const overrideValue = override?.includeCommunityPosts;
-      if (overrideValue === false) continue;
-      if (overrideValue !== true) {
-        const settings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
-        if (!settings.includeCommunityPosts) continue;
-      }
-
-      // Track as unwatched for this device.
-      const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
-        unwatched: [],
-        nagCount: 0,
-      };
-      const postKey = `post:${post.activityId}`;
-      if (!state.unwatched.includes(postKey)) {
-        state.unwatched.push(postKey);
-        await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
-      }
-
-      const truncated = post.text.length > 100
-        ? post.text.slice(0, 97) + '...'
-        : post.text;
-      const postLabel = post.kind === 'poll' ? 'posted a poll'
-        : post.kind === 'image' ? 'posted an image'
-        : post.kind === 'video' ? 'shared a video'
-        : 'posted';
-
-      const notifPayload = {
-        notification: {
-          title: `@${(profile.channelHandle || channelId)} ${postLabel}`,
-          body: truncated || '(no text)',
-        },
-        data: {
-          type: 'post',
-          channelId,
-          activityId: post.activityId,
-          postKind: post.kind,
-        },
-        tag: `post-${post.activityId}`,
-      };
-
-      try {
-        const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
-        if (sendResult.deadToken) {
-          console.log(`[Posts] Pruning dead device: ${deviceId}`);
-          ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
-        }
-      } catch (err) {
-        console.error(`[Posts] FCM push failed for ${deviceId}:`, err?.message || err);
-      }
+    } catch (err) {
+      results.errors.push(`${channelId}: ${err.message || err}`);
     }
   }
 
-  return { newPosts: newPosts.length };
+  const elapsed = Date.now() - start;
+  console.log(`[Posts] Cron done: ${results.channelsPolled} channels, ${results.newPosts} new posts, ${results.errors.length} errors, ${elapsed}ms`);
+  return results;
 }
 
 async function runNagCron(env, ctx) {
@@ -1090,7 +1041,7 @@ async function runNagCron(env, ctx) {
     }
   }
 
-  // Clean up dead tokens — full device cleanup so the KV state stays
+  // Clean up dead tokens ÔÇö full device cleanup so the KV state stays
   // consistent (don't leave orphaned profile/settings/state/override keys
   // for devices the FCM server has confirmed are gone).
   for (const deviceId of deadTokens) {
@@ -1104,25 +1055,25 @@ async function runNagCron(env, ctx) {
   return { fired };
 }
 
-// ─── Job 2.5: YouTube RSS polling (every 5 min) ─────────────────────
+// ÔöÇÔöÇÔöÇ Job 2.5: YouTube RSS polling (every 5 min) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 // Active new-video detection path. Uses the public YouTube RSS feed
 // (https://www.youtube.com/feeds/videos.xml?channel_id=...) which costs
 // zero YouTube Data API quota. Each feed entry carries videoId, title,
 // publishedAt, thumbnail, link, and view count (from media:statistics).
 //
 // The YouTube Data API is now used ONLY at subscribe time by the API
-// worker (handle → channelId resolve, channel meta + avatar fetch).
+// worker (handle ÔåÆ channelId resolve, channel meta + avatar fetch).
 // After subscribe, the channel meta is cached in KV and never re-fetched
-// by the cron — RSS is enough for the recent list.
+// by the cron ÔÇö RSS is enough for the recent list.
 //
 // What this means for the YouTube Data API quota budget:
 //   - 1 unit per subscribe (one-time, only when a new channel is added)
 //   - 0 units per 5-min tick
 //   - Previously: ~2 units per channel per 5-min tick (playlistItems + videos.statistics)
-//   - At 50 channels: ~28,800 units/day → 0 units/day
+//   - At 50 channels: ~28,800 units/day ÔåÆ 0 units/day
 //
 // What this means for Cloudflare KV budget:
-//   - Reads per channel per tick: 1 (recent) + 1 (meta, only if changed) ≈ 1-2
+//   - Reads per channel per tick: 1 (recent) + 1 (meta, only if changed) Ôëê 1-2
 //   - Writes per channel per tick: 0 if nothing changed, 1 if recent changed
 //   - With 50 channels: 50-100 writes/day, well under the 1,000/day free tier
 
@@ -1134,7 +1085,6 @@ async function runRssPollCron(env, ctx) {
 
   console.log(`[YTData] Polling ${active.length} channel(s) via RSS`);
 
-  let accessToken = null;
   let totalNew = 0;
   let errors = 0;
 
@@ -1146,7 +1096,7 @@ async function runRssPollCron(env, ctx) {
       if (!feed) {
         errors++;
         if (errors > 5) {
-          console.error('[YTData] Multiple RSS errors — aborting poll');
+          console.error('[YTData] Multiple RSS errors ÔÇö aborting poll');
           break;
         }
         continue;
@@ -1177,7 +1127,7 @@ async function runRssPollCron(env, ctx) {
       // 3. Hourly view-count refresh for the LATEST video only.
       //
       // The RSS response gives us fresh view counts for all 15 videos
-      // for free, but we don't want to write every tick — that would
+      // for free, but we don't want to write every tick ÔÇö that would
       // burn ~576 writes/day for 4 channels. So:
       //
       //   - Only the latest video's view count is considered for writes
@@ -1187,10 +1137,10 @@ async function runRssPollCron(env, ctx) {
       //     last value we stored (so small tick-by-tick fluctuations
       //     don't trigger writes)
       //   - View counts on prior videos (index 1-14) are read into the
-      //     local `refreshedPrev` but NOT persisted — they're ignored
+      //     local `refreshedPrev` but NOT persisted ÔÇö they're ignored
       //     for the write decision and stay at their last stored value
       //   - When a new video is detected, we still write the new list
-      //     (which includes the new video's view count) — that path
+      //     (which includes the new video's view count) ÔÇö that path
       //     is handled below
       //
       // Net effect: cron writes drop from ~576/day to ~96/day for 4
@@ -1206,7 +1156,7 @@ async function runRssPollCron(env, ctx) {
       // and never had engagement metrics. Once populated, the field
       // is present and this block becomes a no-op.
       //
-      // Only writes if at least one video was actually backfilled —
+      // Only writes if at least one video was actually backfilled ÔÇö
       // keeps the write cost at one transition write per channel,
       // not one write per tick. After the first run, no more writes
       // are generated by this block.
@@ -1247,7 +1197,7 @@ async function runRssPollCron(env, ctx) {
         );
 
         // Likes / dislikes: also refresh hourly on the latest video.
-        // Use a simple "any change" rule — likes/dislikes are cheap to
+        // Use a simple "any change" rule ÔÇö likes/dislikes are cheap to
         // store and useful to see updated.
         const oldLikes = latest.likes;
         const newLikes = latestFromRss.likes != null ? String(latestFromRss.likes) : null;
@@ -1262,7 +1212,7 @@ async function runRssPollCron(env, ctx) {
           refreshedPrev[0] = { ...latest, views: String(newViews), viewsLastCheckedHour: currentHour };
           recentChanged = true;
         } else if (latest.viewsLastCheckedHour === undefined) {
-          // First time we see this video — record the hour so we don't
+          // First time we see this video ÔÇö record the hour so we don't
           // re-check on the next tick. Don't write yet; wait for an
           // actual change.
           refreshedPrev[0] = { ...latest, viewsLastCheckedHour: currentHour };
@@ -1282,26 +1232,6 @@ async function runRssPollCron(env, ctx) {
         }
       }
 
-      // 3a. Poll community posts via InnerTube (every 5 min, free, no quota).
-      // Folded into the RSS poll cycle because InnerTube has no documented
-      // rate limit and 5-min resolution gives better detection latency.
-      // Runs BEFORE the newVideos check so posts are polled even when no
-      // new videos were detected this tick.
-      const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
-      try {
-        if (subs.length > 0) {
-          if (!accessToken) {
-            accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
-          }
-          await pollCommunityPosts(env, ctx, channelId, accessToken, subs);
-        } else {
-          // Still poll for the first-run guard even with no subs.
-          await pollCommunityPosts(env, ctx, channelId, null, subs);
-        }
-      } catch (err) {
-        console.error(`[Posts] Error for ${channelId}:`, err?.message || err);
-      }
-
       if (newVideos.length === 0) {
         if (recentChanged) {
           await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedPrev);
@@ -1309,7 +1239,7 @@ async function runRssPollCron(env, ctx) {
         continue;
       }
 
-      // 4. New videos detected — build the updated recent list
+      // 4. New videos detected ÔÇö build the updated recent list
       // The newest video's view count is fresh from this RSS response.
       // Prior videos keep their last-stored view counts (we don't bother
       // refreshing them in this path either, even on new-video ticks,
@@ -1338,7 +1268,7 @@ async function runRssPollCron(env, ctx) {
       const updatedRecent = [...enrichedNew, ...refreshedPrev].slice(0, 15);
       await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent);
 
-      // 5. Update channel meta (name, lastVideoId) — only if changed
+      // 5. Update channel meta (name, lastVideoId) ÔÇö only if changed
       const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
       let metaChanged = false;
       if (!meta.name && feed.channelName) {
@@ -1353,21 +1283,21 @@ async function runRssPollCron(env, ctx) {
         await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
       }
 
-      // 6. Get subscribers (already fetched above for community posts)
+      // 6. Get subscribers
+      const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
       if (subs.length === 0) {
         totalNew += newVideos.length;
         continue;
       }
 
       // 7. Get FCM access token once
-      if (!accessToken) {
-        try {
-          accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
-        } catch (err) {
-          console.error(`[YTData] FCM token error:`, err);
-          totalNew += newVideos.length;
-          continue;
-        }
+      let accessToken;
+      try {
+        accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+      } catch (err) {
+        console.error(`[YTData] FCM token error:`, err);
+        totalNew += newVideos.length;
+        continue;
       }
       const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
       const projectId = sa.project_id;
@@ -1413,13 +1343,13 @@ async function runRssPollCron(env, ctx) {
             // (driven by the upcoming:events:list, not by a
             // hardcoded 30-min bucket). At live time the video is
             // re-detected as type 'live' below and added to
-            // channelRecent as a normal new video — no separate
+            // channelRecent as a normal new video ÔÇö no separate
             // "live now!" push.
             const publishedTime = new Date(video.publishedAt).getTime();
 
             // Append to the global scheduled-events list so
             // runPrewarnCron can iterate and fire per-device
-            // prewarns. Idempotent — skip if this videoId is
+            // prewarns. Idempotent ÔÇö skip if this videoId is
             // already in the list.
             const events = await getKV(env.TUBEPULSE_KV, key.upcomingEvents()) || [];
             if (!events.some((e) => e.videoId === video.videoId)) {
@@ -1515,7 +1445,7 @@ async function runRssPollCron(env, ctx) {
   return { channels: active.length, newVideos: totalNew, errors };
 }
 
-// ─── Job 3: Lease renewal (every 6 hours) ──────────────────────────────
+// ÔöÇÔöÇÔöÇ Job 3: Lease renewal (every 6 hours) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 async function runLeaseCron(env) {
   const callbackUrl = 'https://tubepulse-api.jimothyoakley55.workers.dev/websub';
@@ -1523,7 +1453,7 @@ async function runLeaseCron(env) {
   return { renewed };
 }
 
-// ─── Main handler ───────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ Main handler ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 export default {
   async scheduled(event, env, ctx) {
@@ -1541,14 +1471,14 @@ export default {
       results.upcoming = await runUpcomingCron(env, ctx);
     }
 
-    // Prewarn: every 5 minutes (minute % 5 === 0) — iterates the
+    // Prewarn: every 5 minutes (minute % 5 === 0) ÔÇö iterates the
     // scheduled-events list and fires per-device prewarns when each
     // device's window is active.
     if (mins % 5 === 0) {
       results.prewarn = await runPrewarnCron(env, ctx);
     }
 
-    // RSS poll: every 5 minutes (minute % 5 === 0) — fallback for WebSub
+    // RSS poll: every 5 minutes (minute % 5 === 0) ÔÇö fallback for WebSub
     if (mins % 5 === 0) {
       results.rss = await runRssPollCron(env, ctx);
     }
@@ -1556,6 +1486,11 @@ export default {
     // Nag cycle: every 15 minutes (minute % 15 === 0)
     if (mins % 15 === 0) {
       results.nag = await runNagCron(env, ctx);
+    }
+
+    // Community posts: every hour (minute === 0)
+    if (mins === 0) {
+      results.posts = await runCommunityPostsCron(env, ctx);
     }
 
     // Lease renewal: every 6 hours (minute === 0 && hour % 6 === 0)
