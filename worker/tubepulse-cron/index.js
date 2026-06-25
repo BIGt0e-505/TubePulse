@@ -771,10 +771,10 @@ async function runPrewarnCron(env, ctx) {
 // unit per channel per hour. With 4 channels and a 10k daily free
 // tier budget, this is ~100 units/day or 1% of the free tier.
 //
-// The "first run" guard: when a channel is first polled, the recent
-// posts list is populated but no notifications fire for pre-existing
-// posts. This avoids a flood of notifications on first install or
-// when the feature is first enabled.
+// Community posts are latest-state oriented, not history oriented.
+// The first poll stores only the latest post and sends no notifications.
+// Later polls compare the fetched latest activity ID against known IDs;
+// only a changed latest post is stored and surfaced.
 
 async function runCommunityPostsCron(env, ctx) {
   const start = Date.now();
@@ -813,33 +813,52 @@ async function runCommunityPostsCron(env, ctx) {
           };
         });
 
-      // First-run guard: if we've never polled this channel before,
-      // populate the recent list without firing notifications.
+      const latestPost = posts[0] || null;
+
+      // First-run guard: seed latest post state only, without notifying.
       const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
       if (!firstPollAt) {
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), posts);
+        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), latestPost ? [latestPost] : []);
         await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
-        console.log(`[Posts] first run for ${channelId}: stored ${posts.length} historical posts, no notifications`);
+        console.log(`[Posts] first run for ${channelId}: seeded ${latestPost ? 'latest post only' : 'no posts'}, no notifications`);
         continue;
       }
 
-      // Determine which posts are new.
+      // Treat the fetched latest activity ID as the watermark. YouTube
+      // community post timestamps are not reliable enough to use as the
+      // primary ordering signal.
       const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
-      const prevIds = new Set(prevRecent.map((p) => p.activityId));
-      const newPosts = posts.filter((p) => !prevIds.has(p.activityId));
+      const prevIds = new Set(prevRecent.map((p) => p.activityId).filter(Boolean));
+      const newPosts = latestPost && !prevIds.has(latestPost.activityId) ? [latestPost] : [];
+
+      if (!latestPost) {
+        if (prevRecent.length > 0) {
+          await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), []);
+          console.log(`[Posts] ${channelId}: no latest post found, cleared cached post state`);
+        }
+        continue;
+      }
+
+      if (prevIds.has(latestPost.activityId)) {
+        if (prevRecent.length !== 1 || prevRecent[0]?.activityId !== latestPost.activityId) {
+          await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
+          console.log(`[Posts] ${channelId}: compacted cached post history to latest post`);
+        }
+        continue;
+      }
 
       if (newPosts.length > 0) {
-        // Save updated recent list (newest first).
-        const merged = [...newPosts, ...prevRecent].slice(0, 30);
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), merged);
-        results.newPosts += newPosts.length;
-        console.log(`[Posts] ${channelId}: ${newPosts.length} new post(s)`);
+        // Store only the changed latest post so old community-post
+        // history is not dumped into the app feed.
+        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
+        results.newPosts += 1;
+        console.log(`[Posts] ${channelId}: new latest post ${latestPost.activityId}`);
 
         // Notify subscribers. Per-channel opt-out respected: if a
         // device's channel override has includeCommunityPosts === false,
         // skip that device. The cron reads each subscriber's profile +
-        // override and fans out a push notification per (new post,
-        // subscriber) pair.
+        // override and fans out a push notification for the changed
+        // latest post.
         const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
         for (const post of newPosts) {
           for (const deviceId of subs) {
