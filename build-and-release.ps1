@@ -44,6 +44,7 @@ $REPO = "Undert0e-505/TubePulse"
 $SCRIPT_DIR = $PSScriptRoot
 if (-not $SCRIPT_DIR) { $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $REPO_DIR = $SCRIPT_DIR
+$DIST_DIR = Join-Path $REPO_DIR "dist"
 
 $JDK_PATH = "C:\Program Files\Java\jdk-21"
 $ANDROID_SDK = "D:\dev\android-sdk"
@@ -60,6 +61,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $TAG = "v$Version"
 $APK_NAME = "$APP_NAME-$TAG.apk"
+$APK_PATH = Join-Path $DIST_DIR $APK_NAME
 
 function Write-File-NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, $UTF8_NO_BOM)
@@ -216,14 +218,15 @@ if ($badging -match "package: name='[^']*' versionCode='(\d+)' versionName='([^'
     Write-Host "  APK version: $apkVn (code=$apkVc)  OK"
 }
 
-Copy-Item $apkPath "$REPO_DIR\$APK_NAME" -Force
-$apkSize = [math]::Round((Get-Item "$REPO_DIR\$APK_NAME").Length / 1MB, 1)
+New-Item -ItemType Directory -Force -Path $DIST_DIR | Out-Null
+Copy-Item $apkPath $APK_PATH -Force
+$apkSize = [math]::Round((Get-Item $APK_PATH).Length / 1MB, 1)
 Write-Host ("  {0} ({1:N1} MB)  OK" -f $APK_NAME, $apkSize)
 
 if ($BuildOnly) {
     Write-Host ""
     Write-Host "  Build complete (-BuildOnly)" -ForegroundColor Cyan
-    Write-Host "  APK: $REPO_DIR\$APK_NAME" -ForegroundColor Cyan
+    Write-Host "  APK: $APK_PATH" -ForegroundColor Cyan
     exit 0
 }
 
@@ -263,7 +266,7 @@ $credRaw = $credInput | git credential fill 2>&1
 $token = ($credRaw | Select-String "^password=" | ForEach-Object { $_ -replace "^password=", "" })
 if (-not $token) {
     Write-Host "  Could not get GitHub token from credential helper" -ForegroundColor Red
-    Write-Host "  APK is at: $REPO_DIR\$APK_NAME" -ForegroundColor Yellow
+    Write-Host "  APK is at: $APK_PATH" -ForegroundColor Yellow
     exit 1
 }
 
@@ -284,7 +287,7 @@ if ($checkResult -eq "200") {
     $rel = $createResult | ConvertFrom-Json
     if (-not $rel.id) {
         Write-Host "  Release creation failed: $($rel.message)" -ForegroundColor Red
-        Write-Host "  APK is at: $REPO_DIR\$APK_NAME" -ForegroundColor Yellow
+        Write-Host "  APK is at: $APK_PATH" -ForegroundColor Yellow
         exit 1
     }
     $releaseId = $rel.id
@@ -294,7 +297,7 @@ if ($checkResult -eq "200") {
 # --- Step 7: Upload APK ---
 Write-Host ""
 Write-Host "[7/7] Uploading APK..."
-$uploadResult = curl.exe -s -X POST -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" -H "Content-Type: application/vnd.android.package-archive" --data-binary "@$REPO_DIR\$APK_NAME" "https://uploads.github.com/repos/$REPO/releases/$releaseId/assets?name=$APK_NAME" 2>&1
+$uploadResult = curl.exe -s -X POST -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" -H "Content-Type: application/vnd.android.package-archive" --data-binary "@$APK_PATH" "https://uploads.github.com/repos/$REPO/releases/$releaseId/assets?name=$APK_NAME" 2>&1
 $asset = $uploadResult | ConvertFrom-Json
 if ($asset.browser_download_url) {
     Write-Host "  APK uploaded  OK"
@@ -305,7 +308,7 @@ if ($asset.browser_download_url) {
     Write-Host "==========================================" -ForegroundColor Cyan
 } else {
     Write-Host "  Upload failed: $($asset.message)" -ForegroundColor Red
-    Write-Host "  APK is at: $REPO_DIR\$APK_NAME" -ForegroundColor Yellow
+    Write-Host "  APK is at: $APK_PATH" -ForegroundColor Yellow
     exit 1
 }
 

@@ -39,7 +39,7 @@ Current behavior, in order:
 7. Runs `android\gradlew.bat assembleRelease --no-daemon`.
 8. Signs `android/app/build/outputs/apk/release/app-release.apk` with `android/app/debug.keystore`.
 9. Verifies the APK signature and APK version metadata.
-10. Copies the APK to the repo root as `TubePulse-vX.Y.Z.apk`.
+10. Copies the APK to `dist/TubePulse-vX.Y.Z.apk`.
 11. If `-BuildOnly` is not set:
     - blocks on untracked non-ignored files
     - stages changes with `git add -A`
@@ -54,15 +54,15 @@ The GitHub token is read from Git's credential helper. The script does not requi
 
 ## Current Local Artifacts
 
-The current script writes final APKs to the repo root using:
+The current script writes final APKs to `dist/` using:
 
 ```text
 TubePulse-vX.Y.Z.apk
 ```
 
-The repo root currently contains historical local APK artifacts. They are ignored by `.gitignore` through the `*.apk` rule and are not tracked, but the current script continues to create new root APKs, so the clutter is produced by the release process itself.
+The repo root currently contains historical local APK artifacts. They are ignored by `.gitignore` through the `*.apk` rule and are not tracked. New script output goes under ignored `dist/` instead of creating more root APK clutter.
 
-Future local APK output should use `dist/`, not `releases/`.
+Local APK output should use `dist/`, not `releases/`.
 
 Reason: GitHub Releases should own durable release history. `dist/` should be disposable local build output.
 
@@ -73,7 +73,7 @@ Reason: GitHub Releases should own durable release history. `dist/` should be di
 The current release process works, but it has too much authority in one command:
 
 - `build-and-release.ps1` combines version bumping, dependency install, build, signing, Git commit, Git push, GitHub release creation, and APK upload.
-- Root APK output creates local clutter and makes it harder to see what is source versus generated output.
+- Historical root APK output created local clutter and made it harder to see what is source versus generated output. New APK output should stay under ignored `dist/`.
 - `git add -A` remains broad. The untracked-file guard helps, but tracked generated changes or unrelated tracked edits could still be included.
 - Commit and push failures should be fatal before GitHub release creation. Today the script can continue toward release creation after those failures.
 - Release signing currently uses `android/app/debug.keystore`; this is current behavior, not a reviewed long-term signing policy.
@@ -152,10 +152,10 @@ Recommended small commits:
 
 1. `docs: document release process and risks`
 2. `chore: ignore local release output directories`
-3. `chore: move APK output to dist`
+3. `chore: move APK output to dist` - done
 4. `chore: narrow release script git staging`
 5. `chore: make commit/push failures fatal`
 6. `chore: add validate-only mode`
 7. Later: review signing, Google Services ownership, and `versionCode` policy.
 
-Do not delete historical local APKs until the root APK output has moved to `dist/` and ignore rules clearly cover disposable release artifacts.
+Historical local APKs can be deleted locally after confirming they are ignored and no longer needed for manual rollback. Do not commit those artifacts.
