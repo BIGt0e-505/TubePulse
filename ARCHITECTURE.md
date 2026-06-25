@@ -624,7 +624,7 @@ Workers update this key in batches (e.g. flushed every 5 minutes from worker mem
 **Post-v3 additions:**
 - **YouTube Data API poller (Job 2.5)** — added after WebSub hub shutdown was confirmed. Replaces WebSub as the active detection path. Same fan-out logic, different input source.
 - **FCM JWT signing fixes** — PKCS8 base64 padding, `\n` escape handling. Without these, no push could ever deliver.
-- **v3.0.13 release pipeline** — `build-and-release.ps1` rewritten as a WSL-native gradle build with GitHub release publishing.
+- **v3.0.13 release pipeline** — `build-and-release.ps1` rewritten as a Windows-native Gradle build with GitHub release publishing. See [RELEASE.md](RELEASE.md) for current release-process risks and the target cleanup flow.
 
 ---
 

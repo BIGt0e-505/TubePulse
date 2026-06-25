@@ -1,13 +1,13 @@
 # TubePulse - Project Status
 
 **Last updated:** 2026-06-25
-**Current repo branch:** `worker-stabilisation` for Phase 2 audit work; `master` was merged and pushed at `caad6af` after Phase 1
+**Current repo branch:** `master`
 **Current app version in repo:** `3.2.4`
 **Android versionCode/versionName in repo:** `324` / `3.2.4`
 **Repo:** [Undert0e-505/TubePulse](https://github.com/Undert0e-505/TubePulse)
 **Platform:** Android only (React Native + Expo)
 
-This is the current source-of-truth status document for repo work. For detailed backend design, see [ARCHITECTURE.md](ARCHITECTURE.md), [worker/README.md](worker/README.md), and the active worker contract inventory in [worker/CONTRACTS.md](worker/CONTRACTS.md). [MIGRATION_PLAN.md](MIGRATION_PLAN.md) and [PLAN_v3.1.md](PLAN_v3.1.md) are historical/planning records unless this file explicitly says otherwise.
+This is the current source-of-truth status document for repo work. For detailed backend design, see [ARCHITECTURE.md](ARCHITECTURE.md), [worker/README.md](worker/README.md), and the active worker contract inventory in [worker/CONTRACTS.md](worker/CONTRACTS.md). For app release process and cleanup guidance, see [RELEASE.md](RELEASE.md). [MIGRATION_PLAN.md](MIGRATION_PLAN.md) and [PLAN_v3.1.md](PLAN_v3.1.md) are historical/planning records unless this file explicitly says otherwise.
 
 ---
 
@@ -68,7 +68,7 @@ Keep these version labels distinct:
 
 The current repo release path is `build-and-release.ps1`.
 
-Inferred behavior from the script:
+Summary behavior from the script:
 
 1. Bump `app.json` and `android/app/build.gradle` to the requested version.
 2. Run `npm install --no-audit --no-fund`.
@@ -78,6 +78,8 @@ Inferred behavior from the script:
 6. For full releases, guard against untracked non-ignored files, then `git add -A`, commit, push current branch, create/update GitHub release through the GitHub API, and upload the APK.
 
 `build-and-release.sh` is not the current release path in this repo.
+
+Known risks and the intended safer target flow are documented in [RELEASE.md](RELEASE.md). App APK releases and Cloudflare Worker deployments are separate processes.
 
 ---
 
@@ -99,6 +101,7 @@ Use these docs this way:
 |---|---|
 | `STATUS.md` | Current repo status and operational caveats |
 | `README.md` | Product overview, project map, common commands |
+| `RELEASE.md` | Current app release process, risks, and target cleanup flow |
 | `ARCHITECTURE.md` | Architecture reference; may still contain historical diagrams/sections |
 | `worker/README.md` | Backend/worker reference; route claims require live verification where noted |
 | `MIGRATION_PLAN.md` | Historical migration record |

@@ -1,6 +1,7 @@
 # TubePulse
 
 > Current repo status: see [STATUS.md](STATUS.md). The app version in this repo is `3.2.4` (`app.json`, `android/app/build.gradle`). Historical planning docs are not authoritative for current release/deployment state.
+> App release process and cleanup plan: see [RELEASE.md](RELEASE.md). Worker deployments are separate from app APK releases.
 
 Never miss a video from the creators you actually care about. **Android only.**
 
@@ -346,7 +347,8 @@ TubePulse/
 ├── PLAN_v3.1.md                   # Historical v3.1 implementation plan
 ├── STATUS.md                      # Current repo status and operational caveats
 ├── MIGRATION_PLAN.md              # v1→v2→v3 migration plan (historical record)
-├── build-and-release.ps1           # Windows-native build: gradle + commit + push + GitHub release
+├── build-and-release.ps1           # Windows-native app release script
+├── RELEASE.md                      # Current release process, risks, and target flow
 ├── app.json                       # Expo config
 ├── package.json
 └── .gitignore
