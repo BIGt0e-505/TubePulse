@@ -32,7 +32,7 @@ The API health endpoint currently returns `version: "3.0.0"`. App release eviden
 | `OPTIONS` | `*` | CORS preflight. | None | None | None | None | Low |
 | `POST` | `/register` | Create/update device profile, preserve or rotate FCM token, and migrate old device IDs that share an FCM token. | `Authorization: Bearer <deviceId>` | Reads/writes `device:{id}:profile`, `fcm:lookup:{token}`, settings/channels/state during migration; deletes old device state; uses `KV.list({ prefix: 'device:' })` for slow-path migration. | None | None | High |
 | `POST` | `/subscribe-channel` | Add a channel to a device, populate inverse subscriber list, bootstrap channel meta/recent data, and enqueue dormant WebSub subscription attempt on first subscriber. | Bearer deviceId | Reads/writes `device:{id}:channels`, `channel:{id}:subscribers`, `channel:{id}:meta`, `channel:{id}:recent`, `channels:active`, `channel:{id}:websub`. | YouTube Data API for channel meta when missing; YouTube RSS for recent videos; Data API fallback for recent videos; WebSub hub POST attempt. | None directly. | High |
-| `POST` | `/unsubscribe` | Remove device from channel, delete per-channel device state/override, and clean channel cache if it was the last subscriber. | Bearer deviceId | Reads/writes/deletes `device:{id}:channels`, `channel:{id}:subscribers`, `device:{id}:state:{channelId}`, `device:{id}:override:{channelId}`, channel cache via cleanup. | WebSub unsubscribe POST attempt. | None | Medium |
+| `POST` | `/unsubscribe` | Remove device from channel, delete per-channel device state/override, and clean channel cache if it was the last subscriber. | Bearer deviceId | Reads/writes/deletes `device:{id}:channels`, `channel:{id}:subscribers`, `device:{id}:state:{channelId}`, `device:{id}:override:{channelId}`, channel cache/post cache via cleanup. | WebSub unsubscribe POST attempt. | None | Medium |
 | `POST` | `/seen` | Mark video IDs or post IDs as watched, or clear all unwatched state for one channel. | Bearer deviceId | Reads/writes `device:{id}:state:{channelId}`. Does not remove pending nag bucket entries. | None | Affects future nag eligibility. | Medium |
 | `GET` | `/feed` | Return subscribed channels with meta, recent videos, community posts, and per-device unwatched flags. | Bearer deviceId | Reads `device:{id}:settings`, `device:{id}:profile`, `device:{id}:channels`, channel meta/recent/posts, overrides, and device state. | None | None | Medium |
 | `GET` | `/resolve` | Resolve a `handle` or `channelId` to canonical channel info. | Bearer deviceId | Reads `device:{id}:profile`; reads/writes `handle:{lowercase}` cache. | YouTube Data API `channels.list`. | None | Medium |
@@ -68,7 +68,7 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 | `channel:{id}:websub` | Mostly API/dormant | WebSub lease/HMAC state. | WebSub is currently dormant/stale; API can still write/read this key. |
 | `channel:{id}:recent` | Shared | Recent video array. | API can bootstrap; cron is the active updater through RSS. |
 | `channel:{id}:recent:posts` | Shared | Recent community posts array. | Cron writes; API `/feed` reads. |
-| `channel:{id}:firstPollAt:posts` | Cron-only | ISO timestamp sentinel for community-post first-run guard. | Present in cron key builders only. |
+| `channel:{id}:firstPollAt:posts` | Shared cleanup, cron writer | ISO timestamp sentinel for community-post first-run guard. | Cron writes; API/cron dead-channel cleanup deletes it. |
 | `device:{id}:profile` | Shared | Device profile with FCM token, platform, app version, created/last seen timestamps. | API writes; API/cron read. |
 | `device:{id}:settings` | Shared | Device notification settings. | API writes full replacement; cron/API read. |
 | `device:{id}:channels` | Shared | JSON array of subscribed channel IDs for the device. | API writes; API reads for `/feed`; cleanup reads. |
@@ -86,8 +86,8 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 
 ## Known Drift And Risks
 
-- **Key builder drift:** narrowed and deployed for cron on 2026-06-25. API and cron both define `fcmLookup`; cron still has cron-only `firstPollAtPosts` and `prewarnSent`. Shared keys are still duplicated manually.
-- **`cleanupDeadChannel` drift:** fixed and deployed for cron on 2026-06-25. API and cron cleanup both delete `channel:{id}:subscribers` when removing dead channel state.
+- **Key builder drift:** narrowed and deployed for cron on 2026-06-25. API and cron both define `fcmLookup` and `firstPollAtPosts`; cron still has cron-only `prewarnSent`. Shared keys are still duplicated manually.
+- **`cleanupDeadChannel` drift:** API and cron cleanup both delete `channel:{id}:subscribers`, `channel:{id}:recent:posts`, and `channel:{id}:firstPollAt:posts` when removing dead channel state.
 - **`cleanupDeadDevice` drift:** narrowed and deployed for cron on 2026-06-25. Cron cleanup now reads the profile and deletes `fcm:lookup:{token}` when `profile.fcmToken` exists, while still cleaning channel state if the profile is already missing.
 - **Duplicated `sendFCMPush`:** API and cron each define their own FCM OAuth/sign/send helper.
 - **Notification payload shape compatibility:** fixed and deployed for cron on 2026-06-25. Cron `sendFCMPush` now accepts the existing flat `payload.title`/`payload.body` shape and the nested `payload.notification.title`/`payload.notification.body` shape used by prewarn/community-post callers. Flat fields remain the preferred shape for new callers.

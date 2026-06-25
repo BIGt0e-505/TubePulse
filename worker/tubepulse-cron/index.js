@@ -76,6 +76,10 @@ async function cleanupDeadChannel(channelId, env, reason = 'last_subscriber_dead
   deletedKeys++;
   await deleteKV(kv, key.channelRecent(channelId));
   deletedKeys++;
+  await deleteKV(kv, key.channelRecentPosts(channelId));
+  deletedKeys++;
+  await deleteKV(kv, key.firstPollAtPosts(channelId));
+  deletedKeys++;
   await deleteKV(kv, key.channelWebsub(channelId));
   deletedKeys++;
   await deleteKV(kv, key.channelSubs(channelId));
