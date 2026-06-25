@@ -272,7 +272,39 @@ export default function App() {
           // community tab. The user's tapAction preference doesn't
           // change post behaviour — there's no per-post tapAction to
           // apply (videos and posts share the same screen).
-          await markSeen(deviceId, data.channelId, [`post:${data.activityId}`]);
+          const postKey = `post:${data.activityId}`;
+          await markSeen(deviceId, data.channelId, [postKey]);
+
+          const { getChannels } = require('./src/utils/storage');
+          const channels = await getChannels();
+          const ch = channels.find((c) => c.channelId === data.channelId);
+          const handle = ch?.handle;
+
+          if (handle) {
+            const lastSeen = await getLastSeen();
+            if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
+            const seenIds = lastSeen[handle].seenIds || [];
+            if (!seenIds.includes(postKey)) {
+              lastSeen[handle].seenIds = [...seenIds, postKey];
+              await saveLastSeen(lastSeen);
+            }
+
+            const cache = await getChannelCache();
+            const cached = cache[handle];
+            if (cached?.posts?.some((p) => p.activityId === data.activityId && p.unwatched)) {
+              const updatedCache = {
+                ...cache,
+                [handle]: {
+                  ...cached,
+                  posts: cached.posts.map((p) =>
+                    p.activityId === data.activityId ? { ...p, unwatched: false } : p
+                  ),
+                },
+              };
+              await saveChannelCache(updatedCache);
+            }
+          }
+
           Linking.openURL(`https://www.youtube.com/channel/${data.channelId}/community`);
         } else if (isPrewarn) {
           // Prewarn taps open the scheduled video's watch URL. We do
@@ -294,13 +326,29 @@ export default function App() {
           if (handle) {
             if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
             const cache = await getChannelCache();
-            const channelVideos = cache[handle]?.videos || [];
+            const cached = cache[handle] || {};
+            const channelVideos = cached.videos || [];
+            const channelPosts = cached.posts || [];
             const existing = new Set(lastSeen[handle].seenIds || []);
             for (const v of channelVideos) {
               if (v.videoId) existing.add(v.videoId);
             }
+            for (const p of channelPosts) {
+              if (p.activityId) existing.add(`post:${p.activityId}`);
+            }
             lastSeen[handle].seenIds = [...existing];
             await saveLastSeen(lastSeen);
+
+            if (channelVideos.some((v) => v.unwatched) || channelPosts.some((p) => p.unwatched)) {
+              await saveChannelCache({
+                ...cache,
+                [handle]: {
+                  ...cached,
+                  videos: channelVideos.map((v) => ({ ...v, unwatched: false })),
+                  posts: channelPosts.map((p) => ({ ...p, unwatched: false })),
+                },
+              });
+            }
           }
 
           // Open channel page

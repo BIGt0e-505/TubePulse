@@ -63,6 +63,7 @@ const key = {
   channelWebsub:    (channelId) => `channel:${channelId}:websub`,
   channelRecent:    (channelId) => `channel:${channelId}:recent`,
   channelRecentPosts: (channelId) => `channel:${channelId}:recent:posts`,
+  firstPollAtPosts: (channelId) => `channel:${channelId}:firstPollAt:posts`,
   deviceProfile:    (deviceId)  => `device:${deviceId}:profile`,
   deviceSettings:   (deviceId)  => `device:${deviceId}:settings`,
   deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
@@ -119,6 +120,10 @@ async function cleanupDeadChannel(channelId, env, reason = 'unsubscribe_last') {
   await kv.delete(key.channelMeta(channelId));
   deletedKeys++;
   await kv.delete(key.channelRecent(channelId));
+  deletedKeys++;
+  await kv.delete(key.channelRecentPosts(channelId));
+  deletedKeys++;
+  await kv.delete(key.firstPollAtPosts(channelId));
   deletedKeys++;
   await kv.delete(key.channelWebsub(channelId));
   deletedKeys++;

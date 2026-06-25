@@ -135,10 +135,15 @@ export default function HomeScreen({ navigation }) {
             if (!lastSeen[handle]) lastSeen[handle] = { seenIds: [] };
             const seenIds = new Set(lastSeen[handle].seenIds || []);
 
-            // Videos NOT in unwatched are seen
+            // Videos/posts NOT in unwatched are seen.
             for (const v of (serverChannel.videos || [])) {
               if (!v.unwatched && v.videoId) {
                 seenIds.add(v.videoId);
+              }
+            }
+            for (const p of (serverChannel.posts || [])) {
+              if (!p.unwatched && p.activityId) {
+                seenIds.add(`post:${p.activityId}`);
               }
             }
             lastSeen[handle].seenIds = [...seenIds];
@@ -236,6 +241,14 @@ export default function HomeScreen({ navigation }) {
     return [...cached.posts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
   };
 
+  const getVisiblePosts = (handle) => {
+    const posts = getPosts(handle);
+    const unseen = posts.filter((p) => p.unwatched === true);
+    if (unseen.length > 0) return unseen;
+    if (settings.tapAction === 'channel' && posts.length > 0) return [posts[0]];
+    return [];
+  };
+
   const getUnseenVideos = (handle) => {
     // Source of truth: the server's `unwatched` flag on each video in
     // the cache (populated from the /feed response). The local
@@ -269,8 +282,9 @@ export default function HomeScreen({ navigation }) {
     const updatedLastSeen = { ...lastSeen };
     if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
     const allIds = getVideos(key).map(v => v.videoId);
+    const allPostIds = getPosts(key).map((p) => `post:${p.activityId}`);
     const existing = updatedLastSeen[key].seenIds || [];
-    updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
+    updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds, ...allPostIds])] };
     await saveLastSeen(updatedLastSeen);
     setLastSeen(updatedLastSeen);
 
@@ -324,8 +338,9 @@ export default function HomeScreen({ navigation }) {
 
     if (settings.tapAction === 'channel') {
       const allIds = getVideos(key).map(v => v.videoId);
+      const allPostIds = getPosts(key).map((p) => `post:${p.activityId}`);
       const existing = updatedLastSeen[key].seenIds || [];
-      updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds])] };
+      updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds, ...allPostIds])] };
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
 
@@ -424,6 +439,15 @@ export default function HomeScreen({ navigation }) {
     // Default: mark this post as seen server-side and open it.
     const key = channel.handle;
     const postKey = `post:${post.activityId}`;
+    const updatedLastSeen = { ...lastSeen };
+    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
+    const seenIds = updatedLastSeen[key].seenIds || [];
+    if (!seenIds.includes(postKey)) {
+      updatedLastSeen[key] = { seenIds: [...seenIds, postKey] };
+      await saveLastSeen(updatedLastSeen);
+      setLastSeen(updatedLastSeen);
+    }
+
     const cached = cacheRef.current[key];
     if (cached?.posts) {
       const updatedPosts = cached.posts.map((p) =>
@@ -484,7 +508,7 @@ export default function HomeScreen({ navigation }) {
     const unseenVids = getUnseenVideos(item.handle);
     const latestVideo = getVideos(item.handle)[0] || null;
     const videosToShow = unseenVids.length > 0 ? [...unseenVids].reverse() : (latestVideo ? [latestVideo] : []);
-    const posts = getPosts(item.handle);
+    const posts = getVisiblePosts(item.handle);
 
     return (
       <View style={[styles.channelSection, hasNew && styles.channelSectionNew]}>
