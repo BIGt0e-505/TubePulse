@@ -12,11 +12,11 @@ Use this file before changing `worker/tubepulse-api/` or `worker/tubepulse-cron/
 | Worker | Path | Role | Trigger type | KV binding | KV namespace | Deployment note |
 |---|---|---|---|---|---|---|
 | `tubepulse-api` | `worker/tubepulse-api/` | Live app-facing REST API plus dormant WebSub callback endpoints | HTTP `fetch` | `TUBEPULSE_KV` | `52e77ca9f5f6493e89d2478c8d3055ec` | Live `workers.dev` route was verified on 2026-06-25. `GET /` identifies `worker: "tubepulse-api"`. Wrangler config has no explicit route and contains a stale/incomplete route comment. |
-| `tubepulse-cron` | `worker/tubepulse-cron/` | Scheduled/background worker for RSS polling, prewarns, nags, community posts, and stale bucket drain | Cloudflare scheduled event, `*/5 * * * *` | `TUBEPULSE_KV` | `52e77ca9f5f6493e89d2478c8d3055ec` | Scheduled-only worker. No public HTTP handler is expected. |
+| `tubepulse-cron` | `worker/tubepulse-cron/` | Scheduled/background worker for RSS polling, prewarns, nags, community posts, and stale bucket drain | Cloudflare scheduled event, `*/5 * * * *` | `TUBEPULSE_KV` | `52e77ca9f5f6493e89d2478c8d3055ec` | Scheduled-only worker. No public HTTP handler is expected. Deployed on 2026-06-25 at `2026-06-25T14:04:54.907Z`; worker version ID `7b2900aa-6c8b-4116-a3e6-56d53d1004e1`. |
 
 Both active workers use `compatibility_date = "2025-04-01"` and Cloudflare account `77bb7769185bbfeb53feef16b9f72803` in their wrangler configs.
 
-The API health endpoint currently returns `version: "3.0.0"`. App release evidence in the repo is `3.2.4` with Android `versionCode 324`. Treat these as separate labels until the worker health version is intentionally changed.
+The API health endpoint currently returns `version: "3.0.0"`. App release evidence in the repo is `3.2.4` with Android `versionCode 324`. Treat these as separate labels until the worker health version is intentionally changed. The 2026-06-25 cron worker deployment did not deploy `tubepulse-api`, did not deploy the archived resolver, and did not change the app release/version.
 
 ## Archived Workers
 
@@ -51,10 +51,10 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 | Function | Cadence | Purpose | KV effects | External calls | FCM side effects | Risk | Notes |
 |---|---|---|---|---|---|---|---|
 | `runUpcomingCron` | Every 5 minutes | Drain legacy `upcoming:{bucket}` entries from the pre-v3.1 scheduled-live scheme. | Reads and deletes current `upcoming:{bucket}`. | None | None | Low | Drain-only. Does not send old live-soon/live-now pushes. |
-| `runPrewarnCron` | Every 5 minutes | Iterate `upcoming:events:list` and send per-device scheduled-live prewarns when each device's window opens. | Reads/writes `upcoming:events:list`, `upcoming:prewarn:{videoId}:{deviceId}`, channel meta/subscribers, device profile/settings/override; deletes stale prewarn keys. | FCM OAuth token exchange and message send. | Sends prewarn pushes; can cleanup dead devices. | High | Current payload construction appears to use nested `notification` while cron `sendFCMPush` expects flat `title`/`body`. Documented as observed risk, not fixed. |
+| `runPrewarnCron` | Every 5 minutes | Iterate `upcoming:events:list` and send per-device scheduled-live prewarns when each device's window opens. | Reads/writes `upcoming:events:list`, `upcoming:prewarn:{videoId}:{deviceId}`, channel meta/subscribers, device profile/settings/override; deletes stale prewarn keys. | FCM OAuth token exchange and message send. | Sends prewarn pushes; can cleanup dead devices. | High | Cron `sendFCMPush` accepts both flat `title`/`body` payloads and nested `notification.title`/`notification.body` payloads. This compatibility fix was deployed with cron worker version `7b2900aa-6c8b-4116-a3e6-56d53d1004e1` on 2026-06-25. |
 | `runRssPollCron` | Every 5 minutes | Active new-video detection via YouTube RSS for each `channels:active` channel. | Reads `channels:active`, channel recent/meta/subscribers, device profile/settings/override/state; writes channel recent/meta, device state, `nag:{bucket}`, `upcoming:events:list`; can cleanup dead devices. | YouTube RSS; FCM OAuth/message send. | Sends upload/live pushes; schedules nags; can prune dead devices. | High | Primary detection path. |
 | `runNagCron` | Every 15 minutes | Re-notify devices about still-unwatched videos from `nag:{bucket}`. | Reads/deletes current nag bucket; reads/writes device state; reads channel meta/recent and settings/overrides; writes future nag buckets. | FCM OAuth/message send. | Sends reminder pushes; can cleanup dead devices. | High | Re-checks state so `/seen` does not need to remove bucket entries. |
-| `runCommunityPostsCron` | Hourly when `minute === 0` | Poll YouTube community posts, populate first-run cache, notify opted-in devices for new posts. | Reads `channels:active`, `channel:{id}:firstPollAt:posts`, posts, subscribers, profile/settings/override/state; writes recent posts, first-poll marker, device state. | YouTube Data API `activities.list`; FCM OAuth/message send. | Sends community-post pushes; can cleanup dead devices. | High | Current payload construction appears inconsistent with cron `sendFCMPush` expectations. |
+| `runCommunityPostsCron` | Hourly when `minute === 0` | Poll YouTube community posts, populate first-run cache, notify opted-in devices for new posts. | Reads `channels:active`, `channel:{id}:firstPollAt:posts`, posts, subscribers, profile/settings/override/state; writes recent posts, first-poll marker, device state. | YouTube Data API `activities.list`; FCM OAuth/message send. | Sends community-post pushes; can cleanup dead devices. | High | Payload construction is compatible with cron `sendFCMPush`; the compatibility fix was deployed with cron worker version `7b2900aa-6c8b-4116-a3e6-56d53d1004e1` on 2026-06-25. |
 | `runLeaseCron` | Every 6 hours when `minute === 0 && hour % 6 === 0` | Calls `renewSubscriptions`. | Effectively none. | None in current implementation. | None | Low/Stale | `renewSubscriptions` is a no-op because the WebSub hub is believed defunct/dormant. |
 
 ---
@@ -86,11 +86,11 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 
 ## Known Drift And Risks
 
-- **Key builder drift:** narrowed on the `worker-stabilisation` branch. API and cron both define `fcmLookup`; cron still has cron-only `firstPollAtPosts` and `prewarnSent`. Shared keys are still duplicated manually.
-- **`cleanupDeadChannel` drift:** fixed on the `worker-stabilisation` branch. API and cron cleanup both delete `channel:{id}:subscribers` when removing dead channel state.
-- **`cleanupDeadDevice` drift:** narrowed on the `worker-stabilisation` branch. Cron cleanup now reads the profile and deletes `fcm:lookup:{token}` when `profile.fcmToken` exists, while still cleaning channel state if the profile is already missing.
+- **Key builder drift:** narrowed and deployed for cron on 2026-06-25. API and cron both define `fcmLookup`; cron still has cron-only `firstPollAtPosts` and `prewarnSent`. Shared keys are still duplicated manually.
+- **`cleanupDeadChannel` drift:** fixed and deployed for cron on 2026-06-25. API and cron cleanup both delete `channel:{id}:subscribers` when removing dead channel state.
+- **`cleanupDeadDevice` drift:** narrowed and deployed for cron on 2026-06-25. Cron cleanup now reads the profile and deletes `fcm:lookup:{token}` when `profile.fcmToken` exists, while still cleaning channel state if the profile is already missing.
 - **Duplicated `sendFCMPush`:** API and cron each define their own FCM OAuth/sign/send helper.
-- **Notification payload shape compatibility:** fixed on the `worker-stabilisation` branch. Cron `sendFCMPush` now accepts the existing flat `payload.title`/`payload.body` shape and the nested `payload.notification.title`/`payload.notification.body` shape used by prewarn/community-post callers. Flat fields remain the preferred shape for new callers.
+- **Notification payload shape compatibility:** fixed and deployed for cron on 2026-06-25. Cron `sendFCMPush` now accepts the existing flat `payload.title`/`payload.body` shape and the nested `payload.notification.title`/`payload.notification.body` shape used by prewarn/community-post callers. Flat fields remain the preferred shape for new callers.
 - **DND/settings logic duplication:** effective notification settings are rebuilt in API WebSub, RSS cron, nag cron, prewarn cron, and community-post logic.
 - **RSS/feed parsing duplication:** API and cron parse YouTube Atom/RSS separately, with small differences in field handling.
 - **Stale/dormant WebSub behavior:** WebSub subscribe/unsubscribe/push code remains, but the public PubSubHubbub hub URL is believed defunct. Do not assume WebSub is active without live verification.
@@ -131,6 +131,4 @@ This is intentionally narrow. It catches JavaScript parse errors without deployi
 
 1. Add lightweight static checks for worker syntax and contract-sensitive patterns.
 2. Fix docs contradictions around `KV.list()`, branch/status wording, and dormant WebSub history.
-3. Fix the cron FCM payload-shape inconsistency in a small behavior-fix commit after approval.
-4. Fix cleanup-helper drift in a separate small behavior-fix commit after approval.
-5. Consider shared modules only after checks exist and the current contracts are covered.
+3. Consider shared modules only after checks exist and the current contracts are covered.

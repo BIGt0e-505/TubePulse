@@ -29,6 +29,19 @@ Live route verification on 2026-06-25 confirmed Cloudflare serves the app-facing
 
 ---
 
+## Worker Deployment Status
+
+Last worker deploy recorded: 2026-06-25.
+
+| Worker | Deployment state |
+|---|---|
+| `tubepulse-cron` | Deployed on 2026-06-25 at `2026-06-25T14:04:54.907Z` to Cloudflare account `77bb7769185bbfeb53feef16b9f72803`; worker version ID `7b2900aa-6c8b-4116-a3e6-56d53d1004e1`; upload `40.07 KiB` / gzip `9.65 KiB`; binding `TUBEPULSE_KV` namespace `52e77ca9f5f6493e89d2478c8d3055ec`; trigger `*/5 * * * *`. This deploy included the cron-only runtime fixes for normalized FCM notification payloads and aligned cron cleanup helper key deletion. |
+| `tubepulse-api` | Not deployed as part of the 2026-06-25 cron worker deployment. |
+| `worker/archive/tubepulse-resolver` | Not deployed; archive remains reference-only. |
+
+The app release/version remains unchanged at `3.2.4` with Android `versionCode 324`. Worker deployment is separate from app APK release; the cron deploy did not create an app release, bump versions, or publish a GitHub Release.
+
+---
 ## Active Components
 
 | Component | Path | Current role |
