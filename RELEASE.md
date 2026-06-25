@@ -42,11 +42,12 @@ Current behavior, in order:
 10. Copies the APK to `dist/TubePulse-vX.Y.Z.apk`.
 11. If `-BuildOnly` is not set:
     - blocks on untracked non-ignored files
-    - stages changes with `git add -A`
+    - verifies only known release version files have tracked changes
+    - stages only `app.json` and `android/app/build.gradle`
     - commits as `Jimothy <Jimothy@local>`
     - pushes the current branch
     - creates or reuses a GitHub Release through the GitHub API
-    - uploads the root APK with `curl.exe`
+    - uploads the `dist/` APK with `curl.exe`
 
 The GitHub token is read from Git's credential helper. The script does not require the GitHub CLI.
 
@@ -74,7 +75,7 @@ The current release process works, but it has too much authority in one command:
 
 - `build-and-release.ps1` combines version bumping, dependency install, build, signing, Git commit, Git push, GitHub release creation, and APK upload.
 - Historical root APK output created local clutter and made it harder to see what is source versus generated output. New APK output should stay under ignored `dist/`.
-- `git add -A` remains broad. The untracked-file guard helps, but tracked generated changes or unrelated tracked edits could still be included.
+- Release commits now stage only `app.json` and `android/app/build.gradle`, and the script blocks unrelated tracked changes before committing.
 - Commit and push failures should be fatal before GitHub release creation. Today the script can continue toward release creation after those failures.
 - Release signing currently uses `android/app/debug.keystore`; this is current behavior, not a reviewed long-term signing policy.
 - `versionCode` is derived by stripping dots. This can create future ordering problems, for example when version segments become more than one digit.

@@ -15,7 +15,7 @@
 #   2. npm install
 #   3. Gradle assembleRelease
 #   4. Sign APK with apksigner (debug keystore)
-#   5. Stage all changes, commit, push to origin
+#   5. Stage version files, commit, push to origin
 #   6. Create GitHub release via API, upload signed APK via curl
 #
 # Requirements (all on this Windows host):
@@ -45,6 +45,10 @@ $SCRIPT_DIR = $PSScriptRoot
 if (-not $SCRIPT_DIR) { $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $REPO_DIR = $SCRIPT_DIR
 $DIST_DIR = Join-Path $REPO_DIR "dist"
+$RELEASE_VERSION_FILES = @(
+    "app.json",
+    "android/app/build.gradle"
+)
 
 $JDK_PATH = "C:\Program Files\Java\jdk-21"
 $ANDROID_SDK = "D:\dev\android-sdk"
@@ -79,7 +83,7 @@ function Assert-NoUntrackedFiles {
 
     Write-Host ""
     Write-Host "Release blocked: untracked non-ignored files are present." -ForegroundColor Red
-    Write-Host "The release script refuses to continue because 'git add -A' would include these files:" -ForegroundColor Yellow
+    Write-Host "The release script refuses to continue until these files are committed, moved, deleted, or ignored:" -ForegroundColor Yellow
     foreach ($file in $untracked) {
         Write-Host "  $file" -ForegroundColor Yellow
     }
@@ -88,6 +92,46 @@ function Assert-NoUntrackedFiles {
     exit 1
 }
 
+function Assert-OnlyReleaseVersionChanges {
+    $status = git status --porcelain 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Could not check git status before staging."
+        exit 1
+    }
+
+    $unexpected = @()
+    foreach ($line in $status) {
+        if ($line -like '?? *') { continue }
+        if ($line.Length -lt 4) { continue }
+
+        $state = $line.Substring(0, 2)
+        $path = $line.Substring(3)
+        $normalizedPath = $path -replace '\\', '/'
+        $isReleaseVersionFile = $RELEASE_VERSION_FILES -contains $normalizedPath
+        $isModifiedOnly = ($state[0] -eq ' ' -or $state[0] -eq 'M') -and ($state[1] -eq ' ' -or $state[1] -eq 'M')
+
+        if (-not $isReleaseVersionFile -or -not $isModifiedOnly) {
+            $unexpected += $line
+        }
+    }
+
+    if ($unexpected.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "Release blocked: unexpected tracked changes are present." -ForegroundColor Red
+    Write-Host "Only these version files may be modified for this release commit:" -ForegroundColor Yellow
+    foreach ($file in $RELEASE_VERSION_FILES) {
+        Write-Host "  $file" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "Unexpected tracked changes:" -ForegroundColor Yellow
+    foreach ($line in $unexpected) {
+        Write-Host "  $line" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Error "Commit, revert, or move unrelated tracked changes before releasing."
+    exit 1
+}
 # --- Banner ---
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -235,8 +279,9 @@ Write-Host ""
 Write-Host "[5/7] Committing and pushing to $Branch..."
 
 Assert-NoUntrackedFiles
+Assert-OnlyReleaseVersionChanges
 
-git add -A
+git add -- app.json android/app/build.gradle
 $staged = git diff --cached --stat 2>&1
 if ([string]::IsNullOrWhiteSpace($staged)) {
     Write-Host "  Nothing to commit (already up to date)" -ForegroundColor Yellow
