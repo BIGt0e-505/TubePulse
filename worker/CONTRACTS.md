@@ -86,9 +86,9 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 
 ## Known Drift And Risks
 
-- **Key builder drift:** API has `fcmLookup`; cron has `firstPollAtPosts` and `prewarnSent`. Shared keys are duplicated manually.
-- **`cleanupDeadChannel` drift:** API cleanup deletes `channel:{id}:subscribers`; cron cleanup currently does not.
-- **`cleanupDeadDevice` drift:** API cleanup reads profile and deletes `fcm:lookup:{token}`; cron cleanup does not clear the FCM lookup index.
+- **Key builder drift:** narrowed on the `worker-stabilisation` branch. API and cron both define `fcmLookup`; cron still has cron-only `firstPollAtPosts` and `prewarnSent`. Shared keys are still duplicated manually.
+- **`cleanupDeadChannel` drift:** fixed on the `worker-stabilisation` branch. API and cron cleanup both delete `channel:{id}:subscribers` when removing dead channel state.
+- **`cleanupDeadDevice` drift:** narrowed on the `worker-stabilisation` branch. Cron cleanup now reads the profile and deletes `fcm:lookup:{token}` when `profile.fcmToken` exists, while still cleaning channel state if the profile is already missing.
 - **Duplicated `sendFCMPush`:** API and cron each define their own FCM OAuth/sign/send helper.
 - **Notification payload shape compatibility:** fixed on the `worker-stabilisation` branch. Cron `sendFCMPush` now accepts the existing flat `payload.title`/`payload.body` shape and the nested `payload.notification.title`/`payload.notification.body` shape used by prewarn/community-post callers. Flat fields remain the preferred shape for new callers.
 - **DND/settings logic duplication:** effective notification settings are rebuilt in API WebSub, RSS cron, nag cron, prewarn cron, and community-post logic.
