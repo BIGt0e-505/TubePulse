@@ -1,13 +1,13 @@
 # TubePulse - Project Status
 
 **Last updated:** 2026-06-25
-**Current repo branch:** `repo-hygiene`
+**Current repo branch:** `worker-stabilisation` for Phase 2 audit work; `master` was merged and pushed at `caad6af` after Phase 1
 **Current app version in repo:** `3.2.4`
 **Android versionCode/versionName in repo:** `324` / `3.2.4`
 **Repo:** [Undert0e-505/TubePulse](https://github.com/Undert0e-505/TubePulse)
 **Platform:** Android only (React Native + Expo)
 
-This is the current source-of-truth status document for repo work. For detailed backend design, see [ARCHITECTURE.md](ARCHITECTURE.md) and [worker/README.md](worker/README.md). [MIGRATION_PLAN.md](MIGRATION_PLAN.md) and [PLAN_v3.1.md](PLAN_v3.1.md) are historical/planning records unless this file explicitly says otherwise.
+This is the current source-of-truth status document for repo work. For detailed backend design, see [ARCHITECTURE.md](ARCHITECTURE.md), [worker/README.md](worker/README.md), and the active worker contract inventory in [worker/CONTRACTS.md](worker/CONTRACTS.md). [MIGRATION_PLAN.md](MIGRATION_PLAN.md) and [PLAN_v3.1.md](PLAN_v3.1.md) are historical/planning records unless this file explicitly says otherwise.
 
 ---
 
@@ -87,7 +87,7 @@ Inferred behavior from the script:
 - YouTube Data API usage is intended for handle/channel resolution, avatar/bootstrap fallback paths, and any current community-post polling logic present in the cron worker.
 - API and cron workers share the same KV namespace according to their wrangler configs.
 - WebSub code remains present but should be treated as dormant unless live verification proves otherwise.
-- KV schema and helper logic are duplicated between worker files, so backend changes should be made carefully and tested against both workers.
+- KV schema and helper logic are duplicated between worker files and have known drift; see [worker/CONTRACTS.md](worker/CONTRACTS.md) before changing worker behavior.
 
 ---
 

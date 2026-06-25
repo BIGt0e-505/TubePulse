@@ -1,6 +1,6 @@
 # TubePulse — Cloud Services
 
-This document describes the TubePulse backend: the two Cloudflare Workers, the Cloudflare KV store, the YouTube Data API surface we use, and the Firebase Cloud Messaging integration. It is the backend reference. Live API route state was last verified on 2026-06-25; review Cloudflare settings before changing routing. The Android app is documented separately in the project root README.
+This document describes the TubePulse backend: the two Cloudflare Workers, the Cloudflare KV store, the YouTube Data API surface we use, and the Firebase Cloud Messaging integration. For the current endpoint, cron, KV, notification, and known-drift inventory, start with [CONTRACTS.md](CONTRACTS.md). Live API route state was last verified on 2026-06-25; review Cloudflare settings before changing routing. The Android app is documented separately in the project root README.
 
 ---
 
@@ -65,6 +65,8 @@ Both workers use the same KV namespace, so the cron can write state that the API
 `worker/tubepulse-cron/index.js` - scheduled/background worker source. Line counts in older notes may be stale; check the file directly when needed.
 
 **Schedule:** `*/5 * * * *` (every 5 minutes), configured in `wrangler.toml`.
+
+See [CONTRACTS.md](CONTRACTS.md) for the active worker contract/inventory reference before changing worker behavior.
 
 The worker has **one** `scheduled()` handler that dispatches to six jobs based on the current minute:
 
@@ -183,11 +185,11 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 | `handle:{lowercase}` | JSON | `{ channelId, cachedAt }` — 7-day TTL | API (resolve) | API (resolve) |
 | `fcm:lookup:{fcmToken}` | string | `deviceId` — reverse index from FCM token to the device that owns it | API (register) | API (register, migration) |
 
-**`channels:active` is the secret sauce.** It replaces a `KV.list()` call — the only way to know "which channels have at least one subscriber" without scanning the entire namespace. The cron reads this list, processes each channel, done. No `list()`.
+**`channels:active` is the secret sauce.** It replaces a `KV.list()` call — the only way to know "which channels have at least one subscriber" without scanning the entire namespace. The cron reads this list, processes each channel, done. No cron-side `list()` in the current code.
 
 **`fcm:lookup:*` is the deviceId-migration index.** When the same FCM token registers with a new `deviceId` (e.g. a v3.0.18 UUID-based install upgrades to v3.0.19's Android-ID-based install), the server uses this index to find the old device and migrate its state. See §11.1.
 
-**Key lifecycle (cleanup):** channel and device keys are deleted by two helpers, `cleanupDeadChannel()` and `cleanupDeadDevice()` — see §11. Channel keys (`meta`/`recent`/`websub` + the `channels:active` membership) are deleted when the last subscriber leaves or is detected as dead. Device keys (`profile`/`settings`/`channels`/`state:*`/`override:*`) are deleted only when the FCM token is reported dead. The `fcm:lookup:*` key is deleted as part of the device cleanup.
+**Key lifecycle (cleanup):** channel and device keys are deleted by two helpers, `cleanupDeadChannel()` and `cleanupDeadDevice()` — see §11. Channel keys (`meta`/`recent`/`websub` + the `channels:active` membership) are deleted when the last subscriber leaves or is detected as dead. Device keys (`profile`/`settings`/`channels`/`state:*`/`override:*`) are deleted only when the FCM token is reported dead. The API cleanup path deletes `fcm:lookup:*`; the cron cleanup path has known drift documented in [CONTRACTS.md](CONTRACTS.md).
 
 ---
 
@@ -224,7 +226,7 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 - One-time per subscribe: **~4 writes per new channel** (only on first add)
 - **Total: ~200 writes/day = 20% of free tier**
 
-**`KV.list()` calls: 0.** Replaced by the `channels:active` index.
+**Cron `KV.list()` calls: 0 in the current code.** The `channels:active` index replaces cron-side namespace scans. The API `/register` path intentionally uses `KV.list({ prefix: 'device:' })` for FCM-token migration; see [CONTRACTS.md](CONTRACTS.md).
 
 **Deletes per day (cleanup):** dead-device cleanup is event-driven, not scheduled — it only fires when FCM reports a token as `UNREGISTERED`. Steady-state cost is ~0 deletes/day. A single cleanup of a device subscribed to N channels costs roughly `1 + 5N + 3N` KV ops (1 read of `device:{id}:channels` + N reads + N writes of subscriber lists + 3 + 2N deletes). In practice this is one user uninstalling every few months, well under free tier. See §11.
 

@@ -24,6 +24,7 @@ const key = {
   deviceChannels:   (deviceId)  => `device:${deviceId}:channels`,
   deviceOverride:   (deviceId, channelId) => `device:${deviceId}:override:${channelId}`,
   deviceState:      (deviceId, channelId) => `device:${deviceId}:state:${channelId}`,
+  fcmLookup:        (fcmToken)  => `fcm:lookup:${fcmToken}`,
   upcoming:         (bucket)    => `upcoming:${bucket}`,
   nag:              (bucket)    => `nag:${bucket}`,
   channelsActive:   ()          => `channels:active`,
@@ -77,7 +78,8 @@ async function cleanupDeadChannel(channelId, env, reason = 'last_subscriber_dead
   deletedKeys++;
   await deleteKV(kv, key.channelWebsub(channelId));
   deletedKeys++;
-
+  await deleteKV(kv, key.channelSubs(channelId));
+  deletedKeys++;
   const active = await getKV(kv, key.channelsActive()) || [];
   const filtered = active.filter((id) => id !== channelId);
   const removedFromActive = filtered.length !== active.length;
@@ -99,6 +101,10 @@ async function cleanupDeadChannel(channelId, env, reason = 'last_subscriber_dead
  */
 async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
   const kv = env.TUBEPULSE_KV;
+
+  // 0. Read the profile so we can clean the FCM-token lookup index below.
+  //    Missing profile does not stop cleanup; device:{id}:channels may still exist.
+  const profile = await getKV(kv, key.deviceProfile(deviceId));
 
   // 1. Find every channel this device was on.
   const channels = await getKV(kv, key.deviceChannels(deviceId)) || [];
@@ -131,6 +137,9 @@ async function cleanupDeadDevice(deviceId, env, reason = 'fcm_unregistered') {
     devicesDeleted++;
   }
 
+  if (profile?.fcmToken) {
+    await deleteKV(kv, key.fcmLookup(profile.fcmToken));
+  }
   // 4. Delete per-channel state + override. We don't know the channel
   //    list any more (we just deleted :channels), so iterate the list
   //    we captured in step 1.
@@ -492,6 +501,9 @@ async function getGoogleAccessToken(serviceAccountJson) {
 
 async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
+  const notification = payload.notification || {};
+  const title = payload.title ?? notification.title ?? 'TubePulse';
+  const body = payload.body ?? notification.body ?? '';
 
   const resp = await fetch(url, {
     method: 'POST',
@@ -503,8 +515,8 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
       message: {
         token: fcmToken,
         notification: {
-          title: payload.title,
-          body: payload.body,
+          title,
+          body,
         },
         data: payload.data,
         android: {
