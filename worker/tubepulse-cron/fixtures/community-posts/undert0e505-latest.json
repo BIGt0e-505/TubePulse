@@ -1,0 +1,69 @@
+{
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "title": "Posts",
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "backstagePostThreadRenderer": {
+                            "post": {
+                              "backstagePostRenderer": {
+                                "postId": "UgkxPUnenuIZrE8GB5qHdNDyHWMWFZ56PJ0v",
+                                "contentText": {
+                                  "runs": [
+                                    { "text": "ZeroVPN v0.1 is ready." },
+                                    { "text": "\n\nSo what does it do, and what's the point?" }
+                                  ]
+                                },
+                                "publishedTimeText": {
+                                  "runs": [
+                                    { "text": "3 days ago (edited)" }
+                                  ]
+                                },
+                                "backstageAttachment": {
+                                  "postMultiImageRenderer": {
+                                    "images": [
+                                      {
+                                        "backstageImageRenderer": {
+                                          "image": {
+                                            "thumbnails": [
+                                              {
+                                                "url": "https://yt3.ggpht.com/example=s288",
+                                                "width": 288,
+                                                "height": 288
+                                              },
+                                              {
+                                                "url": "https://yt3.ggpht.com/example=s800",
+                                                "width": 800,
+                                                "height": 800
+                                              }
+                                            ]
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
