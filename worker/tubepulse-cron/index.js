@@ -781,6 +781,25 @@ async function runCommunityPostsCron(env, ctx) {
   const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
   const apiKey = env.YOUTUBE_API_KEY;
   const results = { channelsPolled: 0, newPosts: 0, errors: [] };
+  let accessToken = null;
+  let projectId = null;
+  let fcmTokenErrorLogged = false;
+
+  const ensureFcmAccess = async () => {
+    if (accessToken && projectId) return true;
+    try {
+      accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+      const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+      projectId = sa.project_id;
+      return true;
+    } catch (err) {
+      if (!fcmTokenErrorLogged) {
+        console.error('[Posts] FCM token error:', err?.message || err);
+        fcmTokenErrorLogged = true;
+      }
+      return false;
+    }
+  };
 
   for (const channelId of channelsActive) {
     try {
@@ -911,10 +930,9 @@ async function runCommunityPostsCron(env, ctx) {
               token: profile.fcmToken,
             };
 
-            const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
-            const projectId = sa.project_id;
+            if (!await ensureFcmAccess()) continue;
+
             try {
-              const accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
               const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
               if (sendResult.deadToken) {
                 console.log(`[Posts] Pruning dead device: ${deviceId}`);
