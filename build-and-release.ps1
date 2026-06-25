@@ -6,7 +6,7 @@
 #
 # Usage:
 #   .\build-and-release.ps1 3.1.9              # full release on current branch
-#   .\build-and-release.ps1 3.1.9 -BuildOnly   # build only, no git/release
+#   .\build-and-release.ps1 -BuildOnly         # build checked-in version, no edits/git/release
 #   .\build-and-release.ps1 3.1.9 -ValidateOnly # preflight only, no changes
 #   .\build-and-release.ps1 3.1.9 -Clean       # nuke gradle cache first
 #   .\build-and-release.ps1 3.1.9 -Message "Fix widget tap"  # custom commit msg
@@ -28,7 +28,7 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Position = 0)]
     [string]$Version,
 
     [Parameter(Position = 1)]
@@ -48,6 +48,8 @@ $SCRIPT_DIR = $PSScriptRoot
 if (-not $SCRIPT_DIR) { $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $REPO_DIR = $SCRIPT_DIR
 $DIST_DIR = Join-Path $REPO_DIR "dist"
+$APP_JSON_PATH = Join-Path $REPO_DIR "app.json"
+$BUILD_GRADLE_PATH = Join-Path $REPO_DIR "android\app\build.gradle"
 $RELEASE_VERSION_FILES = @(
     "app.json",
     "android/app/build.gradle"
@@ -59,11 +61,64 @@ $GIT_AUTHOR = "Jimothy"
 $GIT_EMAIL = "Jimothy@local"
 $UTF8_NO_BOM = [System.Text.UTF8Encoding]::new($false)
 
+function Get-CheckedInVersionMetadata {
+    $appJson = Get-Content $APP_JSON_PATH -Raw | ConvertFrom-Json
+    $buildGradle = Get-Content $BUILD_GRADLE_PATH -Raw
+    $gradleVersionName = $null
+    $gradleVersionCode = $null
+    if ($buildGradle -match 'versionName "([^"]+)"') { $gradleVersionName = $Matches[1] }
+    if ($buildGradle -match 'versionCode (\d+)') { $gradleVersionCode = $Matches[1] }
+
+    if (-not $appJson.expo.version) {
+        Write-Error "Could not read expo.version from app.json."
+        exit 1
+    }
+    if (-not $gradleVersionName) {
+        Write-Error "Could not read versionName from android\app\build.gradle."
+        exit 1
+    }
+    if (-not $gradleVersionCode) {
+        Write-Error "Could not read versionCode from android\app\build.gradle."
+        exit 1
+    }
+
+    [PSCustomObject]@{
+        AppVersion = [string]$appJson.expo.version
+        GradleVersionName = [string]$gradleVersionName
+        GradleVersionCode = [string]$gradleVersionCode
+    }
+}
+
 if ($ValidateOnly -and ($BuildOnly -or $Clean)) {
     Write-Error "-ValidateOnly cannot be combined with -BuildOnly or -Clean."
     exit 1
 }
+if ($BuildOnly -and $Clean) {
+    Write-Error "-BuildOnly cannot be combined with -Clean."
+    exit 1
+}
+if ($BuildOnly -and $Version) {
+    Write-Error "-BuildOnly builds the checked-in version and does not accept a Version argument. Run .\build-and-release.ps1 -BuildOnly."
+    exit 1
+}
+if ($ValidateOnly -and -not $Version) {
+    Write-Error "-ValidateOnly requires a Version argument. Example: .\build-and-release.ps1 9.9.9 -ValidateOnly"
+    exit 1
+}
+if (-not $BuildOnly -and -not $ValidateOnly -and -not $Version) {
+    Write-Error "Full release requires a Version argument. Example: .\build-and-release.ps1 3.2.5"
+    exit 1
+}
 
+if ($BuildOnly) {
+    $checkedInVersion = Get-CheckedInVersionMetadata
+    if ($checkedInVersion.AppVersion -ne $checkedInVersion.GradleVersionName) {
+        Write-Error "BuildOnly blocked: app.json expo.version ($($checkedInVersion.AppVersion)) does not match android\app\build.gradle versionName ($($checkedInVersion.GradleVersionName))."
+        exit 1
+    }
+    $Version = $checkedInVersion.AppVersion
+    $versionCode = $checkedInVersion.GradleVersionCode
+}
 # Branch
 $Branch = (git rev-parse --abbrev-ref HEAD 2>&1)
 if ($LASTEXITCODE -ne 0) {
@@ -257,28 +312,38 @@ if ($Clean) {
     Write-Host "  done"
 }
 
-# --- Step 1: Version bump ---
-Write-Host ""
-Write-Host "[1/7] Bumping version to $Version..."
+# --- Step 1: Version selection/bump ---
+if ($BuildOnly) {
+    Write-Host ""
+    Write-Host "[1/7] Using checked-in version $Version (versionCode=$versionCode)..."
+    Write-Host "  app.json  unchanged"
+    Write-Host "  build.gradle  unchanged"
+} else {
+    Write-Host ""
+    Write-Host "[1/7] Bumping version to $Version..."
 
-$appJsonPath = "$REPO_DIR\app.json"
-$appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
-$appJson.expo.version = $Version
-Write-File-NoBom $appJsonPath ($appJson | ConvertTo-Json -Depth 10)
-Write-Host "  app.json  OK"
+    $appJsonPath = $APP_JSON_PATH
+    $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
+    $appJson.expo.version = $Version
+    Write-File-NoBom $appJsonPath ($appJson | ConvertTo-Json -Depth 10)
+    Write-Host "  app.json  OK"
 
-$buildGradlePath = "$REPO_DIR\android\app\build.gradle"
-$buildGradle = Get-Content $buildGradlePath -Raw
-$versionCode = $Version -replace '\.', ''
-$buildGradle = $buildGradle -replace 'versionCode \d+', "versionCode $versionCode"
-$buildGradle = $buildGradle -replace 'versionName "[^"]+"', "versionName `"$Version`""
-Write-File-NoBom $buildGradlePath $buildGradle
-Write-Host "  build.gradle (versionCode=$versionCode)  OK"
-
+    $buildGradlePath = $BUILD_GRADLE_PATH
+    $buildGradle = Get-Content $buildGradlePath -Raw
+    $versionCode = $Version -replace '\.', ''
+    $buildGradle = $buildGradle -replace 'versionCode \d+', "versionCode $versionCode"
+    $buildGradle = $buildGradle -replace 'versionName "[^"]+"', "versionName `"$Version`""
+    Write-File-NoBom $buildGradlePath $buildGradle
+    Write-Host "  build.gradle (versionCode=$versionCode)  OK"
+}
 # --- Step 2: npm install ---
 Write-Host ""
 Write-Host "[2/7] npm install..."
-npm install --no-audit --no-fund 2>&1 | Select-Object -Last 2
+if ($BuildOnly) {
+    npm install --no-audit --no-fund --package-lock=false 2>&1 | Select-Object -Last 2
+} else {
+    npm install --no-audit --no-fund 2>&1 | Select-Object -Last 2
+}
 Write-Host "  done  OK"
 
 # --- Step 3: Gradle build ---

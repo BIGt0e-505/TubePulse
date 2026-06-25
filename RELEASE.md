@@ -16,21 +16,29 @@ The current local app release path is:
 .\build-and-release.ps1 3.2.5
 ```
 
-The script is Windows-native and expects one required argument:
+The script is Windows-native. Full release and validate-only modes require a version argument; build-only mode uses the checked-in version.
 
 | Argument | Meaning |
 |---|---|
-| `Version` | Required app version, for example `3.2.5` |
+| `Version` | Required app version for full release and `-ValidateOnly`, for example `3.2.5` |
 | `-Message` | Optional custom commit message suffix |
-| `-BuildOnly` | Builds, signs, verifies, and copies the APK, then stops before Git/GitHub release steps |
+| `-BuildOnly` | Builds the checked-in app version, signs, verifies, and copies the APK without editing version files or running Git/GitHub release steps |
 | `-Clean` | Deletes local Gradle build/cache folders before building |
 | `-ValidateOnly` | Runs release preflight checks only, then exits without changing files or publishing |
 
-Current behavior, in order:
+Build the checked-in version without changing source files:
+
+```powershell
+.\build-and-release.ps1 -BuildOnly
+```
+
+Supplying `Version` with `-BuildOnly` is rejected because build-only always uses the checked-in app version.
+
+Current full-release behavior, in order:
 
 1. Determines the current Git branch.
 2. Verifies local tool paths for JDK 21, Android SDK, `apksigner`, `aapt2`, `curl.exe`, `android/app/debug.keystore`, and `android/gradlew.bat`.
-3. Optionally removes `android/app/build`, `android/build`, and `android/.gradle` when `-Clean` is set.
+3. Optionally removes `android/app/build`, `android/build`, and `android/.gradle` when `-Clean` is set. `-Clean` is not allowed with `-BuildOnly` or `-ValidateOnly`.
 4. Updates app version files:
    - `app.json` `expo.version`
    - `android/app/build.gradle` `versionName`
@@ -51,6 +59,12 @@ Current behavior, in order:
     - uploads the `dist/` APK with `curl.exe`
 
 The GitHub token is read from Git's credential helper. The script does not require the GitHub CLI.
+
+### Build-Only Flow
+
+`-BuildOnly` runs tool verification, reads `app.json` `expo.version`, `android/app/build.gradle` `versionName`, and `android/app/build.gradle` `versionCode`, and requires the app JSON version to match Gradle `versionName`. It then builds, signs, verifies, and copies `dist/TubePulse-vCURRENT.apk` using the checked-in Gradle version metadata.
+
+`-BuildOnly` does not edit `app.json` or `android/app/build.gradle`, does not stage or commit files, does not push, and does not create or upload GitHub releases.
 
 ### Validate-Only Preflight
 
@@ -94,8 +108,8 @@ The current release process works, but it has too much authority in one command:
 - `versionCode` is derived by stripping dots. This can create future ordering problems, for example when version segments become more than one digit.
 - `package.json` has its own `version`, but that is tooling metadata and should not be treated as the app release version.
 - Google Services ownership is confusing: `app.json` points at the ignored root `google-services.json`, while `android/app/google-services.json` is tracked and used by the Android project.
-- There is no dry-run or validate-only mode.
-- There is no clean build-only command that leaves version files untouched.
+- Validate-only mode exists for release preflight checks.
+- Build-only mode builds the checked-in version without editing version files.
 - There is no explicit post-build install/smoke-test step.
 
 ---
