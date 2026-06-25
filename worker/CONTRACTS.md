@@ -90,7 +90,7 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 - **`cleanupDeadChannel` drift:** API cleanup deletes `channel:{id}:subscribers`; cron cleanup currently does not.
 - **`cleanupDeadDevice` drift:** API cleanup reads profile and deletes `fcm:lookup:{token}`; cron cleanup does not clear the FCM lookup index.
 - **Duplicated `sendFCMPush`:** API and cron each define their own FCM OAuth/sign/send helper.
-- **Notification payload shape inconsistency:** cron `sendFCMPush` expects flat `payload.title` and `payload.body`; `runPrewarnCron` and community-post code appear to build nested `payload.notification` objects. This is documented as an observed risk only; behavior is not changed here.
+- **Notification payload shape compatibility:** fixed on the `worker-stabilisation` branch. Cron `sendFCMPush` now accepts the existing flat `payload.title`/`payload.body` shape and the nested `payload.notification.title`/`payload.notification.body` shape used by prewarn/community-post callers. Flat fields remain the preferred shape for new callers.
 - **DND/settings logic duplication:** effective notification settings are rebuilt in API WebSub, RSS cron, nag cron, prewarn cron, and community-post logic.
 - **RSS/feed parsing duplication:** API and cron parse YouTube Atom/RSS separately, with small differences in field handling.
 - **Stale/dormant WebSub behavior:** WebSub subscribe/unsubscribe/push code remains, but the public PubSubHubbub hub URL is believed defunct. Do not assume WebSub is active without live verification.

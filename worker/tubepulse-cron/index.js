@@ -492,6 +492,9 @@ async function getGoogleAccessToken(serviceAccountJson) {
 
 async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
   const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
+  const notification = payload.notification || {};
+  const title = payload.title ?? notification.title ?? 'TubePulse';
+  const body = payload.body ?? notification.body ?? '';
 
   const resp = await fetch(url, {
     method: 'POST',
@@ -503,8 +506,8 @@ async function sendFCMPush(accessToken, projectId, fcmToken, payload) {
       message: {
         token: fcmToken,
         notification: {
-          title: payload.title,
-          body: payload.body,
+          title,
+          body,
         },
         data: payload.data,
         android: {
