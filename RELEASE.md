@@ -44,9 +44,9 @@ Current behavior, in order:
     - blocks on untracked non-ignored files
     - verifies only known release version files have tracked changes
     - stages only `app.json` and `android/app/build.gradle`
-    - commits as `Jimothy <Jimothy@local>`
-    - pushes the current branch
-    - creates or reuses a GitHub Release through the GitHub API
+    - commits as `Jimothy <Jimothy@local>` and exits if commit fails
+    - pushes the current branch and exits if push fails
+    - creates or reuses a GitHub Release through the GitHub API only after the release commit is pushed
     - uploads the `dist/` APK with `curl.exe`
 
 The GitHub token is read from Git's credential helper. The script does not require the GitHub CLI.
@@ -76,7 +76,7 @@ The current release process works, but it has too much authority in one command:
 - `build-and-release.ps1` combines version bumping, dependency install, build, signing, Git commit, Git push, GitHub release creation, and APK upload.
 - Historical root APK output created local clutter and made it harder to see what is source versus generated output. New APK output should stay under ignored `dist/`.
 - Release commits now stage only `app.json` and `android/app/build.gradle`, and the script blocks unrelated tracked changes before committing.
-- Commit and push failures should be fatal before GitHub release creation. Today the script can continue toward release creation after those failures.
+- Commit and push failures are fatal before GitHub release creation or APK upload.
 - Release signing currently uses `android/app/debug.keystore`; this is current behavior, not a reviewed long-term signing policy.
 - `versionCode` is derived by stripping dots. This can create future ordering problems, for example when version segments become more than one digit.
 - `package.json` has its own `version`, but that is tooling metadata and should not be treated as the app release version.

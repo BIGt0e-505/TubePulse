@@ -284,23 +284,28 @@ Assert-OnlyReleaseVersionChanges
 git add -- app.json android/app/build.gradle
 $staged = git diff --cached --stat 2>&1
 if ([string]::IsNullOrWhiteSpace($staged)) {
-    Write-Host "  Nothing to commit (already up to date)" -ForegroundColor Yellow
-} else {
-    $commitMsg = if ($Message) { "$TAG" + ": " + $Message } else { "Bump version to $Version" }
-    git -c user.name=$GIT_AUTHOR -c user.email=$GIT_EMAIL commit -m $commitMsg 2>&1 | Select-Object -First 3
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  Commit failed, continuing..." -ForegroundColor Yellow
-    } else {
-        Write-Host "  Committed  OK"
-    }
+    Write-Error "Release blocked: no version-file changes were staged for commit. A release version bump should create a commit."
+    exit 1
 }
 
-git push origin $Branch 2>&1 | Select-Object -First 3
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "  Pushed to origin/$Branch  OK"
-} else {
-    Write-Host "  Push failed (continuing to release)" -ForegroundColor Yellow
+$commitMsg = if ($Message) { "$TAG" + ": " + $Message } else { "Bump version to $Version" }
+$commitOutput = git -c user.name=$GIT_AUTHOR -c user.email=$GIT_EMAIL commit -m $commitMsg 2>&1
+$commitExit = $LASTEXITCODE
+$commitOutput | Select-Object -First 3
+if ($commitExit -ne 0) {
+    Write-Error "Release blocked: git commit failed. GitHub release creation and APK upload were not attempted."
+    exit 1
 }
+Write-Host "  Committed  OK"
+
+$pushOutput = git push origin $Branch 2>&1
+$pushExit = $LASTEXITCODE
+$pushOutput | Select-Object -First 3
+if ($pushExit -ne 0) {
+    Write-Error "Release blocked: git push to origin/$Branch failed. GitHub release creation and APK upload were not attempted."
+    exit 1
+}
+Write-Host "  Pushed to origin/$Branch  OK"
 
 # --- Step 6: Create GitHub release ---
 Write-Host ""
