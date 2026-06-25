@@ -10,10 +10,11 @@
  *
  * Response: { channelId, name, avatar }
  *
- * Deploy:
- *   cd worker && npx wrangler deploy
+ * Archived deploy note:
+ *   This worker is retained for reference only. Do not deploy it unless
+ *   deliberately restoring historical resolver behaviour.
  *
- * Set the API key:
+ * Historical API key setup:
  *   npx wrangler secret put YOUTUBE_API_KEY
  */
 

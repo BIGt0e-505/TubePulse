@@ -4,7 +4,7 @@
 **Date:** 18 April 2026
 **Status:** ✅ **Completed 2026-04-20 → 2026-06-02. v1→v2→v3 migration shipped as v3.0.0 → v3.0.13. The v3.1.x line (2026-06-03 → present) is a feature release on top of v3.0, not a continuation of this migration.**
 
-> This document is kept as a historical record of the v1 (client-polling) → v2 (server-push) migration. For the current state of the project, see [STATUS.md](STATUS.md). For the architecture spec as it exists today, see [ARCHITECTURE.md](ARCHITECTURE.md).
+> This document is kept as a historical record of the v1 (client-polling) → v2 (server-push) migration. For the current state of the project, see [STATUS.md](STATUS.md). Treat this file as historical context only; do not use it as release or deployment guidance.
 
 ---
 
@@ -91,7 +91,7 @@
 - Note the project number and sender ID for client-side FCM setup
 
 ### 3.2 Cloudflare Workers — API Worker (`tubepulse-api`)
-This replaces and extends the current `tubepulse-resolver` Worker.
+This replaced and extended the then-current `tubepulse-resolver` Worker. That legacy resolver is now archived at `worker/archive/tubepulse-resolver/`.
 
 **Endpoints:**
 
@@ -442,8 +442,8 @@ API Worker → KV: update device:{token}.settings
 | `expo-background-fetch` | **Uninstall** | FCM push |
 | `expo-task-manager` | **Uninstall** | FCM push |
 | `react-native-background-actions` | **Uninstall** | FCM push |
-| `worker/index.js` | **Rewrite** → `tubepulse-api` | API Worker (register, channels, settings, feed, resolve) |
-| `worker/wrangler.toml` | **Split** → two Workers | `tubepulse-api/wrangler.toml` + `tubepulse-cron/wrangler.toml` |
+| `worker/index.js` | **Rewrite** → `tubepulse-api` | Historical path; the old resolver is now archived at `worker/archive/tubepulse-resolver/` |
+| `worker/wrangler.toml` | **Split** → two Workers | Historical path; active configs are `worker/tubepulse-api/wrangler.toml` and `worker/tubepulse-cron/wrangler.toml` |
 | `src/utils/notifications.js` | **Simplify** | Keep channel setup + tap handler; remove `sendNewVideoNotification()` |
 | `src/utils/storage.js` | **Simplify** | Local cache only; server is source of truth for channels/settings |
 | `src/utils/constants.js` | **Edit** | Remove `BACKGROUND_FETCH_TASK`, `DEFAULT_SETTINGS.pollIntervalMinutes` |

@@ -4,7 +4,7 @@ node_modules/
 # Expo
 .expo/
 
-# Build artefacts
+# Build artifacts
 *.apk
 *.aab
 
@@ -19,7 +19,7 @@ worker/*/.dev.vars
 worker/*/.wrangler/
 
 # Local secrets and credentials
-# CRITICAL: anything under secrets/ is live credentials — NEVER commit
+# CRITICAL: anything under secrets/ is live credentials - NEVER commit
 /secrets/
 **/secrets/
 secrets/cloudflare.env
@@ -35,6 +35,11 @@ worker/tubepulse-fcm-service-account.json
 .firebaserc
 firebase-debug.log
 
+# Generated repo inventory files
+repo-structure.txt
+repo-files-git-tracked.txt
+repo-status-ignored.txt
+
 # Editor / OS
 .DS_Store
 *.swp
@@ -46,7 +51,7 @@ firebase-debug.log
 
 # Firebase / Google client config (public per Google docs but untracked
 # here so a regenerating the file doesn't trip us up. The file is still
-# on disk and required for the Android build to work — see app.json's
+# on disk and required for the Android build to work - see app.json's
 # android.googleServicesFile setting)
 google-services.json
 GoogleService-Info.plist

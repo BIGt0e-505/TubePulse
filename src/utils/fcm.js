@@ -7,9 +7,6 @@
  */
 
 import messaging from '@react-native-firebase/messaging';
-import { Platform } from 'react-native';
-
-const API_URL = 'https://tubepulse-api.aaronjoakley55.workers.dev';
 
 /**
  * Get the current FCM token without requesting permissions.

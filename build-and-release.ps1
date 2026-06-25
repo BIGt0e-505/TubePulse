@@ -65,6 +65,27 @@ function Write-File-NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, $UTF8_NO_BOM)
 }
 
+function Assert-NoUntrackedFiles {
+    $status = git status --porcelain 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Could not check git status before staging."
+        exit 1
+    }
+
+    $untracked = @($status | Where-Object { $_ -like '?? *' } | ForEach-Object { $_.Substring(3) })
+    if ($untracked.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "Release blocked: untracked non-ignored files are present." -ForegroundColor Red
+    Write-Host "The release script refuses to continue because 'git add -A' would include these files:" -ForegroundColor Yellow
+    foreach ($file in $untracked) {
+        Write-Host "  $file" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Error "Move, delete, commit, or ignore these files before releasing."
+    exit 1
+}
+
 # --- Banner ---
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -209,6 +230,8 @@ if ($BuildOnly) {
 # --- Step 5: Commit and push ---
 Write-Host ""
 Write-Host "[5/7] Committing and pushing to $Branch..."
+
+Assert-NoUntrackedFiles
 
 git add -A
 $staged = git diff --cached --stat 2>&1
