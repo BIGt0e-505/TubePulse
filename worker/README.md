@@ -39,7 +39,7 @@ This document describes the TubePulse backend: the two Cloudflare Workers, the C
 |-----------|------------------|---------|-----------------------|
 | `tubepulse-api` | `worker/tubepulse-api/` | Current live app-facing API worker source + dormant WebSub callback | `GET /` at `https://tubepulse-api.jimothyoakley55.workers.dev` returned Cloudflare-served health JSON on 2026-06-25. Wrangler route comments are stale/incomplete. |
 | `tubepulse-cron` | `worker/tubepulse-cron/` | Scheduled jobs (every 5 min): upcoming-events drain, prewarn, RSS poll, community posts, nag cycle, WebSub lease renewal | `wrangler.toml` has `triggers.crons = ["*/5 * * * *"]`; no `fetch()` handler is expected. |
-| `tubepulse-resolver` | `worker/index.js`, `worker/wrangler.toml` | Legacy standalone resolver worker retained for now | Not assumed active; do not delete until live Cloudflare state is checked. |
+| `tubepulse-resolver` | `worker/archive/tubepulse-resolver/` | Historical standalone resolver worker | Archived for reference only; do not deploy unless deliberately restoring historical resolver behaviour. |
 | `TUBEPULSE_KV` | KV namespace `52e77ca9f5f6493e89d2478c8d3055ec` | All current API/cron persistent state | Shared by `tubepulse-api` and `tubepulse-cron` configs. |
 
 > **Verified route:** on 2026-06-25, `GET /` at the app API URL returned `200 OK` with `{"status":"ok","version":"3.0.0","worker":"tubepulse-api","architecture":"channel-first"}`. The health `version` is an API worker label and appears stale or independent from the app release version `3.2.4`. `worker/tubepulse-api/wrangler.toml` has no explicit route setting and still contains a stale/incomplete "No HTTP routes" comment.
@@ -374,7 +374,8 @@ Cloudflare's dashboard shows daily usage: `https://dash.cloudflare.com/<account_
 ```
 worker/
 ├── README.md                  ← you are here
-├── index.js                   ← legacy resolver worker source; retained, not assumed active
+├── archive/
+│   └── tubepulse-resolver/    ← legacy resolver worker archive; reference only
 ├── tubepulse-api/
 │   ├── index.js               ← API worker source (line count may be stale)
 │   └── wrangler.toml          ← deployment config

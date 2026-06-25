@@ -91,7 +91,7 @@
 - Note the project number and sender ID for client-side FCM setup
 
 ### 3.2 Cloudflare Workers — API Worker (`tubepulse-api`)
-This replaces and extends the current `tubepulse-resolver` Worker.
+This replaced and extended the then-current `tubepulse-resolver` Worker. That legacy resolver is now archived at `worker/archive/tubepulse-resolver/`.
 
 **Endpoints:**
 
@@ -442,8 +442,8 @@ API Worker → KV: update device:{token}.settings
 | `expo-background-fetch` | **Uninstall** | FCM push |
 | `expo-task-manager` | **Uninstall** | FCM push |
 | `react-native-background-actions` | **Uninstall** | FCM push |
-| `worker/index.js` | **Rewrite** → `tubepulse-api` | API Worker (register, channels, settings, feed, resolve) |
-| `worker/wrangler.toml` | **Split** → two Workers | `tubepulse-api/wrangler.toml` + `tubepulse-cron/wrangler.toml` |
+| `worker/index.js` | **Rewrite** → `tubepulse-api` | Historical path; the old resolver is now archived at `worker/archive/tubepulse-resolver/` |
+| `worker/wrangler.toml` | **Split** → two Workers | Historical path; active configs are `worker/tubepulse-api/wrangler.toml` and `worker/tubepulse-cron/wrangler.toml` |
 | `src/utils/notifications.js` | **Simplify** | Keep channel setup + tap handler; remove `sendNewVideoNotification()` |
 | `src/utils/storage.js` | **Simplify** | Local cache only; server is source of truth for channels/settings |
 | `src/utils/constants.js` | **Edit** | Remove `BACKGROUND_FETCH_TASK`, `DEFAULT_SETTINGS.pollIntervalMinutes` |

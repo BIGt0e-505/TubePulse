@@ -23,7 +23,7 @@ Repo evidence as of this document update:
 | Release script | `build-and-release.ps1` is the current local release path |
 | API worker config | `worker/tubepulse-api/wrangler.toml` defines worker `tubepulse-api`, KV namespace `52e77ca9f5f6493e89d2478c8d3055ec`; its route comment is stale/incomplete because live `workers.dev` is reachable |
 | Cron worker config | `worker/tubepulse-cron/wrangler.toml` defines worker `tubepulse-cron`, the same KV namespace, and cron `*/5 * * * *` |
-| Legacy worker config | `worker/wrangler.toml` defines `tubepulse-resolver`, apparently legacy resolver material retained for now |
+| Legacy resolver archive | `worker/archive/tubepulse-resolver/` preserves the old `tubepulse-resolver` source/config for reference only |
 
 Live route verification on 2026-06-25 confirmed Cloudflare serves the app-facing API at `https://tubepulse-api.jimothyoakley55.workers.dev/`. Old notes claiming the `workers.dev` API route is unreachable are stale.
 
@@ -38,7 +38,7 @@ Live route verification on 2026-06-25 confirmed Cloudflare serves the app-facing
 | Release script | `build-and-release.ps1` | Windows-native local APK build/sign/copy, version bump, commit/push, GitHub release creation/upload |
 | API worker | `worker/tubepulse-api/` | App-facing HTTP API worker in source: register, subscribe/unsubscribe, feed, resolve, bootstrap, settings, seen, dormant WebSub endpoints |
 | Cron worker | `worker/tubepulse-cron/` | Scheduled/background worker: RSS polling, nag/prewarn/background jobs, FCM fan-out paths, shared KV state |
-| Legacy resolver | `worker/index.js`, `worker/wrangler.toml` | Older standalone resolver worker (`tubepulse-resolver`); repo evidence suggests it is not the current app API |
+| Legacy resolver archive | `worker/archive/tubepulse-resolver/` | Historical standalone resolver worker (`tubepulse-resolver`), superseded by `worker/tubepulse-api` `/resolve`; reference only |
 
 ---
 

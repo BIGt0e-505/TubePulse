@@ -327,8 +327,8 @@ TubePulse/
 │   └── App.js                     # Navigation, FCM setup, notification tap handling, init
 ├── worker/
 │   ├── README.md                  # Cloud architecture — KV schema, endpoints, cost analysis
-│   ├── index.js                   # Legacy resolver worker source; retained, not assumed active
-│   ├── wrangler.toml              # Legacy resolver wrangler config (`tubepulse-resolver`)
+│   ├── archive/
+│   │   └── tubepulse-resolver/     # Historical standalone resolver worker; reference only
 │   ├── tubepulse-api/
 │   │   ├── index.js               # API Worker — v3.1 channel-first + posts + prewarn
 │   │   └── wrangler.toml
