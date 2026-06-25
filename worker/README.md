@@ -1,6 +1,6 @@
 # TubePulse — Cloud Services
 
-This document describes the TubePulse backend: the two Cloudflare Workers, the Cloudflare KV store, the YouTube Data API surface we use, and the Firebase Cloud Messaging integration. It is the source of truth for "how the cloud side actually works." The Android app is documented separately in the project root README.
+This document describes the TubePulse backend: the two Cloudflare Workers, the Cloudflare KV store, the YouTube Data API surface we use, and the Firebase Cloud Messaging integration. It is the backend reference, but live Cloudflare route state must be verified outside the repo before deployment cleanup. The Android app is documented separately in the project root README.
 
 ---
 
@@ -35,13 +35,14 @@ This document describes the TubePulse backend: the two Cloudflare Workers, the C
 
 **Two workers, one KV namespace, one Firebase project.**
 
-| Component | URL | Purpose |
-|-----------|-----|---------|
-| `tubepulse-api` | n/a — no public route | HTTP API for the app + dormant WebSub callback (callable from cron via service binding or `wrangler dev` only) |
-| `tubepulse-cron` | n/a — scheduled trigger only | Scheduled jobs (every 5 min): upcoming-events drain, prewarn, RSS poll, community posts, nag cycle, WebSub lease renewal |
-| `TUBEPULSE_KV` | KV namespace `52e77ca9f5f6493e89d2478c8d3055ec` | All persistent state |
+| Component | Repo path/config | Purpose | Route/deploy evidence |
+|-----------|------------------|---------|-----------------------|
+| `tubepulse-api` | `worker/tubepulse-api/` | App-facing API worker source + dormant WebSub callback | App code points to `https://tubepulse-api.jimothyoakley55.workers.dev`; wrangler comments say no HTTP routes. Live route state is unresolved from repo files alone. |
+| `tubepulse-cron` | `worker/tubepulse-cron/` | Scheduled jobs (every 5 min): upcoming-events drain, prewarn, RSS poll, community posts, nag cycle, WebSub lease renewal | `wrangler.toml` has `triggers.crons = ["*/5 * * * *"]`; no `fetch()` handler is expected. |
+| `tubepulse-resolver` | `worker/index.js`, `worker/wrangler.toml` | Legacy standalone resolver worker retained for now | Not assumed active; do not delete until live Cloudflare state is checked. |
+| `TUBEPULSE_KV` | KV namespace `52e77ca9f5f6493e89d2478c8d3055ec` | All current API/cron persistent state | Shared by `tubepulse-api` and `tubepulse-cron` configs. |
 
-> **Note:** Both workers are deployed but have no public HTTP routes. `tubepulse-cron` is scheduled-trigger only; `tubepulse-api` has `routes = []` in `wrangler.toml`. The `*.workers.dev` URLs listed in older docs are no longer reachable. The API is callable from the cron worker via a service binding (when configured) or directly via `wrangler dev` / `wrangler tail`.
+> **Route caveat:** repo evidence is contradictory. The app currently hardcodes a `workers.dev` API URL, but `worker/tubepulse-api/wrangler.toml` comments say no HTTP routes. This docs pass did not verify Cloudflare live state. Verify the deployed worker settings before changing worker routing, app API URLs, or deleting legacy worker files.
 
 The two workers share the **same KV namespace** so they can read each other's writes. The cron writes `channel:{id}:recent` and `channel:{id}:meta`; the API reads them when serving `/feed`.
 
@@ -61,7 +62,7 @@ Both workers use the same KV namespace, so the cron can write state that the API
 
 ## 3. The cron worker
 
-`worker/tubepulse-cron/index.js` — deployed via `wrangler deploy` in `worker/tubepulse-cron/`. **1503 lines** as of v3.1.6.
+`worker/tubepulse-cron/index.js` - scheduled/background worker source. Line counts in older notes may be stale; check the file directly when needed.
 
 **Schedule:** `*/5 * * * *` (every 5 minutes), configured in `wrangler.toml`.
 
@@ -115,9 +116,9 @@ For each new video, the cron does the standard fan-out (which is identical to wh
 
 ## 4. The API worker
 
-`worker/tubepulse-api/index.js` — deployed via `wrangler deploy` in `worker/tubepulse-api/`. **1774 lines** as of v3.1.6 (matches `wc -l worker/tubepulse-api/index.js`).
+`worker/tubepulse-api/index.js` - app-facing API worker source. Line counts in older notes may be stale; check the file directly when needed.
 
-**No public route, no schedule** — the worker is reachable only from within the Cloudflare account (via service binding from the cron, or via `wrangler dev` / `wrangler tail`). The single entry point is `fetch(request, env, ctx)`, which routes by `path` and `request.method`. The `routes = []` line in `tubepulse-api/wrangler.toml` disables the public HTTP route by design.
+**Route status unresolved from repo evidence.** The API worker source has a `fetch(request, env, ctx)` entry point and app-facing routes. The app client hardcodes a `workers.dev` URL, while the wrangler config comments say no HTTP routes. Verify Cloudflare live state before changing this.
 
 ### 4.1 Endpoint map
 
@@ -159,7 +160,7 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 
 ## 5. KV schema (the only persistent state)
 
-`worker/tubepulse-api/index.js` defines a `key` object that builds all KV keys. Both workers import this same object.
+`worker/tubepulse-api/index.js` - app-facing API worker source. Line counts in older notes may be stale; check the file directly when needed.
 
 | Key | Type | Contents | Written by | Read by |
 |-----|------|----------|------------|---------|
@@ -342,7 +343,7 @@ Live-streamed logs from the deployed worker. Useful for watching a cron tick fir
 2. Save the new JSON to `secrets/fcm-service-account.json` (overwrite)
 3. Verify the new key is the right size: `node -e "const k=JSON.parse(require('fs').readFileSync('secrets/fcm-service-account.json','utf8')); const b=Buffer.from(k.private_key.replace(/-----[^-]+-----|\n/g,''),'base64'); console.log('PKCS8 DER bytes:', b.length);"` — should print `1217`. Anything else is corrupted.
 4. Push: `./secrets/set-worker-secrets.sh tubepulse-api && ./secrets/set-worker-secrets.sh tubepulse-cron`
-5. Test by triggering a push (next cron tick with a new video, or manually: `curl -X POST https://tubepulse-api.jimothyoakley55.workers.dev/register` etc. — note: this URL is no longer reachable since the API worker has `routes = []`; use `wrangler dev` or invoke from the cron via a service binding instead)
+5. Test by triggering a push (next cron tick with a new video, or manually: `curl or invoke the configured API route only after verifying live Cloudflare route state; otherwise use `wrangler dev` for local testing)
 
 ### Debugging KV state
 
@@ -373,12 +374,12 @@ Cloudflare's dashboard shows daily usage: `https://dash.cloudflare.com/<account_
 ```
 worker/
 ├── README.md                  ← you are here
-├── index.js                   ← legacy/older single-worker file (not deployed)
+├── index.js                   ← legacy resolver worker source; retained, not assumed active
 ├── tubepulse-api/
-│   ├── index.js               ← API worker source (1774 lines as of v3.1.6)
+│   ├── index.js               ← API worker source (line count may be stale)
 │   └── wrangler.toml          ← deployment config
 └── tubepulse-cron/
-    ├── index.js               ← cron worker source (1503 lines as of v3.1.6)
+    ├── index.js               ← cron worker source (line count may be stale)
     └── wrangler.toml          ← deployment config
 
 secrets/                       ← live credentials, ALL gitignored

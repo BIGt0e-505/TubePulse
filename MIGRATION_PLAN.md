@@ -4,7 +4,7 @@
 **Date:** 18 April 2026
 **Status:** ✅ **Completed 2026-04-20 → 2026-06-02. v1→v2→v3 migration shipped as v3.0.0 → v3.0.13. The v3.1.x line (2026-06-03 → present) is a feature release on top of v3.0, not a continuation of this migration.**
 
-> This document is kept as a historical record of the v1 (client-polling) → v2 (server-push) migration. For the current state of the project, see [STATUS.md](STATUS.md). For the architecture spec as it exists today, see [ARCHITECTURE.md](ARCHITECTURE.md).
+> This document is kept as a historical record of the v1 (client-polling) → v2 (server-push) migration. For the current state of the project, see [STATUS.md](STATUS.md). Treat this file as historical context only; do not use it as release or deployment guidance.
 
 ---
 

@@ -1,12 +1,15 @@
 # TubePulse
 
+> Current repo status: see [STATUS.md](STATUS.md). The app version in this repo is `3.2.4` (`app.json`, `android/app/build.gradle`). Historical planning docs are not authoritative for current release/deployment state.
+
 Never miss a video from the creators you actually care about. **Android only.**
 
 TubePulse is a lightweight YouTube tracker for Android that monitors your favourite channels and notifies you the moment they upload. No algorithm, no recommendations, no rabbit holes — just a clean list of who's posted what, in the order they posted it.
 
-## What's new in v3.1
+## Current App Line
+The current checked-in app version is `3.2.4`. The v3.1 feature line below remains the latest broad feature summary in these docs; see [STATUS.md](STATUS.md) for current repo status and caveats.
 
-- **👍👎 Like & dislike counts in the video card meta row** — shown next to the publish time and view count, so you can see what the community thinks of a video at a glance.
+- **Like & dislike counts in the video card meta row** — shown next to the publish time and view count, so you can see what the community thinks of a video at a glance.
 - **📝 Community posts in the feed** — channel community posts (text, images, polls) are now polled hourly and rendered in the home feed under a "Posts" mini-header. Posts have their own blue dot for unseen items, get marked as seen like videos, and respect the same global + per-channel opt-out settings.
 - **⏰ Prewarn time for scheduled livestreams** — pick how early you want to be notified before a scheduled livestream goes live (15m, 30m, 1h, 2h, 4h, or 1d — default 1h). Per-channel override available. At the moment the livestream actually goes live, the regular new-video notification fires; the prewarn is the heads-up, the regular push is the "this just appeared" notification.
 - **🗨️ Custom ConfirmDialog** — replacing `Alert.alert` for the channel-removal confirmation. Themed to match the rest of the app (`COLORS.surface` background, `COLORS.danger` for the destructive action).
@@ -94,7 +97,7 @@ This is the key interaction: video tap for "I've seen this one", channel tap for
 
 ## Architecture
 
-### Overview — v3.1 (channel-first, post-aware, prewarn)
+### Overview - Current Repo Evidence
 
 ```
 YouTube RSS feed ──poll every 5 min──▶ Cron Worker ──new videos──▶ API Worker ──FCM push──▶ Phone
@@ -113,6 +116,8 @@ YouTube RSS feed ──poll every 5 min──▶ Cron Worker ──new videos─
                                                                   (also: nag cycle, WebSub dormant)
 ```
 
+**Route caveat:** current app code points to `https://tubepulse-api.jimothyoakley55.workers.dev`, while `worker/tubepulse-api/wrangler.toml` comments say there are no HTTP routes. Live Cloudflare route state was not verified from repo files. Verify Cloudflare before changing worker routing or deleting legacy worker files.
+
 **Key principle:** Channels are the unit of work. Devices are the unit of subscription.  
 Every operation asks "what's happening to this channel" first, then "who cares about this channel".  
 This inverts the old device-first approach and eliminates `KV.list()` entirely.
@@ -126,6 +131,7 @@ This inverts the old device-first approach and eliminates `KV.list()` entirely.
 
 ### API Worker (`tubepulse-api`)
 
+Repo evidence suggests this is the app-facing API worker source. Its live public route status is unresolved; the app client currently hardcodes a `workers.dev` URL, while the wrangler config comments imply no public routes.
 The central Cloudflare Worker. Handles:
 
 | Endpoint | Method | Purpose |
@@ -321,8 +327,8 @@ TubePulse/
 │   └── App.js                     # Navigation, FCM setup, notification tap handling, init
 ├── worker/
 │   ├── README.md                  # Cloud architecture — KV schema, endpoints, cost analysis
-│   ├── index.js                   # Legacy single-worker file (not deployed)
-│   ├── wrangler.toml              # Legacy wrangler config
+│   ├── index.js                   # Legacy resolver worker source; retained, not assumed active
+│   ├── wrangler.toml              # Legacy resolver wrangler config (`tubepulse-resolver`)
 │   ├── tubepulse-api/
 │   │   ├── index.js               # API Worker — v3.1 channel-first + posts + prewarn
 │   │   └── wrangler.toml
@@ -337,8 +343,8 @@ TubePulse/
 │   ├── load-secrets.sh            # Sources env + generates per-worker .dev.vars
 │   └── set-worker-secrets.sh      # Pushes secrets to workers via wrangler
 ├── ARCHITECTURE.md                # v3 architecture specification
-├── PLAN_v3.1.md                   # v3.1 implementation plan and status
-├── STATUS.md                      # Project status and version history
+├── PLAN_v3.1.md                   # Historical v3.1 implementation plan
+├── STATUS.md                      # Current repo status and operational caveats
 ├── MIGRATION_PLAN.md              # v1→v2→v3 migration plan (historical record)
 ├── build-and-release.ps1           # Windows-native build: gradle + commit + push + GitHub release
 ├── app.json                       # Expo config
@@ -389,12 +395,14 @@ npx expo run:android
 ## Deploying Workers
 
 ```bash
-# Deploy API worker (handles app traffic + dormant WebSub endpoints)
+# Deploy API worker source (app-facing API in repo; verify live route state first)
 cd worker/tubepulse-api && npx wrangler deploy
 
 # Deploy cron worker (prewarn + RSS poll + posts + nag cycle + lease renewal no-op)
 cd worker/tubepulse-cron && npx wrangler deploy
 ```
+
+Before worker cleanup, verify live Cloudflare route state: repo files alone do not prove whether the app's workers.dev API URL is currently reachable.
 
 For the full cloud architecture — KV schema, endpoint reference, FCM details, cost analysis, free tier budget — see **[worker/README.md](worker/README.md)**.
 
