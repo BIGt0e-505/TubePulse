@@ -116,7 +116,7 @@ YouTube RSS feed ──poll every 5 min──▶ Cron Worker ──new videos─
                                                                   (also: nag cycle, WebSub dormant)
 ```
 
-**Route caveat:** current app code points to `https://tubepulse-api.jimothyoakley55.workers.dev`, while `worker/tubepulse-api/wrangler.toml` comments say there are no HTTP routes. Live Cloudflare route state was not verified from repo files. Verify Cloudflare before changing worker routing or deleting legacy worker files.
+**Verified API route:** as of 2026-06-25, `GET /` on `https://tubepulse-api.jimothyoakley55.workers.dev` returns Cloudflare-served health JSON identifying `worker: "tubepulse-api"` and `architecture: "channel-first"`. The health JSON reports `version: "3.0.0"`; keep that separate from the app version `3.2.4`. The wrangler config comment saying no HTTP routes is stale/incomplete, so review Cloudflare settings before changing routing.
 
 **Key principle:** Channels are the unit of work. Devices are the unit of subscription.  
 Every operation asks "what's happening to this channel" first, then "who cares about this channel".  
@@ -131,7 +131,7 @@ This inverts the old device-first approach and eliminates `KV.list()` entirely.
 
 ### API Worker (`tubepulse-api`)
 
-Repo evidence suggests this is the app-facing API worker source. Its live public route status is unresolved; the app client currently hardcodes a `workers.dev` URL, while the wrangler config comments imply no public routes.
+This is the current live app-facing API worker. The app client points to `https://tubepulse-api.jimothyoakley55.workers.dev`, and live `GET /` verification on 2026-06-25 returned the worker health JSON. `worker/tubepulse-api/wrangler.toml` still has a stale/incomplete route comment, so do not use that comment alone for cleanup decisions.
 The central Cloudflare Worker. Handles:
 
 | Endpoint | Method | Purpose |
@@ -402,7 +402,7 @@ cd worker/tubepulse-api && npx wrangler deploy
 cd worker/tubepulse-cron && npx wrangler deploy
 ```
 
-Before worker cleanup, verify live Cloudflare route state: repo files alone do not prove whether the app's workers.dev API URL is currently reachable.
+Before worker cleanup, note that the app's workers.dev API URL is verified reachable, while the repo wrangler comment remains stale/incomplete; review deployed Cloudflare settings before route/config changes.
 
 For the full cloud architecture — KV schema, endpoint reference, FCM details, cost analysis, free tier budget — see **[worker/README.md](worker/README.md)**.
 

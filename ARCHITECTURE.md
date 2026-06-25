@@ -2,7 +2,7 @@
 
 **Version:** Current architecture reference for the v3.x app line. See [STATUS.md](STATUS.md) for current checked-in version and operational caveats.
 **Date:** 2026-04-19 (initial), updated through the repo-hygiene documentation pass on 2026-06-25
-**Status:** Architecture reference. Some historical diagrams/sections remain; [STATUS.md](STATUS.md) is authoritative for current version, release path, and unresolved deployment caveats.
+**Status:** Architecture reference. Some historical diagrams/sections remain; [STATUS.md](STATUS.md) is authoritative for current version, release path, and verified deployment caveats.
 
 ---
 
@@ -119,8 +119,10 @@ The architectural difference is roughly 100x at this scale, and it widens as you
 
 | Component | Role | Triggered by |
 |-----------|------|--------------|
-| `tubepulse-api` | REST API for app + WebSub callback (dormant) | HTTP requests |
-| `tubepulse-cron` | Four scheduled jobs (see §6) — YouTube Data API polling is the active detection path | Cron schedules |
+| `tubepulse-api` | Current live app-facing REST API + WebSub callback (dormant) | HTTP requests; `workers.dev` route verified reachable on 2026-06-25 |
+| 	ubepulse-cron | Four scheduled jobs (see §6) — YouTube Data API polling is the active detection path | Cron schedules |
+
+Live route note: `GET /` at `https://tubepulse-api.jimothyoakley55.workers.dev` returned `200 OK` from Cloudflare on 2026-06-25 with health JSON identifying `worker: "tubepulse-api"`, `architecture: "channel-first"`, and `version: "3.0.0"`. That health version is not the app release version (`3.2.4` in the repo).
 | Cloudflare KV | Single namespace, all persistent state | Workers |
 | Firebase Cloud Messaging | Push notifications to devices | API + cron workers |
 | Android app | UI, device-local cache, FCM receiver | User + push |

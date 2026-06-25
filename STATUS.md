@@ -19,13 +19,13 @@ Repo evidence as of this document update:
 |---|---|
 | App version | `app.json` has `expo.version = 3.2.4` |
 | Android version | `android/app/build.gradle` has `versionCode 324`, `versionName "3.2.4"` |
-| API base URL | `src/utils/api.js` points to `https://tubepulse-api.jimothyoakley55.workers.dev` |
+| API base URL | `src/utils/api.js` points to `https://tubepulse-api.jimothyoakley55.workers.dev`; live `GET /` verified reachable on 2026-06-25 |
 | Release script | `build-and-release.ps1` is the current local release path |
-| API worker config | `worker/tubepulse-api/wrangler.toml` defines worker `tubepulse-api`, KV namespace `52e77ca9f5f6493e89d2478c8d3055ec`, and comments saying no HTTP routes |
+| API worker config | `worker/tubepulse-api/wrangler.toml` defines worker `tubepulse-api`, KV namespace `52e77ca9f5f6493e89d2478c8d3055ec`; its route comment is stale/incomplete because live `workers.dev` is reachable |
 | Cron worker config | `worker/tubepulse-cron/wrangler.toml` defines worker `tubepulse-cron`, the same KV namespace, and cron `*/5 * * * *` |
 | Legacy worker config | `worker/wrangler.toml` defines `tubepulse-resolver`, apparently legacy resolver material retained for now |
 
-Live Cloudflare deployment state was not verified during this docs pass. Do not treat old deployment IDs, route availability claims, or `workers.dev` reachability statements in older notes as authoritative without checking Cloudflare directly.
+Live route verification on 2026-06-25 confirmed Cloudflare serves the app-facing API at `https://tubepulse-api.jimothyoakley55.workers.dev/`. Old notes claiming the `workers.dev` API route is unreachable are stale.
 
 ---
 
@@ -42,16 +42,25 @@ Live Cloudflare deployment state was not verified during this docs pass. Do not 
 
 ---
 
-## Worker Route Caveat
+## Verified API Route State
 
-There is an unresolved route/deployment contradiction that must be verified before worker cleanup:
+Last verified: 2026-06-25.
 
-- Current app code points at `https://tubepulse-api.jimothyoakley55.workers.dev`.
-- `worker/tubepulse-api/wrangler.toml` comments say "No HTTP routes" and has no active `routes` entry.
-- Older docs claimed the API worker had no public route/service-binding-only access.
-- The current app is reported to work reasonably well, so either the `workers.dev` route is enabled outside the repo-visible config, docs are stale, or live Cloudflare state differs from repo assumptions.
+The app-facing API route is currently reachable at:
 
-Do not delete or reroute worker files based only on repo text. Verify live Cloudflare worker settings before changing worker deployment or API URL behavior.
+`https://tubepulse-api.jimothyoakley55.workers.dev`
+
+Safe read-only checks showed:
+
+- `GET /` returned `200 OK` from Cloudflare with JSON body `{"status":"ok","version":"3.0.0","worker":"tubepulse-api","architecture":"channel-first"}`.
+- `GET /__route_probe_readonly__` returned `404 Not Found` from Cloudflare, proving the hostname routes to a worker even for unknown paths.
+
+Keep these version labels distinct:
+
+- App/release version evidence in this repo is `3.2.4` with Android `versionCode 324`.
+- API worker health response reports `version: "3.0.0"`; this appears to be a stale or independently versioned health label, not the app release version.
+
+`worker/tubepulse-api/wrangler.toml` still has a comment saying "No HTTP routes" and no explicit `routes` or `workers_dev` setting. That comment/config is incomplete relative to live Cloudflare behavior. Do not change route/app config or delete worker files until the deployed Cloudflare settings are intentionally reviewed.
 
 ---
 
@@ -99,6 +108,6 @@ Use these docs this way:
 
 ## Remaining Documentation Concerns
 
-- Live Cloudflare route state is unresolved from repo files alone.
+- `worker/tubepulse-api/wrangler.toml` still contains a stale/incomplete route comment; live `workers.dev` route is verified reachable, but the repo config does not explain why.
 - Several older docs still contain historical v3.1/v3.0 detail that may be useful but should not override this status document.
 - Some markdown files contain encoding artifacts in old prose/diagrams. This pass did not rewrite all historical content.

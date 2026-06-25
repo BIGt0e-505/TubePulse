@@ -1,6 +1,6 @@
 # TubePulse — Cloud Services
 
-This document describes the TubePulse backend: the two Cloudflare Workers, the Cloudflare KV store, the YouTube Data API surface we use, and the Firebase Cloud Messaging integration. It is the backend reference, but live Cloudflare route state must be verified outside the repo before deployment cleanup. The Android app is documented separately in the project root README.
+This document describes the TubePulse backend: the two Cloudflare Workers, the Cloudflare KV store, the YouTube Data API surface we use, and the Firebase Cloud Messaging integration. It is the backend reference. Live API route state was last verified on 2026-06-25; review Cloudflare settings before changing routing. The Android app is documented separately in the project root README.
 
 ---
 
@@ -37,12 +37,12 @@ This document describes the TubePulse backend: the two Cloudflare Workers, the C
 
 | Component | Repo path/config | Purpose | Route/deploy evidence |
 |-----------|------------------|---------|-----------------------|
-| `tubepulse-api` | `worker/tubepulse-api/` | App-facing API worker source + dormant WebSub callback | App code points to `https://tubepulse-api.jimothyoakley55.workers.dev`; wrangler comments say no HTTP routes. Live route state is unresolved from repo files alone. |
+| `tubepulse-api` | `worker/tubepulse-api/` | Current live app-facing API worker source + dormant WebSub callback | `GET /` at `https://tubepulse-api.jimothyoakley55.workers.dev` returned Cloudflare-served health JSON on 2026-06-25. Wrangler route comments are stale/incomplete. |
 | `tubepulse-cron` | `worker/tubepulse-cron/` | Scheduled jobs (every 5 min): upcoming-events drain, prewarn, RSS poll, community posts, nag cycle, WebSub lease renewal | `wrangler.toml` has `triggers.crons = ["*/5 * * * *"]`; no `fetch()` handler is expected. |
 | `tubepulse-resolver` | `worker/index.js`, `worker/wrangler.toml` | Legacy standalone resolver worker retained for now | Not assumed active; do not delete until live Cloudflare state is checked. |
 | `TUBEPULSE_KV` | KV namespace `52e77ca9f5f6493e89d2478c8d3055ec` | All current API/cron persistent state | Shared by `tubepulse-api` and `tubepulse-cron` configs. |
 
-> **Route caveat:** repo evidence is contradictory. The app currently hardcodes a `workers.dev` API URL, but `worker/tubepulse-api/wrangler.toml` comments say no HTTP routes. This docs pass did not verify Cloudflare live state. Verify the deployed worker settings before changing worker routing, app API URLs, or deleting legacy worker files.
+> **Verified route:** on 2026-06-25, `GET /` at the app API URL returned `200 OK` with `{"status":"ok","version":"3.0.0","worker":"tubepulse-api","architecture":"channel-first"}`. The health `version` is an API worker label and appears stale or independent from the app release version `3.2.4`. `worker/tubepulse-api/wrangler.toml` has no explicit route setting and still contains a stale/incomplete "No HTTP routes" comment.
 
 The two workers share the **same KV namespace** so they can read each other's writes. The cron writes `channel:{id}:recent` and `channel:{id}:meta`; the API reads them when serving `/feed`.
 
@@ -118,13 +118,13 @@ For each new video, the cron does the standard fan-out (which is identical to wh
 
 `worker/tubepulse-api/index.js` - app-facing API worker source. Line counts in older notes may be stale; check the file directly when needed.
 
-**Route status unresolved from repo evidence.** The API worker source has a `fetch(request, env, ctx)` entry point and app-facing routes. The app client hardcodes a `workers.dev` URL, while the wrangler config comments say no HTTP routes. Verify Cloudflare live state before changing this.
+**Route status verified.** The API worker source has a `fetch(request, env, ctx)` entry point and app-facing routes. The app client hardcodes `https://tubepulse-api.jimothyoakley55.workers.dev`, and live `GET /` verification on 2026-06-25 returned the worker health JSON. The wrangler route comment is stale/incomplete; review deployed Cloudflare settings before changing route config.
 
 ### 4.1 Endpoint map
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| `GET`  | `/` | none | Health check (inlined — returns `{ status: 'ok', version: '3.0.0', worker: 'tubepulse-api', architecture: 'channel-first' }`). The `version` field is a stale label; bump when changed. |
+| `GET`  | `/` | none | Health check (inlined — verified live on 2026-06-25 as `{ status: 'ok', version: '3.0.0', worker: 'tubepulse-api', architecture: 'channel-first' }`). The `version` field is a worker health label and appears stale/independent from the app release version. |
 | `POST` | `/register` | Bearer | `handleRegister` — create/update device profile (FCM token optional). Two-phase deviceId migration for cross-version upgrades (see §11.1). |
 | `POST` | `/subscribe-channel` | Bearer | `handleSubscribeChannel` — add a channel, fetch its avatar via Data API (first-subscribe only), RSS bootstrap (zero quota) |
 | `POST` | `/unsubscribe` | Bearer | `handleUnsubscribe` — remove a channel, clean up subscriber list and active index, call `cleanupDeadChannel` if the device was the last subscriber |
