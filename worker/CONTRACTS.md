@@ -111,6 +111,22 @@ Important exception: `/register` intentionally uses `KV.list({ prefix: 'device:'
 
 ---
 
+## Local Validation
+
+Run this lightweight syntax check before and after worker behavior changes:
+
+```bash
+npm run check:workers
+```
+
+The command currently runs `node --check` against both active worker entrypoints:
+
+- `worker/tubepulse-api/index.js`
+- `worker/tubepulse-cron/index.js`
+
+This is intentionally narrow. It catches JavaScript parse errors without deploying workers, calling live APIs, changing KV state, or requiring a test framework.
+
+---
 ## Suggested Next Steps
 
 1. Add lightweight static checks for worker syntax and contract-sensitive patterns.
