@@ -7,6 +7,7 @@
 # Usage:
 #   .\build-and-release.ps1 3.1.9              # full release on current branch
 #   .\build-and-release.ps1 3.1.9 -BuildOnly   # build only, no git/release
+#   .\build-and-release.ps1 3.1.9 -ValidateOnly # preflight only, no changes
 #   .\build-and-release.ps1 3.1.9 -Clean       # nuke gradle cache first
 #   .\build-and-release.ps1 3.1.9 -Message "Fix widget tap"  # custom commit msg
 #
@@ -35,7 +36,9 @@ param(
 
     [switch]$BuildOnly,
 
-    [switch]$Clean
+    [switch]$Clean,
+
+    [switch]$ValidateOnly
 )
 
 # --- Constants ---
@@ -55,6 +58,11 @@ $ANDROID_SDK = "D:\dev\android-sdk"
 $GIT_AUTHOR = "Jimothy"
 $GIT_EMAIL = "Jimothy@local"
 $UTF8_NO_BOM = [System.Text.UTF8Encoding]::new($false)
+
+if ($ValidateOnly -and ($BuildOnly -or $Clean)) {
+    Write-Error "-ValidateOnly cannot be combined with -BuildOnly or -Clean."
+    exit 1
+}
 
 # Branch
 $Branch = (git rev-parse --abbrev-ref HEAD 2>&1)
@@ -132,12 +140,51 @@ function Assert-OnlyReleaseVersionChanges {
     Write-Error "Commit, revert, or move unrelated tracked changes before releasing."
     exit 1
 }
+function Assert-ValidateOnlyVersionSyntax {
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+        Write-Error "ValidateOnly failed: Version must use numeric X.Y.Z format, for example 3.2.5."
+        exit 1
+    }
+}
+
+function Invoke-ValidateOnlyPreflight {
+    Write-Host ""
+    Write-Host "[validate] Checking release preflight only..." -ForegroundColor Cyan
+
+    Assert-ValidateOnlyVersionSyntax
+    Assert-NoUntrackedFiles
+    Assert-OnlyReleaseVersionChanges
+
+    $appJsonPath = Join-Path $REPO_DIR "app.json"
+    $buildGradlePath = Join-Path $REPO_DIR "android\app\build.gradle"
+    $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
+    $buildGradle = Get-Content $buildGradlePath -Raw
+    $currentVersionName = "unknown"
+    $currentVersionCode = "unknown"
+    if ($buildGradle -match 'versionName "([^"]+)"') { $currentVersionName = $Matches[1] }
+    if ($buildGradle -match 'versionCode (\d+)') { $currentVersionCode = $Matches[1] }
+
+    Write-Host "  Git branch: $Branch"
+    Write-Host "  Requested version: $Version"
+    Write-Host "  Current app.json expo.version: $($appJson.expo.version)"
+    Write-Host "  Current build.gradle versionName: $currentVersionName"
+    Write-Host "  Current build.gradle versionCode: $currentVersionCode"
+    Write-Host "  Intended tag: $TAG"
+    Write-Host "  Intended APK name: $APK_NAME"
+    Write-Host "  Intended dist path: $APK_PATH"
+    Write-Host "  app.json path: $appJsonPath"
+    Write-Host "  build.gradle path: $buildGradlePath"
+    Write-Host ""
+    Write-Host "  ValidateOnly complete. No files were changed, built, staged, committed, pushed, released, or uploaded." -ForegroundColor Cyan
+    exit 0
+}
 # --- Banner ---
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  $APP_NAME - Build and Release $TAG" -ForegroundColor Cyan
 Write-Host "  Branch: $Branch" -ForegroundColor Cyan
 if ($Message) { Write-Host "  Message: $Message" -ForegroundColor Cyan }
+if ($ValidateOnly) { Write-Host "  Mode: ValidateOnly" -ForegroundColor Cyan }
 Write-Host "  JDK: $JDK_PATH" -ForegroundColor Cyan
 Write-Host "  SDK: $ANDROID_SDK" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -178,11 +225,21 @@ if (-not (Test-Path "$REPO_DIR\android\app\debug.keystore")) {
 }
 Write-Host "  debug.keystore  OK"
 
+if (-not (Test-Path "$REPO_DIR\android\gradlew.bat")) {
+    Write-Error "gradlew.bat not found at android\gradlew.bat"
+    exit 1
+}
+Write-Host "  gradlew.bat  OK"
+
 if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
     Write-Error "curl.exe not found on PATH"
     exit 1
 }
 Write-Host "  curl.exe  OK"
+
+if ($ValidateOnly) {
+    Invoke-ValidateOnlyPreflight
+}
 
 # --- Set environment ---
 $env:JAVA_HOME = $JDK_PATH

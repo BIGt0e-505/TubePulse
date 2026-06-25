@@ -24,11 +24,12 @@ The script is Windows-native and expects one required argument:
 | `-Message` | Optional custom commit message suffix |
 | `-BuildOnly` | Builds, signs, verifies, and copies the APK, then stops before Git/GitHub release steps |
 | `-Clean` | Deletes local Gradle build/cache folders before building |
+| `-ValidateOnly` | Runs release preflight checks only, then exits without changing files or publishing |
 
 Current behavior, in order:
 
 1. Determines the current Git branch.
-2. Verifies local tool paths for JDK 21, Android SDK, `apksigner`, `aapt2`, `curl.exe`, and `android/app/debug.keystore`.
+2. Verifies local tool paths for JDK 21, Android SDK, `apksigner`, `aapt2`, `curl.exe`, `android/app/debug.keystore`, and `android/gradlew.bat`.
 3. Optionally removes `android/app/build`, `android/build`, and `android/.gradle` when `-Clean` is set.
 4. Updates app version files:
    - `app.json` `expo.version`
@@ -50,6 +51,18 @@ Current behavior, in order:
     - uploads the `dist/` APK with `curl.exe`
 
 The GitHub token is read from Git's credential helper. The script does not require the GitHub CLI.
+
+### Validate-Only Preflight
+
+Run a release preflight without modifying the working tree:
+
+```powershell
+.\build-and-release.ps1 9.9.9 -ValidateOnly
+```
+
+`-ValidateOnly` checks required local tools and paths, the current Git branch/repository state, untracked non-ignored files, unrelated tracked changes, and numeric `X.Y.Z` version syntax. It also prints the intended tag, APK name, `dist/` output path, version file paths, and current app/build Gradle version metadata.
+
+`-ValidateOnly` deliberately does not edit `app.json` or `android/app/build.gradle`, run `npm install`, run Gradle, sign or copy APKs, stage files, commit, push, create GitHub releases, or upload APKs. It cannot be combined with `-BuildOnly` or `-Clean`.
 
 ---
 
