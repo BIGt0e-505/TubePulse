@@ -8,6 +8,14 @@ node_modules/
 *.apk
 *.aab
 
+# Local release outputs
+dist/
+releases/
+*.sha256
+*.log
+release-manifest*.json
+release-notes*.md
+
 # Android local properties (machine-specific paths, e.g. ndk.dir)
 android/local.properties
 
