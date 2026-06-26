@@ -10,6 +10,12 @@
  * Each job reads the bucket for "now" and processes entries.
  */
 
+import {
+  fetchLatestCommunityPostInnerTube,
+  isCommunityPostsEnabled,
+  parseCommunityPostChannelAllowlist,
+} from './community-posts.mjs';
+
 // ÔöÇÔöÇÔöÇ Key builders (must match API worker) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 const key = {
@@ -50,11 +56,6 @@ async function putKV(kv, k, value) { kvOps.writes++; await kv.put(k, JSON.string
 async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
 // Note: kv.list() isn't called anywhere in this worker (the channels:active
 // index replaces it). If it ever is, the counter is here and ready.
-
-function isCommunityPostsEnabled(env) {
-  const value = String(env.TUBEPULSE_ENABLE_COMMUNITY_POSTS || '').trim().toLowerCase();
-  return value === '1' || value === 'true' || value === 'yes';
-}
 
 // ÔöÇÔöÇÔöÇ Cleanup helpers ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
@@ -770,15 +771,13 @@ async function runPrewarnCron(env, ctx) {
 // ÔöÇÔöÇÔöÇ Job 2: Nag cycle (every 15 min) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 // ÔöÇÔöÇÔöÇ Community posts cron ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-// Polls YouTube's Data API activities.list for each active channel
-// once per hour. Captures community posts (text, images, polls) and
-// notifies subscribers when a new one is detected. Cost: 1 quota
-// unit per channel per hour. With 4 channels and a 10k daily free
-// tier budget, this is ~100 units/day or 1% of the free tier.
+// Polls YouTube's InnerTube browse Posts tab for allowlisted active
+// channels once per hour. Captures the latest visible community post
+// only and notifies subscribers when the latest post ID changes.
 //
 // Community posts are latest-state oriented, not history oriented.
 // The first poll stores only the latest post and sends no notifications.
-// Later polls compare the fetched latest activity ID against known IDs;
+// Later polls compare the fetched latest post ID against known IDs;
 // only a changed latest post is stored and surfaced.
 
 async function runCommunityPostsCron(env, ctx) {
@@ -788,8 +787,14 @@ async function runCommunityPostsCron(env, ctx) {
     return { disabled: true, channelsPolled: 0, newPosts: 0, errors: [] };
   }
 
+  const allowlist = parseCommunityPostChannelAllowlist(env);
+  if (allowlist.size === 0) {
+    console.log('[Posts] no channels allowlisted by TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST');
+    return { disabled: false, allowlistEmpty: true, channelsPolled: 0, newPosts: 0, errors: [] };
+  }
+
   const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
-  const apiKey = env.YOUTUBE_API_KEY;
+  const channelsToPoll = channelsActive.filter((channelId) => allowlist.has(channelId));
   const results = { channelsPolled: 0, newPosts: 0, errors: [] };
   let accessToken = null;
   let projectId = null;
@@ -811,38 +816,10 @@ async function runCommunityPostsCron(env, ctx) {
     }
   };
 
-  for (const channelId of channelsActive) {
+  for (const channelId of channelsToPoll) {
     try {
       results.channelsPolled++;
-      const url = `https://www.googleapis.com/youtube/v3/activities?part=snippet&channelId=${encodeURIComponent(channelId)}&maxResults=20&key=${apiKey}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        const text = await resp.text();
-        results.errors.push(`${channelId}: ${resp.status} ${text.slice(0, 100)}`);
-        continue;
-      }
-      const data = await resp.json();
-      const items = data.items || [];
-
-      // Filter to community posts (type === 'social') and shape them.
-      const posts = items
-        .filter((it) => it.snippet?.type === 'social')
-        .map((it) => {
-          const snip = it.snippet;
-          const att = (snip.attachments || [])[0];
-          return {
-            activityId: it.id,
-            publishedAt: snip.publishedAt,
-            text: snip.description || '',
-            // Thumbnail only for image posts. Polls, quizzes, and plain
-            // text posts have no usable single-image URL.
-            thumbnail: (att && att.type === 'image' && att.url) ? att.url : null,
-            kind: att ? att.type : 'text',
-            link: `https://www.youtube.com/channel/${channelId}/community`,
-          };
-        });
-
-      const latestPost = posts[0] || null;
+      const latestPost = await fetchLatestCommunityPostInnerTube(channelId, { fetch });
 
       // First-run guard: seed latest post state only, without notifying.
       const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
@@ -853,7 +830,7 @@ async function runCommunityPostsCron(env, ctx) {
         continue;
       }
 
-      // Treat the fetched latest activity ID as the watermark. YouTube
+      // Treat the fetched latest post ID as the watermark. YouTube
       // community post timestamps are not reliable enough to use as the
       // primary ordering signal.
       const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
@@ -913,7 +890,7 @@ async function runCommunityPostsCron(env, ctx) {
               unwatched: [],
               nagCount: 0,
             };
-            const postKey = `post:${post.activityId}`;
+            const postKey = post.id || `post:${post.activityId}`;
             if (!state.unwatched.includes(postKey)) {
               state.unwatched.push(postKey);
               await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);

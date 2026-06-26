@@ -101,7 +101,7 @@ Known risks and the intended safer target flow are documented in [RELEASE.md](RE
 ## Current Backend Summary
 
 - Video detection is cron-driven via YouTube RSS polling.
-- YouTube Data API usage is intended for handle/channel resolution, avatar/bootstrap fallback paths, and the currently wired legacy community-post polling path. Community-post v2 work has an isolated InnerTube latest-post helper and channel allowlist gate, but it is not wired into production polling yet.
+- YouTube Data API usage is intended for handle/channel resolution and avatar/bootstrap fallback paths. Community-post v2 cron polling now uses the isolated InnerTube latest-post helper, but remains inert unless the global community-post gate is enabled and `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST` contains active channel IDs in the deployed worker environment.
 - API and cron workers share the same KV namespace according to their wrangler configs.
 - WebSub code remains present but should be treated as dormant unless live verification proves otherwise.
 - KV schema and helper logic are duplicated between worker files and have known drift; see [worker/CONTRACTS.md](worker/CONTRACTS.md) before changing worker behavior.
