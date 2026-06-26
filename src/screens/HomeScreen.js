@@ -241,11 +241,29 @@ export default function HomeScreen({ navigation }) {
     return [...cached.posts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
   };
 
+  const getPostSeenId = (post) => {
+    if (!post) return null;
+    if (post.id) return post.id;
+    return post.activityId ? `post:${post.activityId}` : null;
+  };
+
+  const isPostUnwatched = (post) => post?.unwatched === true;
+
+  const selectPersistentLatestContent = (handle) => {
+    const posts = getPosts(handle);
+    if (posts.length > 0) {
+      return { type: 'post', item: posts[0] };
+    }
+    const latestVideo = getVideos(handle)[0] || null;
+    return latestVideo ? { type: 'video', item: latestVideo } : null;
+  };
+
   const getVisiblePosts = (handle) => {
     const posts = getPosts(handle);
-    const unseen = posts.filter((p) => p.unwatched === true);
+    const unseen = posts.filter(isPostUnwatched);
     if (unseen.length > 0) return unseen;
-    if (settings.tapAction === 'channel' && posts.length > 0) return [posts[0]];
+    const persistent = selectPersistentLatestContent(handle);
+    if (persistent?.type === 'post') return [persistent.item];
     return [];
   };
 
@@ -273,8 +291,8 @@ export default function HomeScreen({ navigation }) {
   const getCurrentVideo = (handle) => {
     const unseen = getUnseenVideos(handle);
     if (unseen.length > 0) return unseen[unseen.length - 1];
-    const vids = getVideos(handle);
-    return vids[0] || null;
+    const persistent = selectPersistentLatestContent(handle);
+    return persistent?.type === 'video' ? persistent.item : null;
   };
 
   const handleChannelOpen = async (channel) => {
@@ -282,7 +300,7 @@ export default function HomeScreen({ navigation }) {
     const updatedLastSeen = { ...lastSeen };
     if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
     const allIds = getVideos(key).map(v => v.videoId);
-    const allPostIds = getPosts(key).map((p) => `post:${p.activityId}`);
+    const allPostIds = getPosts(key).map(getPostSeenId).filter(Boolean);
     const existing = updatedLastSeen[key].seenIds || [];
     updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds, ...allPostIds])] };
     await saveLastSeen(updatedLastSeen);
@@ -306,7 +324,7 @@ export default function HomeScreen({ navigation }) {
       }
 
       // Mark all posts as watched
-      if (cached.posts?.some((p) => p.unwatched)) {
+      if (cached.posts?.some(isPostUnwatched)) {
         updatedCache[key] = {
           ...updatedCache[key],
           posts: cached.posts.map((p) => ({ ...p, unwatched: false })),
@@ -338,7 +356,7 @@ export default function HomeScreen({ navigation }) {
 
     if (settings.tapAction === 'channel') {
       const allIds = getVideos(key).map(v => v.videoId);
-      const allPostIds = getPosts(key).map((p) => `post:${p.activityId}`);
+      const allPostIds = getPosts(key).map(getPostSeenId).filter(Boolean);
       const existing = updatedLastSeen[key].seenIds || [];
       updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds, ...allPostIds])] };
       await saveLastSeen(updatedLastSeen);
@@ -357,7 +375,7 @@ export default function HomeScreen({ navigation }) {
           };
           changed = true;
         }
-        if (cached.posts?.some((p) => p.unwatched)) {
+        if (cached.posts?.some(isPostUnwatched)) {
           updatedCache[key] = {
             ...updatedCache[key],
             posts: cached.posts.map((p) => ({ ...p, unwatched: false })),
@@ -438,7 +456,8 @@ export default function HomeScreen({ navigation }) {
 
     // Default: mark this post as seen server-side and open it.
     const key = channel.handle;
-    const postKey = `post:${post.activityId}`;
+    const postKey = getPostSeenId(post);
+    if (!postKey) return;
     const updatedLastSeen = { ...lastSeen };
     if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
     const seenIds = updatedLastSeen[key].seenIds || [];
@@ -468,7 +487,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const getUnseenPosts = (handle) => {
-    return getPosts(handle).filter((p) => p.unwatched);
+    return getPosts(handle).filter(isPostUnwatched);
   };
 
   const isNew = (handle) => unseenCount(handle) > 0 || getUnseenPosts(handle).length > 0;
@@ -506,8 +525,10 @@ export default function HomeScreen({ navigation }) {
     const hasNew = isNew(item.handle);
     const displayName = cached?.name || item.name || item.handle;
     const unseenVids = getUnseenVideos(item.handle);
-    const latestVideo = getVideos(item.handle)[0] || null;
-    const videosToShow = unseenVids.length > 0 ? [...unseenVids].reverse() : (latestVideo ? [latestVideo] : []);
+    const persistent = selectPersistentLatestContent(item.handle);
+    const videosToShow = unseenVids.length > 0
+      ? [...unseenVids].reverse()
+      : (persistent?.type === 'video' ? [persistent.item] : []);
     const posts = getVisiblePosts(item.handle);
 
     return (
@@ -553,7 +574,7 @@ export default function HomeScreen({ navigation }) {
               activeOpacity={0.7}
             >
               {post.thumbnail ? (
-                <Image source={{ uri: post.thumbnail }} style={styles.postThumbnail} />
+                <Image source={{ uri: post.thumbnail }} style={styles.postThumbnail} resizeMode="cover" />
               ) : (
                 <View style={styles.postPlaceholder}>
                   {cached?.avatar ? (
@@ -581,7 +602,7 @@ export default function HomeScreen({ navigation }) {
                   {post.text}
                 </Text>
                 <View style={styles.videoMeta}>
-                  <Text style={styles.timeAgo}>{post.publishedAt ? timeAgo(post.publishedAt) : ''}</Text>
+                  <Text style={styles.timeAgo}>{post.publishedAt ? timeAgo(post.publishedAt) : (post.publishedText || '')}</Text>
                 </View>
               </View>
               {!isSeen && <View style={styles.newDot} />}
