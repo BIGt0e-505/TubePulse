@@ -1,9 +1,9 @@
 # TubePulse - Project Status
 
-**Last updated:** 2026-06-25
+**Last updated:** 2026-06-26
 **Current repo branch:** `master`
-**Current app version in repo:** `3.2.4`
-**Android versionCode/versionName in repo:** `324` / `3.2.4`
+**Current app version in repo:** `3.3.0`
+**Android versionCode/versionName in repo:** `330` / `3.3.0`
 **Repo:** [Undert0e-505/TubePulse](https://github.com/Undert0e-505/TubePulse)
 **Platform:** Android only (React Native + Expo)
 
@@ -17,8 +17,8 @@ Repo evidence as of this document update:
 
 | Area | Current evidence |
 |---|---|
-| App version | `app.json` has `expo.version = 3.2.4` |
-| Android version | `android/app/build.gradle` has `versionCode 324`, `versionName "3.2.4"` |
+| App version | `app.json` has `expo.version = 3.3.0` |
+| Android version | `android/app/build.gradle` has `versionCode 330`, `versionName "3.3.0"` |
 | API base URL | `src/utils/api.js` points to `https://tubepulse-api.jimothyoakley55.workers.dev`; live `GET /` verified reachable on 2026-06-25 |
 | Release script | `build-and-release.ps1` is the current local release path |
 | API worker config | `worker/tubepulse-api/wrangler.toml` defines worker `tubepulse-api`, KV namespace `52e77ca9f5f6493e89d2478c8d3055ec`; its route comment is stale/incomplete because live `workers.dev` is reachable |
@@ -39,7 +39,7 @@ Last worker deploy recorded: 2026-06-25.
 | `tubepulse-api` | Not deployed as part of the 2026-06-25 cron worker deployment. |
 | `worker/archive/tubepulse-resolver` | Not deployed; archive remains reference-only. |
 
-The app release/version remains unchanged at `3.2.4` with Android `versionCode 324`. Worker deployment is separate from app APK release; the cron deploy did not create an app release, bump versions, or publish a GitHub Release.
+The app release/version is now `3.3.0` with Android `versionCode 330`. Worker deployment is separate from app APK release; community-post rollout required both worker deployment and app release.
 
 Community-post worker/app support exists in the repo, but runtime community-post polling and `/feed` post rows are gated by `TUBEPULSE_ENABLE_COMMUNITY_POSTS`. The gate is disabled by default when the environment variable is missing or any value other than `1`, `true`, or `yes`. Future v2 testing is additionally scoped by `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST`, where missing or blank means no channels are eligible. This keeps current workers deployable without re-enabling community-post polling or serving stale post rows until the contract is deliberately re-enabled for allowlisted channels.
 
@@ -72,7 +72,7 @@ Safe read-only checks showed:
 
 Keep these version labels distinct:
 
-- App/release version evidence in this repo is `3.2.4` with Android `versionCode 324`.
+- App/release version evidence in this repo is `3.3.0` with Android `versionCode 330`.
 - API worker health response reports `version: "3.0.0"`; this appears to be a stale or independently versioned health label, not the app release version.
 
 `worker/tubepulse-api/wrangler.toml` still has a comment saying "No HTTP routes" and no explicit `routes` or `workers_dev` setting. That comment/config is incomplete relative to live Cloudflare behavior. Do not change route/app config or delete worker files until the deployed Cloudflare settings are intentionally reviewed.

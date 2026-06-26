@@ -1,6 +1,6 @@
 # TubePulse
 
-> Current repo status: see [STATUS.md](STATUS.md). The app version in this repo is `3.2.4` (`app.json`, `android/app/build.gradle`). Historical planning docs are not authoritative for current release/deployment state.
+> Current repo status: see [STATUS.md](STATUS.md). The app version in this repo is `3.3.0` (`app.json`, `android/app/build.gradle`). Historical planning docs are not authoritative for current release/deployment state.
 > App release process and cleanup plan: see [RELEASE.md](RELEASE.md). Worker deployments are separate from app APK releases.
 
 Never miss a video from the creators you actually care about. **Android only.**
@@ -8,7 +8,7 @@ Never miss a video from the creators you actually care about. **Android only.**
 TubePulse is a lightweight YouTube tracker for Android that monitors your favourite channels and notifies you the moment they upload. No algorithm, no recommendations, no rabbit holes — just a clean list of who's posted what, in the order they posted it.
 
 ## Current App Line
-The current checked-in app version is `3.2.4`. The v3.1 feature line below remains the latest broad feature summary in these docs; see [STATUS.md](STATUS.md) for current repo status and caveats.
+The current checked-in app version is `3.3.0`. The v3.1 feature line below remains the latest broad feature summary in these docs; see [STATUS.md](STATUS.md) for current repo status and caveats.
 
 - **Like & dislike counts in the video card meta row** — shown next to the publish time and view count, so you can see what the community thinks of a video at a glance.
 - **📝 Community posts in the feed** — channel community posts (text, images, polls) are now polled hourly and rendered in the home feed under a "Posts" mini-header. Posts have their own blue dot for unseen items, get marked as seen like videos, and respect the same global + per-channel opt-out settings.
@@ -117,7 +117,7 @@ YouTube RSS feed ──poll every 5 min──▶ Cron Worker ──new videos─
                                                                   (also: nag cycle, WebSub dormant)
 ```
 
-**Verified API route:** as of 2026-06-25, `GET /` on `https://tubepulse-api.jimothyoakley55.workers.dev` returns Cloudflare-served health JSON identifying `worker: "tubepulse-api"` and `architecture: "channel-first"`. The health JSON reports `version: "3.0.0"`; keep that separate from the app version `3.2.4`. The wrangler config comment saying no HTTP routes is stale/incomplete, so review Cloudflare settings before changing routing.
+**Verified API route:** as of 2026-06-25, `GET /` on `https://tubepulse-api.jimothyoakley55.workers.dev` returns Cloudflare-served health JSON identifying `worker: "tubepulse-api"` and `architecture: "channel-first"`. The health JSON reports `version: "3.0.0"`; keep that separate from the app version `3.3.0`. The wrangler config comment saying no HTTP routes is stale/incomplete, so review Cloudflare settings before changing routing.
 
 **Key principle:** Channels are the unit of work. Devices are the unit of subscription.  
 Every operation asks "what's happening to this channel" first, then "who cares about this channel".  
