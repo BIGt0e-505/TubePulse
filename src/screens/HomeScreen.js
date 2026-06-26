@@ -597,7 +597,7 @@ export default function HomeScreen({ navigation }) {
                 </Text>
                 <Text
                   style={[styles.postBody, !isSeen && { color: COLORS.text, fontWeight: '600' }]}
-                  numberOfLines={3}
+                  numberOfLines={1}
                 >
                   {post.text}
                 </Text>
@@ -847,9 +847,9 @@ const styles = StyleSheet.create({
   },
   postRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingVertical: 5,
   },
   postThumbnail: {
     width: 85,
