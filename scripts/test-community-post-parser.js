@@ -21,6 +21,7 @@ function loadFixture(name) {
     fetchLatestCommunityPostInnerTube,
     parseInnerTubeRelativeAgeMs,
     estimatePublishedAtFromRelativeText,
+    parseCommunityPostCountText,
     parseCommunityPostChannelAllowlist,
     isCommunityPostChannelAllowed,
     isCommunityPostEligible,
@@ -90,6 +91,11 @@ function loadFixture(name) {
     estimatePublishedAtFromRelativeText('42 minutes ago', parserNow),
     '2026-06-26T11:18:00.000Z'
   );
+  assert.equal(parseCommunityPostCountText('1 like'), 1);
+  assert.equal(parseCommunityPostCountText('42 likes'), 42);
+  assert.equal(parseCommunityPostCountText('1.2K likes'), 1200);
+  assert.equal(parseCommunityPostCountText('4,321 likes'), 4321);
+  assert.equal(parseCommunityPostCountText('No likes'), null);
 
   const undertoe = parseLatestCommunityPostFromInnerTubeResponse(
     loadFixture('undert0e505-latest.json'),
@@ -108,6 +114,10 @@ function loadFixture(name) {
   assert.equal(undertoe.publishedAtSource, 'estimated_from_relative');
   assert.equal(undertoe.publishedText, '3 days ago (edited)');
   assert.equal(undertoe.fetchedAt, '2026-06-26T12:00:00.000Z');
+  assert.equal(undertoe.likeCount, 1);
+  assert.equal(undertoe.likeText, '1 like');
+  assert.equal(undertoe.viewCount, null);
+  assert.equal(undertoe.viewText, null);
   assert.match(undertoe.text, /ZeroVPN v0\.1 is ready/);
   assert.equal(undertoe.thumbnail, 'https://yt3.ggpht.com/example=s800');
 
@@ -121,6 +131,10 @@ function loadFixture(name) {
   assert.equal(textOnly.publishedAt, '2026-06-26T11:00:00.000Z');
   assert.equal(textOnly.publishedAtSource, 'estimated_from_relative');
   assert.equal(textOnly.publishedText, '1 hour ago');
+  assert.equal(textOnly.likeCount, null);
+  assert.equal(textOnly.likeText, null);
+  assert.equal(textOnly.viewCount, null);
+  assert.equal(textOnly.viewText, null);
 
   const missingOptional = parseLatestCommunityPostFromInnerTubeResponse(
     loadFixture('missing-optional-fields.json'),
@@ -132,6 +146,10 @@ function loadFixture(name) {
   assert.equal(missingOptional.publishedAt, null);
   assert.equal(missingOptional.publishedAtSource, 'unknown');
   assert.equal(missingOptional.publishedText, null);
+  assert.equal(missingOptional.likeCount, null);
+  assert.equal(missingOptional.likeText, null);
+  assert.equal(missingOptional.viewCount, null);
+  assert.equal(missingOptional.viewText, null);
 
   const noPosts = parseLatestCommunityPostFromInnerTubeResponse(
     loadFixture('no-posts.json')

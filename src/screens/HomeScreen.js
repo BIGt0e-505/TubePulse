@@ -579,6 +579,8 @@ export default function HomeScreen({ navigation }) {
           // Server-driven: post.unwatched reflects the device's
           // per-channel state. No local seenIds lookup.
           const isSeen = !post.unwatched;
+          const likeLabel = post.likeCount != null ? formatCount(post.likeCount) : null;
+          const viewLabel = post.viewCount != null ? formatViews(post.viewCount) : (post.viewText || null);
           return (
             <TouchableOpacity
               key={post.activityId}
@@ -615,7 +617,18 @@ export default function HomeScreen({ navigation }) {
                   {post.text}
                 </Text>
                 <View style={styles.videoMeta}>
-                  <Text style={styles.timeAgo}>{post.publishedAt ? timeAgo(post.publishedAt) : (post.publishedText || '')}</Text>
+                  <View style={styles.metaLeft}>
+                    <Text style={styles.timeAgo}>{post.publishedAt ? timeAgo(post.publishedAt) : (post.publishedText || '')}</Text>
+                    {likeLabel && (
+                      <View style={styles.metaLikeGroup}>
+                        <SvgXml xml={THUMB_UP_SVG} width={12} height={12} style={styles.metaIcon} />
+                        <Text style={styles.metaLikeCount}>{likeLabel}</Text>
+                      </View>
+                    )}
+                  </View>
+                  {viewLabel && (
+                    <Text style={styles.timeAgo}>{viewLabel}</Text>
+                  )}
                 </View>
               </View>
               {!isSeen && <View style={styles.newDot} />}

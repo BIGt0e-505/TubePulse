@@ -27,6 +27,14 @@
                                     { "text": "3 days ago (edited)" }
                                   ]
                                 },
+                                "voteCount": {
+                                  "accessibility": {
+                                    "accessibilityData": {
+                                      "label": "1 like"
+                                    }
+                                  },
+                                  "simpleText": "1"
+                                },
                                 "backstageAttachment": {
                                   "postMultiImageRenderer": {
                                     "images": [

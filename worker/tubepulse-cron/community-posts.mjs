@@ -48,6 +48,44 @@ function textFromRuns(value) {
   return '';
 }
 
+function accessibilityLabel(value) {
+  return value?.accessibility?.accessibilityData?.label
+    || value?.accessibilityData?.label
+    || '';
+}
+
+export function parseCommunityPostCountText(value) {
+  if (!value || typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  const match = text.match(/(\d{1,3}(?:,\d{3})+|\d+(?:[.,]\d+)?)\s*([kmb])?/i);
+  if (!match) return null;
+
+  const rawNumber = match[1];
+  const suffix = (match[2] || '').toLowerCase();
+  const normalized = rawNumber.includes(',') && !rawNumber.includes('.')
+    ? rawNumber.replace(/,/g, '')
+    : rawNumber.replace(/,/g, '.');
+  const base = Number(normalized);
+  if (!Number.isFinite(base)) return null;
+
+  const multiplier = suffix === 'k' ? 1000
+    : suffix === 'm' ? 1000000
+    : suffix === 'b' ? 1000000000
+    : 1;
+  return Math.round(base * multiplier);
+}
+
+function metricFromTextObject(value) {
+  const primaryText = textFromRuns(value) || null;
+  const label = accessibilityLabel(value) || null;
+  const count = parseCommunityPostCountText(label) ?? parseCommunityPostCountText(primaryText);
+  return {
+    count,
+    text: label || primaryText,
+  };
+}
+
 function findBackstagePostThreads(node, out = []) {
   if (!node || typeof node !== 'object') return out;
   if (Array.isArray(node)) {
@@ -135,6 +173,8 @@ function normalizeBackstagePostRenderer(post, options = {}) {
   const fetchedAt = (options.now instanceof Date ? options.now : new Date(options.now || Date.now())).toISOString();
   const publishedText = textFromRuns(post.publishedTimeText) || null;
   const publishedAt = estimatePublishedAtFromRelativeText(publishedText, fetchedAt);
+  const likeMetric = metricFromTextObject(post.voteCount || post.voteCountText || post.likeCount || post.likeCountText);
+  const viewMetric = metricFromTextObject(post.viewCount || post.viewCountText);
 
   return {
     id: `post:${postId}`,
@@ -144,6 +184,10 @@ function normalizeBackstagePostRenderer(post, options = {}) {
     publishedAtSource: publishedAt ? 'estimated_from_relative' : 'unknown',
     publishedText,
     fetchedAt,
+    likeCount: likeMetric.count,
+    likeText: likeMetric.text,
+    viewCount: viewMetric.count,
+    viewText: viewMetric.text,
     text: textFromRuns(post.contentText),
     thumbnail: bestThumbnailUrl(post.backstageAttachment),
     kind: 'community',
