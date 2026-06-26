@@ -51,6 +51,18 @@ const key = {
 // Resets at the start of every scheduled() call.
 const kvOps = { reads: 0, writes: 0, deletes: 0, lists: 0 };
 
+const COMMUNITY_POSTS_DEBUG_CHANNEL_ID = 'UCeG5VyNPnGZq-8JzHJbSB6A';
+
+function isCommunityPostsDebugEnabled(env) {
+  const value = String(env.TUBEPULSE_DEBUG_COMMUNITY_POSTS || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+function logCommunityPostDebug(env, message, data = {}) {
+  if (!isCommunityPostsDebugEnabled(env)) return;
+  console.log(`[PostsDebug] ${message}`, JSON.stringify(data));
+}
+
 async function getKV(kv, k) { kvOps.reads++; return await kv.get(k, 'json'); }
 async function putKV(kv, k, value) { kvOps.writes++; await kv.put(k, JSON.stringify(value)); }
 async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
@@ -826,19 +838,44 @@ async function removeCachedPostIdsFromSubscriberState(env, channelId, postIds) {
 
 async function runCommunityPostsCron(env, ctx) {
   const start = Date.now();
+  const debugEnabled = isCommunityPostsDebugEnabled(env);
+  logCommunityPostDebug(env, 'run_start', {
+    timestamp: new Date().toISOString(),
+    globalEnabled: isCommunityPostsEnabled(env),
+    debugEnabled,
+  });
+
   if (!isCommunityPostsEnabled(env)) {
     console.log('[Posts] disabled by TUBEPULSE_ENABLE_COMMUNITY_POSTS');
+    logCommunityPostDebug(env, 'action', { action: 'disabled' });
     return { disabled: true, channelsPolled: 0, newPosts: 0, errors: [] };
   }
 
   const allowlist = parseCommunityPostChannelAllowlist(env);
+  logCommunityPostDebug(env, 'allowlist', {
+    allowlistCount: allowlist.size,
+    pilotAllowlisted: allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
+  });
   if (allowlist.size === 0) {
     console.log('[Posts] no channels allowlisted by TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST');
+    logCommunityPostDebug(env, 'action', { action: 'allowlist_empty_skip' });
     return { disabled: false, allowlistEmpty: true, channelsPolled: 0, newPosts: 0, errors: [] };
   }
 
   const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
   const channelsToPoll = channelsActive.filter((channelId) => allowlist.has(channelId));
+  logCommunityPostDebug(env, 'active_channels', {
+    activeChannelCount: channelsActive.length,
+    pilotActive: channelsActive.includes(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
+    pilotAllowlisted: allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
+    pilotPolled: channelsToPoll.includes(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
+    channelsToPollCount: channelsToPoll.length,
+  });
+  if (debugEnabled && !channelsActive.includes(COMMUNITY_POSTS_DEBUG_CHANNEL_ID)) {
+    logCommunityPostDebug(env, 'action', { action: 'channel_not_active_skip', channelId: COMMUNITY_POSTS_DEBUG_CHANNEL_ID });
+  } else if (debugEnabled && !allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID)) {
+    logCommunityPostDebug(env, 'action', { action: 'channel_not_allowlisted_skip', channelId: COMMUNITY_POSTS_DEBUG_CHANNEL_ID });
+  }
   const results = { channelsPolled: 0, newPosts: 0, replacementsSuppressed: 0, staleUnwatchedRemoved: 0, errors: [] };
   let accessToken = null;
   let projectId = null;
@@ -863,13 +900,52 @@ async function runCommunityPostsCron(env, ctx) {
   for (const channelId of channelsToPoll) {
     try {
       results.channelsPolled++;
+      const channelDebug = debugEnabled && channelId === COMMUNITY_POSTS_DEBUG_CHANNEL_ID;
+      if (channelDebug) {
+        logCommunityPostDebug(env, 'channel_poll', { channelId, beingPolled: true });
+      }
       // First-run guard: seed latest post state only, without notifying.
       const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
-      const latestPost = await fetchLatestCommunityPostInnerTube(channelId, { fetch });
+      if (channelDebug) {
+        logCommunityPostDebug(env, 'first_poll_state', {
+          channelId,
+          firstPollAtPresent: !!firstPollAt,
+        });
+        logCommunityPostDebug(env, 'fetch_started', { channelId });
+      }
+
+      let latestPost;
+      try {
+        latestPost = await fetchLatestCommunityPostInnerTube(channelId, { fetch });
+        if (channelDebug) {
+          logCommunityPostDebug(env, 'fetch_success', {
+            channelId,
+            latestPostId: getCommunityPostSeenId(latestPost),
+            activityId: latestPost?.activityId || null,
+            publishedText: latestPost?.publishedText || null,
+          });
+        }
+      } catch (err) {
+        if (channelDebug) {
+          logCommunityPostDebug(env, 'fetch_failure', {
+            channelId,
+            error: err?.message || String(err),
+          });
+        }
+        throw err;
+      }
+
       if (!firstPollAt) {
         await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), latestPost ? [latestPost] : []);
         await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
         console.log(`[Posts] first run for ${channelId}: seeded ${latestPost ? 'latest post only' : 'no posts'}, no notifications`);
+        if (channelDebug) {
+          logCommunityPostDebug(env, 'action', {
+            channelId,
+            action: 'seed_no_notify',
+            latestPostId: getCommunityPostSeenId(latestPost),
+          });
+        }
         continue;
       }
 
@@ -879,6 +955,15 @@ async function runCommunityPostsCron(env, ctx) {
       const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
       const cachedPostIds = getCachedCommunityPostIds(prevRecent);
       const cachedActivityIds = new Set(prevRecent.map((p) => p.activityId || p.postId).filter(Boolean));
+      if (channelDebug) {
+        logCommunityPostDebug(env, 'cached_state', {
+          channelId,
+          cachedPostIds: [...cachedPostIds],
+          cachedPostCount: prevRecent.length,
+          latestPostId: getCommunityPostSeenId(latestPost),
+          latestEqualsCached: latestPost ? cachedActivityIds.has(latestPost.activityId) : false,
+        });
+      }
 
       if (!latestPost) {
         if (prevRecent.length > 0) {
@@ -886,6 +971,14 @@ async function runCommunityPostsCron(env, ctx) {
           const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, cachedPostIds);
           results.staleUnwatchedRemoved += removed;
           console.log(`[Posts] ${channelId}: no latest post found, cleared ${cachedPostIds.size} cached post(s), staleUnwatchedRemoved=${removed}`);
+          if (channelDebug) {
+            logCommunityPostDebug(env, 'action', {
+              channelId,
+              action: 'cleared_no_notify',
+              cachedPostCount: prevRecent.length,
+              staleUnwatchedRemoved: removed,
+            });
+          }
         }
         continue;
       }
@@ -898,6 +991,23 @@ async function runCommunityPostsCron(env, ctx) {
           const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, stalePostIds);
           results.staleUnwatchedRemoved += removed;
           console.log(`[Posts] ${channelId}: unchanged latest ${latestPost.activityId}, compacted cached post history, staleUnwatchedRemoved=${removed}`);
+          if (channelDebug) {
+            logCommunityPostDebug(env, 'action', {
+              channelId,
+              action: 'unchanged',
+              latestPostId: getCommunityPostSeenId(latestPost),
+              compacted: true,
+              staleUnwatchedRemoved: removed,
+            });
+          }
+        } else if (channelDebug) {
+          logCommunityPostDebug(env, 'action', {
+            channelId,
+            action: 'unchanged',
+            latestPostId: getCommunityPostSeenId(latestPost),
+            compacted: false,
+            staleUnwatchedRemoved: 0,
+          });
         }
         continue;
       }
@@ -908,6 +1018,15 @@ async function runCommunityPostsCron(env, ctx) {
         results.replacementsSuppressed += 1;
         results.staleUnwatchedRemoved += removed;
         console.log(`[Posts] ${channelId}: replaced cached latest with ${latestPost.activityId}, notification suppressed, cachedPostIds=${cachedPostIds.size}, staleUnwatchedRemoved=${removed}`);
+        if (channelDebug) {
+          logCommunityPostDebug(env, 'action', {
+            channelId,
+            action: 'replaced_suppressed',
+            previousPostIds: [...cachedPostIds],
+            latestPostId: getCommunityPostSeenId(latestPost),
+            staleUnwatchedRemoved: removed,
+          });
+        }
         continue;
       }
 
@@ -925,6 +1044,14 @@ async function runCommunityPostsCron(env, ctx) {
         // override and fans out a push notification for the changed
         // latest post.
         const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+        const notifStats = {
+          subscriberCount: subs.length,
+          eligibleSubscriberCount: 0,
+          unwatchedUpdatedCount: 0,
+          fcmAttempted: 0,
+          fcmSent: 0,
+          fcmFailed: 0,
+        };
         for (const post of newPosts) {
           for (const deviceId of subs) {
             const profile = await getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId));
@@ -940,6 +1067,7 @@ async function runCommunityPostsCron(env, ctx) {
               const settings = await getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)) || {};
               if (!settings.includeCommunityPosts) continue;
             }
+            notifStats.eligibleSubscriberCount++;
 
             // Track the post as unwatched for this device so the app
             // shows the blue dot and the server's /seen endpoint can
@@ -953,6 +1081,7 @@ async function runCommunityPostsCron(env, ctx) {
             if (!state.unwatched.includes(postKey)) {
               state.unwatched.push(postKey);
               await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+              notifStats.unwatchedUpdatedCount++;
             }
 
             const truncated = post.text.length > 100
@@ -979,19 +1108,41 @@ async function runCommunityPostsCron(env, ctx) {
             if (!await ensureFcmAccess()) continue;
 
             try {
+              notifStats.fcmAttempted++;
               const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+              if (sendResult.sent) {
+                notifStats.fcmSent++;
+              } else {
+                notifStats.fcmFailed++;
+              }
               if (sendResult.deadToken) {
                 console.log(`[Posts] Pruning dead device: ${deviceId}`);
                 ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
               }
             } catch (err) {
+              notifStats.fcmFailed++;
               console.error(`[Posts] FCM push failed for ${deviceId}:`, err?.message || err);
             }
           }
         }
+        if (channelDebug) {
+          logCommunityPostDebug(env, 'action', {
+            channelId,
+            action: 'new_notified',
+            latestPostId: getCommunityPostSeenId(latestPost),
+            ...notifStats,
+          });
+        }
       }
     } catch (err) {
       results.errors.push(`${channelId}: ${err.message || err}`);
+      if (debugEnabled && channelId === COMMUNITY_POSTS_DEBUG_CHANNEL_ID) {
+        logCommunityPostDebug(env, 'action', {
+          channelId,
+          action: 'error',
+          error: err?.message || String(err),
+        });
+      }
     }
   }
 
@@ -1560,8 +1711,16 @@ export default {
     const now = new Date();
     const mins = now.getUTCMinutes();
     const hours = now.getUTCHours();
+    const communityDebugEnabled = isCommunityPostsDebugEnabled(env);
 
     console.log(`[Cron] Tick at ${now.toISOString()} (minute=${mins})`);
+    logCommunityPostDebug(env, 'scheduled_invocation', {
+      timestamp: now.toISOString(),
+      minute: mins,
+      hour: hours,
+      globalEnabled: isCommunityPostsEnabled(env),
+      debugEnabled: communityDebugEnabled,
+    });
 
     const results = {};
 
@@ -1589,7 +1748,18 @@ export default {
 
     // Community posts: every hour (minute === 0)
     if (mins === 0) {
+      logCommunityPostDebug(env, 'hourly_gate', {
+        action: 'hourly_run',
+        minute: mins,
+        hour: hours,
+      });
       results.posts = await runCommunityPostsCron(env, ctx);
+    } else if (communityDebugEnabled) {
+      logCommunityPostDebug(env, 'hourly_gate', {
+        action: 'non_hourly_skip',
+        minute: mins,
+        hour: hours,
+      });
     }
 
     // Lease renewal: every 6 hours (minute === 0 && hour % 6 === 0)
