@@ -834,6 +834,28 @@ function shouldRefreshCachedCommunityPost(latestPost, cachedPosts) {
   return false;
 }
 
+function cleanCommunityPostDisplayName(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function formatCommunityPostNotificationTitle({ channelMeta, post, profile, channelId, postLabel }) {
+  const displayName = cleanCommunityPostDisplayName(channelMeta?.title)
+    || cleanCommunityPostDisplayName(channelMeta?.name)
+    || cleanCommunityPostDisplayName(channelMeta?.channelName)
+    || cleanCommunityPostDisplayName(post?.authorName);
+  if (displayName) return `${displayName} ${postLabel}`;
+
+  const handle = cleanCommunityPostDisplayName(profile?.channelHandle)
+    || cleanCommunityPostDisplayName(post?.authorHandle);
+  if (handle) {
+    return `${handle.startsWith('@') ? handle : `@${handle}`} ${postLabel}`;
+  }
+
+  return `@${channelId} ${postLabel}`;
+}
+
 function normalizeKnownCommunityPostIds(ids) {
   const normalized = [];
   for (const id of ids || []) {
@@ -1112,6 +1134,7 @@ async function runCommunityPostsCron(env, ctx) {
         // override and fans out a push notification for the changed
         // latest post.
         const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+        const channelMeta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
         const notifStats = {
           subscriberCount: subs.length,
           eligibleSubscriberCount: 0,
@@ -1173,7 +1196,7 @@ async function runCommunityPostsCron(env, ctx) {
 
             const notifPayload = {
               notification: {
-                title: `@${(profile.channelHandle || channelId)} ${postLabel}`,
+                title: formatCommunityPostNotificationTitle({ channelMeta, post, profile, channelId, postLabel }),
                 body: truncated || '(no text)',
               },
               data: {

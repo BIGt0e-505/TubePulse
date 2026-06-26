@@ -92,6 +92,8 @@ function loadFixture(name) {
     '2026-06-26T11:18:00.000Z'
   );
   assert.equal(parseCommunityPostCountText('1 like'), 1);
+  assert.equal(parseCommunityPostCountText('0 likes'), 0);
+  assert.equal(parseCommunityPostCountText('0'), 0);
   assert.equal(parseCommunityPostCountText('42 likes'), 42);
   assert.equal(parseCommunityPostCountText('1.2K likes'), 1200);
   assert.equal(parseCommunityPostCountText('4,321 likes'), 4321);
@@ -118,6 +120,7 @@ function loadFixture(name) {
   assert.equal(undertoe.likeText, '1 like');
   assert.equal(undertoe.viewCount, null);
   assert.equal(undertoe.viewText, null);
+  assert.equal(undertoe.authorName, 'Undert0e');
   assert.match(undertoe.text, /ZeroVPN v0\.1 is ready/);
   assert.equal(undertoe.thumbnail, 'https://yt3.ggpht.com/example=s800');
 

@@ -16,6 +16,9 @@
                             "post": {
                               "backstagePostRenderer": {
                                 "postId": "UgkxPUnenuIZrE8GB5qHdNDyHWMWFZ56PJ0v",
+                                "authorText": {
+                                  "simpleText": "Undert0e"
+                                },
                                 "contentText": {
                                   "runs": [
                                     { "text": "ZeroVPN v0.1 is ready." },

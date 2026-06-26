@@ -175,6 +175,7 @@ function normalizeBackstagePostRenderer(post, options = {}) {
   const publishedAt = estimatePublishedAtFromRelativeText(publishedText, fetchedAt);
   const likeMetric = metricFromTextObject(post.voteCount || post.voteCountText || post.likeCount || post.likeCountText);
   const viewMetric = metricFromTextObject(post.viewCount || post.viewCountText);
+  const authorName = textFromRuns(post.authorText) || null;
 
   return {
     id: `post:${postId}`,
@@ -188,6 +189,7 @@ function normalizeBackstagePostRenderer(post, options = {}) {
     likeText: likeMetric.text,
     viewCount: viewMetric.count,
     viewText: viewMetric.text,
+    authorName,
     text: textFromRuns(post.contentText),
     thumbnail: bestThumbnailUrl(post.backstageAttachment),
     kind: 'community',
