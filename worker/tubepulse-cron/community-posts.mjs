@@ -6,6 +6,12 @@ const DEFAULT_LANGUAGE = 'en';
 const DEFAULT_REGION = 'GB';
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
+const MS_PER_MINUTE = 60 * 1000;
+const MS_PER_HOUR = 60 * MS_PER_MINUTE;
+const MS_PER_DAY = 24 * MS_PER_HOUR;
+const MS_PER_WEEK = 7 * MS_PER_DAY;
+const MS_PER_MONTH = 30 * MS_PER_DAY;
+const MS_PER_YEAR = 365 * MS_PER_DAY;
 
 export function isCommunityPostsEnabled(env = {}) {
   const value = String(env.TUBEPULSE_ENABLE_COMMUNITY_POSTS || '').trim().toLowerCase();
@@ -87,17 +93,57 @@ function bestThumbnailUrl(attachment) {
   return thumbnails[0].url;
 }
 
-function normalizeBackstagePostRenderer(post) {
+export function parseInnerTubeRelativeAgeMs(value) {
+  if (!value || typeof value !== 'string') return null;
+  const text = value
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, '')
+    .trim();
+  if (!text) return null;
+  if (text === 'just now' || text === 'now') return 0;
+
+  const match = text.match(/(?:^|\s)(\d+|a|an)\s+(second|minute|hour|day|week|month|year)s?\s+ago\b/);
+  if (!match) return null;
+
+  const count = match[1] === 'a' || match[1] === 'an'
+    ? 1
+    : Number(match[1]);
+  if (!Number.isFinite(count) || count < 0) return null;
+
+  const unit = match[2];
+  if (unit === 'second') return count * 1000;
+  if (unit === 'minute') return count * MS_PER_MINUTE;
+  if (unit === 'hour') return count * MS_PER_HOUR;
+  if (unit === 'day') return count * MS_PER_DAY;
+  if (unit === 'week') return count * MS_PER_WEEK;
+  if (unit === 'month') return count * MS_PER_MONTH;
+  if (unit === 'year') return count * MS_PER_YEAR;
+  return null;
+}
+
+export function estimatePublishedAtFromRelativeText(publishedText, now = new Date()) {
+  const relativeMs = parseInnerTubeRelativeAgeMs(publishedText);
+  const nowTime = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (relativeMs == null || !Number.isFinite(nowTime)) return null;
+  return new Date(nowTime - relativeMs).toISOString();
+}
+
+function normalizeBackstagePostRenderer(post, options = {}) {
   if (!post || typeof post !== 'object') return null;
   const postId = post.postId;
   if (!postId || typeof postId !== 'string') return null;
+  const fetchedAt = (options.now instanceof Date ? options.now : new Date(options.now || Date.now())).toISOString();
+  const publishedText = textFromRuns(post.publishedTimeText) || null;
+  const publishedAt = estimatePublishedAtFromRelativeText(publishedText, fetchedAt);
 
   return {
     id: `post:${postId}`,
     activityId: postId,
     postId,
-    publishedAt: null,
-    publishedText: textFromRuns(post.publishedTimeText) || null,
+    publishedAt,
+    publishedAtSource: publishedAt ? 'estimated_from_relative' : 'unknown',
+    publishedText,
+    fetchedAt,
     text: textFromRuns(post.contentText),
     thumbnail: bestThumbnailUrl(post.backstageAttachment),
     kind: 'community',
@@ -106,11 +152,12 @@ function normalizeBackstagePostRenderer(post) {
   };
 }
 
-export function parseLatestCommunityPostFromInnerTubeResponse(data) {
+export function parseLatestCommunityPostFromInnerTubeResponse(data, options = {}) {
   const threads = findBackstagePostThreads(data);
   for (const thread of threads) {
     const normalized = normalizeBackstagePostRenderer(
-      thread?.post?.backstagePostRenderer
+      thread?.post?.backstagePostRenderer,
+      options
     );
     if (normalized) return normalized;
   }
@@ -177,7 +224,7 @@ export async function fetchLatestCommunityPostInnerTube(channelId, options = {})
       return null;
     }
 
-    return parseLatestCommunityPostFromInnerTubeResponse(data);
+    return parseLatestCommunityPostFromInnerTubeResponse(data, { now: options.now });
   } finally {
     clearTimeout(timer);
   }

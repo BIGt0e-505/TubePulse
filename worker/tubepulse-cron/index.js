@@ -811,6 +811,29 @@ function getCachedCommunityPostIds(posts) {
   return new Set((posts || []).map(getCommunityPostSeenId).filter(Boolean));
 }
 
+function preserveCachedCommunityPostPublishedAt(post, cachedPosts) {
+  if (!post) return post;
+  const postId = getCommunityPostSeenId(post);
+  const cached = (cachedPosts || []).find((cachedPost) => getCommunityPostSeenId(cachedPost) === postId);
+  if (!cached?.publishedAt) return post;
+  return {
+    ...post,
+    publishedAt: cached.publishedAt,
+    publishedAtSource: cached.publishedAtSource || post.publishedAtSource || 'unknown',
+  };
+}
+
+function shouldRefreshCachedCommunityPost(latestPost, cachedPosts) {
+  if (!latestPost) return false;
+  if (!Array.isArray(cachedPosts) || cachedPosts.length !== 1) return true;
+  const cached = cachedPosts[0];
+  if ((cached?.activityId || cached?.postId) !== latestPost.activityId) return true;
+  if (!cached.publishedAt && latestPost.publishedAt) return true;
+  if (!cached.fetchedAt && latestPost.fetchedAt) return true;
+  if (!cached.publishedAtSource && latestPost.publishedAtSource) return true;
+  return false;
+}
+
 function normalizeKnownCommunityPostIds(ids) {
   const normalized = [];
   for (const id of ids || []) {
@@ -976,6 +999,7 @@ async function runCommunityPostsCron(env, ctx) {
       // Display state is latest-only; known IDs are the bounded watermark
       // that distinguishes unknown new posts from deletion rollbacks.
       const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
+      latestPost = preserveCachedCommunityPostPublishedAt(latestPost, prevRecent);
       const cachedPostIds = getCachedCommunityPostIds(prevRecent);
       const cachedActivityIds = new Set(prevRecent.map((p) => p.activityId || p.postId).filter(Boolean));
       const latestPostId = getCommunityPostSeenId(latestPost);
@@ -1025,7 +1049,7 @@ async function runCommunityPostsCron(env, ctx) {
           knownPostIds = addKnownCommunityPostId(knownPostIds, latestPostId);
           await putKV(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
         }
-        if (prevRecent.length !== 1 || prevRecent[0]?.activityId !== latestPost.activityId) {
+        if (shouldRefreshCachedCommunityPost(latestPost, prevRecent)) {
           await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
           const stalePostIds = new Set([...cachedPostIds].filter((id) => id !== latestPostId));
           const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, stalePostIds);

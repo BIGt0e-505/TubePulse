@@ -19,6 +19,8 @@ function loadFixture(name) {
   const {
     parseLatestCommunityPostFromInnerTubeResponse,
     fetchLatestCommunityPostInnerTube,
+    parseInnerTubeRelativeAgeMs,
+    estimatePublishedAtFromRelativeText,
     parseCommunityPostChannelAllowlist,
     isCommunityPostChannelAllowed,
     isCommunityPostEligible,
@@ -69,8 +71,29 @@ function loadFixture(name) {
   );
   assert.equal(isCommunityPostEligible('UCmissing', allowlistEnv), false);
 
+  const parserNow = new Date('2026-06-26T12:00:00.000Z');
+  assert.equal(parseInnerTubeRelativeAgeMs('just now'), 0);
+  assert.equal(parseInnerTubeRelativeAgeMs('1 minute ago'), 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('42 minutes ago'), 42 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('1 hour ago'), 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('4 hours ago'), 4 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('1 day ago'), 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('4 days ago (edited)'), 4 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('1 week ago'), 7 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('4 weeks ago'), 4 * 7 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('1 month ago'), 30 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('6 months ago'), 6 * 30 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('1 year ago'), 365 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('2 years ago'), 2 * 365 * 24 * 60 * 60 * 1000);
+  assert.equal(parseInnerTubeRelativeAgeMs('not a relative time'), null);
+  assert.equal(
+    estimatePublishedAtFromRelativeText('42 minutes ago', parserNow),
+    '2026-06-26T11:18:00.000Z'
+  );
+
   const undertoe = parseLatestCommunityPostFromInnerTubeResponse(
-    loadFixture('undert0e505-latest.json')
+    loadFixture('undert0e505-latest.json'),
+    { now: parserNow }
   );
   assert.equal(undertoe.id, 'post:UgkxPUnenuIZrE8GB5qHdNDyHWMWFZ56PJ0v');
   assert.equal(undertoe.activityId, 'UgkxPUnenuIZrE8GB5qHdNDyHWMWFZ56PJ0v');
@@ -81,25 +104,33 @@ function loadFixture(name) {
   );
   assert.equal(undertoe.kind, 'community');
   assert.equal(undertoe.source, 'innertube');
-  assert.equal(undertoe.publishedAt, null);
+  assert.equal(undertoe.publishedAt, '2026-06-23T12:00:00.000Z');
+  assert.equal(undertoe.publishedAtSource, 'estimated_from_relative');
   assert.equal(undertoe.publishedText, '3 days ago (edited)');
+  assert.equal(undertoe.fetchedAt, '2026-06-26T12:00:00.000Z');
   assert.match(undertoe.text, /ZeroVPN v0\.1 is ready/);
   assert.equal(undertoe.thumbnail, 'https://yt3.ggpht.com/example=s800');
 
   const textOnly = parseLatestCommunityPostFromInnerTubeResponse(
-    loadFixture('youtube-text-only.json')
+    loadFixture('youtube-text-only.json'),
+    { now: parserNow }
   );
   assert.equal(textOnly.id, 'post:UgkxKC5OZpD2HEJCY6PzDBxuoYNnwXdUQRJ9');
   assert.equal(textOnly.thumbnail, null);
   assert.equal(textOnly.text, "let's run it back, beliebers.");
+  assert.equal(textOnly.publishedAt, '2026-06-26T11:00:00.000Z');
+  assert.equal(textOnly.publishedAtSource, 'estimated_from_relative');
   assert.equal(textOnly.publishedText, '1 hour ago');
 
   const missingOptional = parseLatestCommunityPostFromInnerTubeResponse(
-    loadFixture('missing-optional-fields.json')
+    loadFixture('missing-optional-fields.json'),
+    { now: parserNow }
   );
   assert.equal(missingOptional.id, 'post:UgkxMissingOptionalFields');
   assert.equal(missingOptional.text, '');
   assert.equal(missingOptional.thumbnail, null);
+  assert.equal(missingOptional.publishedAt, null);
+  assert.equal(missingOptional.publishedAtSource, 'unknown');
   assert.equal(missingOptional.publishedText, null);
 
   const noPosts = parseLatestCommunityPostFromInnerTubeResponse(
@@ -122,6 +153,7 @@ function loadFixture(name) {
       };
     },
     logger: { warn() {} },
+    now: parserNow,
   });
   assert.equal(fetched.id, 'post:UgkxKC5OZpD2HEJCY6PzDBxuoYNnwXdUQRJ9');
 
