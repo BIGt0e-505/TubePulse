@@ -7,6 +7,31 @@ const DEFAULT_REGION = 'GB';
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 
+export function isCommunityPostsEnabled(env = {}) {
+  const value = String(env.TUBEPULSE_ENABLE_COMMUNITY_POSTS || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+export function parseCommunityPostChannelAllowlist(env = {}) {
+  const raw = env.TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST;
+  if (raw == null) return new Set();
+  return new Set(
+    String(raw)
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+}
+
+export function isCommunityPostChannelAllowed(channelId, env = {}) {
+  if (!channelId || typeof channelId !== 'string') return false;
+  return parseCommunityPostChannelAllowlist(env).has(channelId);
+}
+
+export function isCommunityPostEligible(channelId, env = {}) {
+  return isCommunityPostsEnabled(env) && isCommunityPostChannelAllowed(channelId, env);
+}
+
 function textFromRuns(value) {
   if (!value) return '';
   if (typeof value === 'string') return value;

@@ -41,7 +41,7 @@ Last worker deploy recorded: 2026-06-25.
 
 The app release/version remains unchanged at `3.2.4` with Android `versionCode 324`. Worker deployment is separate from app APK release; the cron deploy did not create an app release, bump versions, or publish a GitHub Release.
 
-Community-post worker/app support exists in the repo, but runtime community-post polling and `/feed` post rows are gated by `TUBEPULSE_ENABLE_COMMUNITY_POSTS`. The gate is disabled by default when the environment variable is missing or any value other than `1`, `true`, or `yes`. This keeps current workers deployable without re-enabling community-post polling or serving stale post rows until the contract is deliberately re-enabled.
+Community-post worker/app support exists in the repo, but runtime community-post polling and `/feed` post rows are gated by `TUBEPULSE_ENABLE_COMMUNITY_POSTS`. The gate is disabled by default when the environment variable is missing or any value other than `1`, `true`, or `yes`. Future v2 testing is additionally scoped by `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST`, where missing or blank means no channels are eligible. This keeps current workers deployable without re-enabling community-post polling or serving stale post rows until the contract is deliberately re-enabled for allowlisted channels.
 
 ---
 ## Active Components
@@ -101,7 +101,7 @@ Known risks and the intended safer target flow are documented in [RELEASE.md](RE
 ## Current Backend Summary
 
 - Video detection is cron-driven via YouTube RSS polling.
-- YouTube Data API usage is intended for handle/channel resolution, avatar/bootstrap fallback paths, and any current community-post polling logic present in the cron worker.
+- YouTube Data API usage is intended for handle/channel resolution, avatar/bootstrap fallback paths, and the currently wired legacy community-post polling path. Community-post v2 work has an isolated InnerTube latest-post helper and channel allowlist gate, but it is not wired into production polling yet.
 - API and cron workers share the same KV namespace according to their wrangler configs.
 - WebSub code remains present but should be treated as dormant unless live verification proves otherwise.
 - KV schema and helper logic are duplicated between worker files and have known drift; see [worker/CONTRACTS.md](worker/CONTRACTS.md) before changing worker behavior.

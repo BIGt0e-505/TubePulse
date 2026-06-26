@@ -19,7 +19,55 @@ function loadFixture(name) {
   const {
     parseLatestCommunityPostFromInnerTubeResponse,
     fetchLatestCommunityPostInnerTube,
+    parseCommunityPostChannelAllowlist,
+    isCommunityPostChannelAllowed,
+    isCommunityPostEligible,
   } = await import('../worker/tubepulse-cron/community-posts.mjs');
+
+  assert.deepEqual(
+    [...parseCommunityPostChannelAllowlist({})],
+    []
+  );
+  assert.deepEqual(
+    [...parseCommunityPostChannelAllowlist({
+      TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST: '  ',
+    })],
+    []
+  );
+  assert.deepEqual(
+    [...parseCommunityPostChannelAllowlist({
+      TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST: ' UCone , ,UCtwo, UCthree ',
+    })],
+    ['UCone', 'UCtwo', 'UCthree']
+  );
+
+  const allowlistEnv = {
+    TUBEPULSE_ENABLE_COMMUNITY_POSTS: 'yes',
+    TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST: 'UCeG5VyNPnGZq-8JzHJbSB6A,UCother',
+  };
+  assert.equal(
+    isCommunityPostChannelAllowed('UCeG5VyNPnGZq-8JzHJbSB6A', allowlistEnv),
+    true
+  );
+  assert.equal(isCommunityPostChannelAllowed('UCmissing', allowlistEnv), false);
+  assert.equal(
+    isCommunityPostEligible('UCeG5VyNPnGZq-8JzHJbSB6A', allowlistEnv),
+    true
+  );
+  assert.equal(
+    isCommunityPostEligible('UCeG5VyNPnGZq-8JzHJbSB6A', {
+      TUBEPULSE_ENABLE_COMMUNITY_POSTS: '0',
+      TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST: 'UCeG5VyNPnGZq-8JzHJbSB6A',
+    }),
+    false
+  );
+  assert.equal(
+    isCommunityPostEligible('UCeG5VyNPnGZq-8JzHJbSB6A', {
+      TUBEPULSE_ENABLE_COMMUNITY_POSTS: 'true',
+    }),
+    false
+  );
+  assert.equal(isCommunityPostEligible('UCmissing', allowlistEnv), false);
 
   const undertoe = parseLatestCommunityPostFromInnerTubeResponse(
     loadFixture('undert0e505-latest.json')
