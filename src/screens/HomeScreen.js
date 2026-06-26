@@ -574,7 +574,7 @@ export default function HomeScreen({ navigation }) {
               activeOpacity={0.7}
             >
               {post.thumbnail ? (
-                <Image source={{ uri: post.thumbnail }} style={styles.postThumbnail} resizeMode="cover" />
+                <Image source={{ uri: post.thumbnail }} style={styles.postThumbnail} resizeMode="contain" />
               ) : (
                 <View style={styles.postPlaceholder}>
                   {cached?.avatar ? (
@@ -855,6 +855,7 @@ const styles = StyleSheet.create({
     width: 85,
     height: 48,
     borderRadius: 4,
+    backgroundColor: '#111',
   },
   postPlaceholder: {
     width: 85,
