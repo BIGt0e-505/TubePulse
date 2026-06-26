@@ -777,8 +777,52 @@ async function runPrewarnCron(env, ctx) {
 //
 // Community posts are latest-state oriented, not history oriented.
 // The first poll stores only the latest post and sends no notifications.
-// Later polls compare the fetched latest post ID against known IDs;
-// only a changed latest post is stored and surfaced.
+// Later polls compare the fetched latest post ID against known IDs.
+// If a cached latest post is replaced, the direction is unknown because
+// InnerTube timestamps are relative; treat it as reconciliation, not a
+// notification event, so deleting a newer post cannot notify an older one.
+
+function getCommunityPostSeenId(post) {
+  if (!post) return null;
+  if (typeof post.id === 'string' && post.id.startsWith('post:')) return post.id;
+  if (post.activityId) return `post:${post.activityId}`;
+  if (post.postId) return `post:${post.postId}`;
+  return null;
+}
+
+function getCachedCommunityPostIds(posts) {
+  return new Set((posts || []).map(getCommunityPostSeenId).filter(Boolean));
+}
+
+function removePostIdsFromUnwatched(unwatched, postIds) {
+  if (!Array.isArray(unwatched) || !postIds || postIds.size === 0) {
+    return { unwatched: Array.isArray(unwatched) ? unwatched : [], removed: 0 };
+  }
+  const filtered = unwatched.filter((id) => !postIds.has(id));
+  return { unwatched: filtered, removed: unwatched.length - filtered.length };
+}
+
+async function removeCachedPostIdsFromSubscriberState(env, channelId, postIds) {
+  if (!postIds || postIds.size === 0) return 0;
+  const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+  let removed = 0;
+
+  for (const deviceId of subs) {
+    const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
+    if (!state?.unwatched?.length) continue;
+
+    const result = removePostIdsFromUnwatched(state.unwatched, postIds);
+    if (result.removed > 0) {
+      await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), {
+        ...state,
+        unwatched: result.unwatched,
+      });
+      removed += result.removed;
+    }
+  }
+
+  return removed;
+}
 
 async function runCommunityPostsCron(env, ctx) {
   const start = Date.now();
@@ -795,7 +839,7 @@ async function runCommunityPostsCron(env, ctx) {
 
   const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
   const channelsToPoll = channelsActive.filter((channelId) => allowlist.has(channelId));
-  const results = { channelsPolled: 0, newPosts: 0, errors: [] };
+  const results = { channelsPolled: 0, newPosts: 0, replacementsSuppressed: 0, staleUnwatchedRemoved: 0, errors: [] };
   let accessToken = null;
   let projectId = null;
   let fcmTokenErrorLogged = false;
@@ -819,10 +863,9 @@ async function runCommunityPostsCron(env, ctx) {
   for (const channelId of channelsToPoll) {
     try {
       results.channelsPolled++;
-      const latestPost = await fetchLatestCommunityPostInnerTube(channelId, { fetch });
-
       // First-run guard: seed latest post state only, without notifying.
       const firstPollAt = await getKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId));
+      const latestPost = await fetchLatestCommunityPostInnerTube(channelId, { fetch });
       if (!firstPollAt) {
         await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), latestPost ? [latestPost] : []);
         await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
@@ -834,31 +877,47 @@ async function runCommunityPostsCron(env, ctx) {
       // community post timestamps are not reliable enough to use as the
       // primary ordering signal.
       const prevRecent = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
-      const prevIds = new Set(prevRecent.map((p) => p.activityId).filter(Boolean));
-      const newPosts = latestPost && !prevIds.has(latestPost.activityId) ? [latestPost] : [];
+      const cachedPostIds = getCachedCommunityPostIds(prevRecent);
+      const cachedActivityIds = new Set(prevRecent.map((p) => p.activityId || p.postId).filter(Boolean));
 
       if (!latestPost) {
         if (prevRecent.length > 0) {
           await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), []);
-          console.log(`[Posts] ${channelId}: no latest post found, cleared cached post state`);
+          const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, cachedPostIds);
+          results.staleUnwatchedRemoved += removed;
+          console.log(`[Posts] ${channelId}: no latest post found, cleared ${cachedPostIds.size} cached post(s), staleUnwatchedRemoved=${removed}`);
         }
         continue;
       }
 
-      if (prevIds.has(latestPost.activityId)) {
+      if (cachedActivityIds.has(latestPost.activityId)) {
         if (prevRecent.length !== 1 || prevRecent[0]?.activityId !== latestPost.activityId) {
           await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
-          console.log(`[Posts] ${channelId}: compacted cached post history to latest post`);
+          const latestPostId = getCommunityPostSeenId(latestPost);
+          const stalePostIds = new Set([...cachedPostIds].filter((id) => id !== latestPostId));
+          const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, stalePostIds);
+          results.staleUnwatchedRemoved += removed;
+          console.log(`[Posts] ${channelId}: unchanged latest ${latestPost.activityId}, compacted cached post history, staleUnwatchedRemoved=${removed}`);
         }
         continue;
       }
 
+      if (prevRecent.length > 0) {
+        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
+        const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, cachedPostIds);
+        results.replacementsSuppressed += 1;
+        results.staleUnwatchedRemoved += removed;
+        console.log(`[Posts] ${channelId}: replaced cached latest with ${latestPost.activityId}, notification suppressed, cachedPostIds=${cachedPostIds.size}, staleUnwatchedRemoved=${removed}`);
+        continue;
+      }
+
+      const newPosts = [latestPost];
       if (newPosts.length > 0) {
         // Store only the changed latest post so old community-post
         // history is not dumped into the app feed.
         await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
         results.newPosts += 1;
-        console.log(`[Posts] ${channelId}: new latest post ${latestPost.activityId}`);
+        console.log(`[Posts] ${channelId}: new latest post ${latestPost.activityId} from empty cache`);
 
         // Notify subscribers. Per-channel opt-out respected: if a
         // device's channel override has includeCommunityPosts === false,
@@ -937,7 +996,7 @@ async function runCommunityPostsCron(env, ctx) {
   }
 
   const elapsed = Date.now() - start;
-  console.log(`[Posts] Cron done: ${results.channelsPolled} channels, ${results.newPosts} new posts, ${results.errors.length} errors, ${elapsed}ms`);
+  console.log(`[Posts] Cron done: ${results.channelsPolled} channels, ${results.newPosts} new posts, ${results.replacementsSuppressed} replacements suppressed, ${results.staleUnwatchedRemoved} stale unwatched removed, ${results.errors.length} errors, ${elapsed}ms`);
   return results;
 }
 
