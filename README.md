@@ -423,4 +423,6 @@ YouTube's subscription feed is broken. It mixes in recommendations, buries creat
 
 ## License
 
-Private project. All rights reserved.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+Forks and contributions are welcome under the MIT License.
