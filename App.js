@@ -142,45 +142,88 @@ export default function App() {
 
         // Self-healing: on every launch, ensure every local channel is
         // subscribed on the server. This handles:
-        //   - Fresh install (presedded channels not yet on server)
-        //   - Upgrades from builds where init failed (e.g. v3.0.14 was
-        //     shipped before the server accepted fcmToken=null, so init
-        //     silently failed for no-permission users and the
-        //     tubepulse_init_done flag was set anyway, blocking re-runs)
-        //   - Drift between local state and server state
+        //   - Fresh install (preseeded channels not yet on server)
+        //   - Upgrades from builds where init failed silently
+        //   - Drift between local state and server state (e.g. a
+        //     subscribe-channel call that failed on first add but the
+        //     channel was saved locally anyway — the pre-fix bug)
+        //
         // Idempotent: re-subscribing an already-subscribed channel is a
         // cheap no-op on the server side (alreadySubscribed: true).
+        //
+        // Throttled: runs at most once per 4 hours. The timestamp is in
+        // AsyncStorage so it survives across rapid re-launches.
         try {
-          const { getChannels, getSettings } = require('./src/utils/storage');
+          const { getChannels, getSettings, getLastReconcileAt, saveLastReconcileAt } = require('./src/utils/storage');
           const localChannels = await getChannels();
           const localSettings = await getSettings();
 
-          // Push settings to server
+          // Push settings to server (always, even if reconcile is throttled)
           try { await updateSettings(deviceId, localSettings); } catch (e) {}
 
-          // Find local channels that have a channelId but no cache entry
-          // (no avatar, no videos) — those are the ones that need work.
-          // Using the local cache as the signal, not /feed, because
-          // /feed requires a working device profile (which may not exist
-          // yet on a brand-new install before this init runs).
+          // Reconciliation: re-subscribe ALL local channels that have a
+          // channelId. The server's /subscribe-channel is idempotent, so
+          // already-subscribed channels are a cheap no-op. This repairs
+          // the pre-fix bug where a channel was saved locally but the
+          // server subscribe call failed silently.
+          const now = Date.now();
+          const lastReconcile = await getLastReconcileAt();
+          const RECONCILE_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+          if (now - lastReconcile > RECONCILE_INTERVAL_MS) {
+            const channelsWithId = localChannels.filter((ch) => ch.channelId);
+            if (channelsWithId.length > 0) {
+              console.log(`[Init] Reconciling ${channelsWithId.length} channel(s) with server`);
+              let reconciled = 0;
+              let failed = 0;
+              for (const ch of channelsWithId) {
+                try {
+                  const subResult = await subscribeChannel(deviceId, ch.channelId);
+                  if (subResult?.ok) {
+                    reconciled++;
+                    // If the server returned meta we didn't have, update cache.
+                    if (!subResult.alreadySubscribed && subResult.channel?.meta) {
+                      const { getChannelCache, saveChannelCache } = require('./src/utils/storage');
+                      const cache = await getChannelCache();
+                      if (cache[ch.handle]) {
+                        cache[ch.handle] = {
+                          ...cache[ch.handle],
+                          name: subResult.channel.meta.name || cache[ch.handle].name,
+                          avatar: subResult.channel.meta.avatarUrl || cache[ch.handle].avatar,
+                        };
+                        await saveChannelCache(cache);
+                      }
+                    }
+                  } else {
+                    failed++;
+                    console.warn(`[Init] Subscribe failed for ${ch.handle}:`, subResult?.error || 'unknown');
+                  }
+                } catch (e) {
+                  failed++;
+                  console.warn(`[Init] Subscribe exception for ${ch.handle}:`, e);
+                }
+              }
+              console.log(`[Init] Reconcile done: ${reconciled} ok, ${failed} failed`);
+            }
+            await saveLastReconcileAt(now);
+          }
+
+          // Bootstrap channels that have no cache (brand-new channels
+          // added locally but not yet bootstrapped, e.g. default channels
+          // on a fresh install). This is separate from reconciliation —
+          // reconciliation ensures the server knows about the channel;
+          // bootstrap fills in the initial video/avatar data.
           const { getChannelCache } = require('./src/utils/storage');
           const cache = await getChannelCache();
-          const channelsNeedingInit = localChannels.filter((ch) => {
+          const channelsNeedingBootstrap = localChannels.filter((ch) => {
             if (!ch.channelId) return false;
             const cached = cache[ch.handle];
             return !cached || !cached.avatar || !cached.videos || cached.videos.length === 0;
           });
 
-          if (channelsNeedingInit.length > 0) {
-            console.log(`[Init] Bootstrapping ${channelsNeedingInit.length} channels: ${channelsNeedingInit.map((c) => c.handle).join(', ')}`);
-            for (const ch of channelsNeedingInit) {
-              // Subscribe (idempotent if already subscribed)
-              try {
-                await subscribeChannel(deviceId, ch.channelId);
-              } catch (e) {
-                console.warn(`[Init] Subscribe failed for ${ch.handle}:`, e);
-              }
-
+          if (channelsNeedingBootstrap.length > 0) {
+            console.log(`[Init] Bootstrapping ${channelsNeedingBootstrap.length} channels: ${channelsNeedingBootstrap.map((c) => c.handle).join(', ')}`);
+            for (const ch of channelsNeedingBootstrap) {
               // Bootstrap — fetches RSS + avatar from server
               try {
                 const bootResult = await bootstrapChannel(deviceId, ch.channelId);
@@ -227,10 +270,10 @@ export default function App() {
                 console.warn(`[Init] Bootstrap failed for ${ch.handle}:`, e);
               }
             }
-            console.log(`[Init] Bootstrapped ${channelsNeedingInit.length} channels`);
+            console.log(`[Init] Bootstrapped ${channelsNeedingBootstrap.length} channels`);
           }
         } catch (e) {
-          console.warn('[Init] Channel bootstrap failed:', e);
+          console.warn('[Init] Channel reconciliation failed:', e);
         }
         // Signal that init is complete (whether or not bootstrap ran)
         const { AsyncStorage: AS } = require('react-native');

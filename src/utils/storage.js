@@ -88,6 +88,15 @@ export async function saveChannelNotifSettings(settings) {
   await AsyncStorage.setItem(STORAGE_KEYS.CHANNEL_NOTIF_SETTINGS, JSON.stringify(settings));
 }
 
+export async function getLastReconcileAt() {
+  const data = await AsyncStorage.getItem(STORAGE_KEYS.LAST_RECONCILE_AT);
+  return data ? parseInt(data, 10) : 0;
+}
+
+export async function saveLastReconcileAt(ts) {
+  await AsyncStorage.setItem(STORAGE_KEYS.LAST_RECONCILE_AT, String(ts));
+}
+
 export async function getChannelNotifSetting(handle) {
   const all = await getChannelNotifSettings();
   return all[handle] || null;

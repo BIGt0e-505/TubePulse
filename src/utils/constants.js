@@ -19,6 +19,7 @@ export const STORAGE_KEYS = {
   CHANNEL_CACHE: 'tubepulse_channel_cache',
   GENTLE_NOTIF_STATE: 'tubepulse_gentle_notif_state',
   CHANNEL_NOTIF_SETTINGS: 'tubepulse_channel_notif_settings',
+  LAST_RECONCILE_AT: 'tubepulse_last_reconcile_at',
 };
 
 export const NAG_INTERVALS = [

@@ -127,7 +127,6 @@ export default function ChannelsScreen() {
     }
 
     setAdding(true);
-    const newChannel = { handle, name: handle, channelId: null };
 
     try {
       // Resolve handle via API Worker
@@ -159,21 +158,46 @@ export default function ChannelsScreen() {
         return;
       }
 
-      // Valid channel — save it
+      // Valid channel — subscribe on server FIRST, before saving locally.
+      // If the server subscribe fails, we show an error and do not add the
+      // channel locally. This prevents the silent failure where a channel
+      // appears in the app but the server has no subscription record.
       const channelId = result.channelId;
       const name = result.name || handle;
       const avatar = result.avatar || null;
 
-      const updated = [...channels, { handle, name, channelId }];
+      // Subscribe to channel on server (idempotent — safe if already
+      // subscribed from a previous session or self-healing init).
+      let subResult;
+      try {
+        subResult = await subscribeChannel(deviceId, channelId);
+      } catch (e) {
+        subResult = { ok: false, error: e?.message || 'Network error' };
+      }
+
+      if (!subResult?.ok) {
+        const reason = subResult?.error || 'Unknown error';
+        setAddError(`Couldn't subscribe to @${handle}: ${reason}. Check your connection and try again.`);
+        setAdding(false);
+        return;
+      }
+
+      // Server subscribe succeeded — now safe to save locally.
+      const serverMeta = subResult.channel?.meta;
+      const finalName = serverMeta?.name || name;
+      const finalAvatar = serverMeta?.avatarUrl || avatar;
+
+      const updated = [...channels, { handle, name: finalName, channelId }];
       await saveChannels(updated);
       setChannels(updated);
       setNewHandle('');
 
-      // Cache data
+      // Cache data — seed with whatever we have (server meta if available,
+      // resolve response otherwise). Bootstrap will fill in videos.
       const existingCache = await getChannelCache();
       existingCache[handle] = {
-        name,
-        avatar,
+        name: finalName,
+        avatar: finalAvatar,
         videos: [],
         latestVideo: null,
         channelId,
@@ -189,28 +213,8 @@ export default function ChannelsScreen() {
         await saveLastSeen(lastSeen);
       }
 
-      // Subscribe to channel on server (triggers WebSub + bootstrap)
-      try {
-        const deviceId = await getDeviceId();
-        const subResult = await subscribeChannel(deviceId, channelId);
-        if (subResult?.ok && !subResult.alreadySubscribed && subResult.channel?.meta) {
-          // Server returned channel meta — update cache
-          const updatedCache = await getChannelCache();
-          updatedCache[handle] = {
-            ...updatedCache[handle],
-            name: subResult.channel.meta.name || name,
-            avatar: subResult.channel.meta.avatarUrl || avatar,
-          };
-          await saveChannelCache(updatedCache);
-          setCache({ ...updatedCache });
-        }
-      } catch (e) {
-        console.warn('Failed to subscribe channel on server:', e);
-      }
-
       // Bootstrap: fetch initial RSS data from server
       try {
-        const deviceId = await getDeviceId();
         const bootResult = await bootstrapChannel(deviceId, channelId);
 
         if (bootResult?.ok && bootResult.videos?.length > 0) {
@@ -220,8 +224,8 @@ export default function ChannelsScreen() {
           const latestOnly = [bootResult.videos[0]];
           const updatedCache = await getChannelCache();
           updatedCache[handle] = {
-            name: bootResult.name || name,
-            avatar: bootResult.avatar || avatar,
+            name: bootResult.name || finalName,
+            avatar: bootResult.avatar || finalAvatar,
             videos: latestOnly,
             latestVideo: latestOnly[0] || null,
             channelId,
