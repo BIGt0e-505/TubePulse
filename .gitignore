@@ -25,6 +25,7 @@ android/local.properties
 .dev.vars.*
 worker/*/.dev.vars
 worker/*/.wrangler/
+.wrangler/
 
 # Local secrets and credentials
 # CRITICAL: anything under secrets/ is live credentials - NEVER commit
