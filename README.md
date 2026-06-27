@@ -28,6 +28,20 @@ It is designed for people who want direct, lightweight YouTube notifications wit
 - Firebase Cloud Messaging push delivery
 - MIT licensed and forkable
 
+## Screenshots
+
+![TubePulse Android home feed showing YouTube channel notifications and community posts](docs/screenshots/home-feed.jpg)
+
+*Home feed — videos and community posts from subscribed channels*
+
+![TubePulse channel management screen](docs/screenshots/channel-list.jpg)
+
+*Channel list — add channels by handle, remove or reorder tracked channels*
+
+![TubePulse notification settings screen](docs/screenshots/settings.jpg)
+
+*Settings — tap action, notification mode, nag interval, DND, livestream prewarn, community posts*
+
 ## Why TubePulse?
 
 YouTube's in-app notifications can be inconsistent, especially for community posts. The subscription feed mixes in recommendations, buries creators you follow, and the bell notification is unreliable. TubePulse provides a small, inspectable notification path using a self-hosted backend and an Android client.
