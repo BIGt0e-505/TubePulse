@@ -249,6 +249,34 @@ export default function HomeScreen({ navigation }) {
     return [...cached.posts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
   };
 
+  const getContentTimestampMs = (item, fields) => {
+    for (const field of fields) {
+      const value = item?.[field];
+      if (!value) continue;
+      const timestamp = new Date(value).getTime();
+      if (Number.isFinite(timestamp)) return timestamp;
+    }
+    return null;
+  };
+
+  const chooseLatestChannelContent = (video, post) => {
+    if (!video && !post) return null;
+    if (!video) return post ? { type: 'post', item: post } : null;
+    if (!post) return { type: 'video', item: video };
+
+    const videoTime = getContentTimestampMs(video, ['published', 'publishedAt']);
+    const postTime = getContentTimestampMs(post, ['publishedAt']);
+
+    if (videoTime != null && postTime != null) {
+      return postTime > videoTime
+        ? { type: 'post', item: post }
+        : { type: 'video', item: video };
+    }
+    if (videoTime != null) return { type: 'video', item: video };
+    if (postTime != null) return { type: 'post', item: post };
+    return { type: 'video', item: video };
+  };
+
   const getPostSeenId = (post) => {
     if (!post) return null;
     if (post.id) return post.id;
@@ -258,18 +286,17 @@ export default function HomeScreen({ navigation }) {
   const isPostUnwatched = (post) => post?.unwatched === true;
 
   const selectPersistentLatestContent = (handle) => {
-    const posts = getPosts(handle);
-    if (posts.length > 0) {
-      return { type: 'post', item: posts[0] };
-    }
-    const latestVideo = getVideos(handle)[0] || null;
-    return latestVideo ? { type: 'video', item: latestVideo } : null;
+    return chooseLatestChannelContent(getVideos(handle)[0] || null, getPosts(handle)[0] || null);
   };
 
   const getVisiblePosts = (handle) => {
     const posts = getPosts(handle);
-    const unseen = posts.filter(isPostUnwatched);
-    if (unseen.length > 0) return unseen;
+    const latestVideo = getVideos(handle)[0] || null;
+    const visibleUnseen = posts.filter((post) => (
+      isPostUnwatched(post)
+      && chooseLatestChannelContent(latestVideo, post)?.type === 'post'
+    ));
+    if (visibleUnseen.length > 0) return visibleUnseen;
     const persistent = selectPersistentLatestContent(handle);
     if (persistent?.type === 'post') return [persistent.item];
     return [];
@@ -495,7 +522,11 @@ export default function HomeScreen({ navigation }) {
   };
 
   const getUnseenPosts = (handle) => {
-    return getPosts(handle).filter(isPostUnwatched);
+    const latestVideo = getVideos(handle)[0] || null;
+    return getPosts(handle).filter((post) => (
+      isPostUnwatched(post)
+      && chooseLatestChannelContent(latestVideo, post)?.type === 'post'
+    ));
   };
 
   const isNew = (handle) => unseenCount(handle) > 0 || getUnseenPosts(handle).length > 0;
