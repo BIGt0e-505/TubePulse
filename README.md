@@ -1,13 +1,70 @@
 # TubePulse
 
-> Current repo status: see [STATUS.md](STATUS.md). The app version in this repo is `3.3.1` (`app.json`, `android/app/build.gradle`). Historical planning docs are not authoritative for current release/deployment state.
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/Undert0e-505/TubePulse)](https://github.com/Undert0e-505/TubePulse/releases)
+[![Platform](https://img.shields.io/badge/platform-Android-green.svg)](https://github.com/Undert0e-505/TubePulse)
+[![Cloudflare Workers](https://img.shields.io/badge/backend-Cloudflare%20Workers-F38020.svg)](https://workers.cloudflare.com/)
+[![React Native](https://img.shields.io/badge/built%20with-React%20Native%20%2F%20Expo-61DAFB.svg)](https://expo.dev/)
+
+TubePulse is an open-source Android app for YouTube channel notifications, including community posts. It uses a small Cloudflare Workers backend and Firebase Cloud Messaging to deliver push notifications when subscribed channels publish new videos or community posts.
+
+It is designed for people who want direct, lightweight YouTube notifications without relying entirely on the YouTube app's notification behaviour.
+
+- **Android only** — no iOS support planned
+- **MIT licensed** — forkable, modifiable, self-hostable
+- **Self-hosted backend** — Cloudflare Workers + KV, Firebase Cloud Messaging
+
+## Features
+
+- Subscribe to YouTube channels by handle (`@handle`) or channel ID
+- Receive Android push notifications for new videos (via RSS polling, ~5 min latency)
+- Receive Android push notifications for YouTube community posts (text, images, polls)
+- Home screen feed showing latest videos and posts from all tracked channels
+- Android home screen widget with latest videos and posts
+- Per-channel notification overrides (mode, DND, prewarn time, community posts opt-out)
+- Scheduled livestream prewarn — get notified before a stream goes live
+- Nag cycle — configurable re-notifications for unwatched videos
+- Cloudflare Workers backend (API + cron), zero `KV.list()` calls
+- Firebase Cloud Messaging push delivery
+- MIT licensed and forkable
+
+## Why TubePulse?
+
+YouTube's in-app notifications can be inconsistent, especially for community posts. The subscription feed mixes in recommendations, buries creators you follow, and the bell notification is unreliable. TubePulse provides a small, inspectable notification path using a self-hosted backend and an Android client.
+
+**Note:** Community post detection depends on unofficial YouTube web data structures and may need maintenance over time if YouTube changes those surfaces. TubePulse is not affiliated with YouTube or Google.
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Android app | React Native + Expo |
+| Push notifications | Firebase Cloud Messaging (FCM) via HTTP v1 API |
+| Backend | Cloudflare Workers (API + Cron) |
+| Storage | Cloudflare KV |
+| Video detection | YouTube RSS feed polling (cron-driven, every 5 min, zero Data API quota) |
+| Community post detection | YouTube Data API `activities.list` polling (hourly per active channel) |
+| Widgets | react-native-android-widget |
+| Auth | Persistent device UUID (Bearer token, independent of FCM token rotation) |
+
+## Project Status
+
+**Active early release / personal-public project.**
+
+- **v3.3.2** includes reliable multi-device subscription reconciliation.
+- Community post support exists but depends on unofficial YouTube web data structures, so it may need maintenance if YouTube changes.
+- The app is Android-only. No iOS support is planned.
+- See [STATUS.md](STATUS.md) for current repo status and operational caveats.
+- See [RELEASE.md](RELEASE.md) for the release process.
+
+---
+
+## Detailed Architecture
+
+> Current repo status: see [STATUS.md](STATUS.md). Historical planning docs are not authoritative for current release/deployment state.
 > App release process and cleanup plan: see [RELEASE.md](RELEASE.md). Worker deployments are separate from app APK releases.
 
-Never miss a video from the creators you actually care about. **Android only.**
-
-TubePulse is a lightweight YouTube tracker for Android that monitors your favourite channels and notifies you the moment they upload. No algorithm, no recommendations, no rabbit holes — just a clean list of who's posted what, in the order they posted it.
-
-## Current App Line
+### Current App Line
 The current checked-in app version is `3.3.1`. The v3.1 feature line below remains the latest broad feature summary in these docs; see [STATUS.md](STATUS.md) for current repo status and caveats.
 
 Community posts in v3.3.0 are enabled for active subscribed channels when the global worker feature gate is on. Newly added channels are silently seeded before future community-post notifications, so old posts are not pushed as new.
@@ -19,9 +76,9 @@ v3.3.1 fixes widget/HomeScreen feed parity so the widget uses the same latest vi
 - **⏰ Prewarn time for scheduled livestreams** — pick how early you want to be notified before a scheduled livestream goes live (15m, 30m, 1h, 2h, 4h, or 1d — default 1h). Per-channel override available. At the moment the livestream actually goes live, the regular new-video notification fires; the prewarn is the heads-up, the regular push is the "this just appeared" notification.
 - **🗨️ Custom ConfirmDialog** — replacing `Alert.alert` for the channel-removal confirmation. Themed to match the rest of the app (`COLORS.surface` background, `COLORS.danger` for the destructive action).
 
-## Features
+### Detailed Features
 
-### 📺 Channel Tracking
+#### 📺 Channel Tracking
 - Add channels by handle (`@handle`) — no URLs, no pasting video links
 - Resolves handles to channel IDs via YouTube Data API v3 (proxied through Cloudflare Worker)
 - **Channel ID is the primary key** — handles can change, but channel IDs don't. Once resolved at add-time, the channel is tracked by ID even if the creator rebrands.
@@ -100,7 +157,7 @@ This is the key interaction: video tap for "I've seen this one", channel tap for
 - Clean, minimal interface — no clutter, no ads, no recommendations
 - Designed for one-handed use
 
-## Architecture
+### Architecture
 
 ### Overview - Current Repo Evidence
 
@@ -292,22 +349,6 @@ Repeat until user watches
 
 The RSS poller is the active new-video detection path since the WebSub hub shutdown in 2024. The WebSub handlers in the workers are dormant but intact.
 
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Framework | React Native + Expo |
-| Navigation | React Navigation (native stack) |
-| Storage | AsyncStorage (channels, settings, cache) |
-| Push Detection | YouTube RSS feed poller (cron-driven, 5 min). YouTube Data API: posts poller (hourly) + subscribe-time (handle resolve + avatar fetch). |
-| Video Data | YouTube RSS/Atom feeds (parsed from RSS poll in the cron worker every 5 min) |
-| API | YouTube Data API v3 (handle resolution + avatars + community-posts polling) |
-| Backend | Cloudflare Workers (API + Cron) |
-| Database | Cloudflare KV (devices, feeds, subscriptions) |
-| Notifications | Firebase Cloud Messaging (FCM) via HTTP v1 API |
-| Widgets | react-native-android-widget |
-| Auth | Persistent device UUID (Bearer token, independent of FCM token rotation) |
-
 ## Project Structure
 
 ```
@@ -416,10 +457,6 @@ Required Cloudflare secrets:
 - `YOUTUBE_API_KEY` — YouTube Data API key (for handle resolution + avatars + posts polling)
 - `FIREBASE_SERVICE_ACCOUNT` — Firebase service account JSON (for FCM)
 - `TUBEPULSE_KV` — KV namespace binding (shared between workers)
-
-## Why TubePulse?
-
-YouTube's subscription feed is broken. It mixes in recommendations, buries creators you follow, and the bell notification is unreliable. TubePulse does one thing: **tell you when someone you follow uploads**. No more, no less.
 
 ## License
 
