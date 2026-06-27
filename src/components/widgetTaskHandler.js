@@ -2,21 +2,73 @@ import React from 'react';
 import { Linking } from 'react-native';
 import { TubePulseWidget } from './TubePulseWidget';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
-import { fetchFeed, getDeviceId } from '../utils/api';
+import { fetchFeed, getDeviceId, markSeen } from '../utils/api';
+import {
+  chooseLatestChannelContent,
+  formatCompactAge,
+  getPostSeenId,
+  sortPostsNewestFirst,
+  sortVideosNewestFirst,
+} from '../utils/feedPresentation';
 
 const nameToWidget = {
   TubePulseWidget: TubePulseWidget,
 };
 
-function timeAgo(dateStr) {
-  if (!dateStr) return '';
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
+function normalizeVideo(video = {}) {
+  return {
+    videoId: video.videoId,
+    title: video.title,
+    thumbnail: video.thumbnail,
+    link: video.link,
+    published: video.published || video.publishedAt,
+    publishedAt: video.publishedAt || video.published,
+    views: video.views || '',
+    likes: video.likes ?? 0,
+    dislikes: video.dislikes ?? 0,
+    unwatched: video.unwatched,
+    kind: 'video',
+  };
+}
+
+function normalizePost(post = {}) {
+  return {
+    ...post,
+    id: post.id || getPostSeenId(post),
+    postId: post.postId || post.activityId,
+    activityId: post.activityId || post.postId,
+    kind: post.kind || 'community',
+    type: 'post',
+  };
+}
+
+function isVideoUnwatched(video, seenIds) {
+  if (video?.unwatched === true) return true;
+  if (video?.unwatched === false) return false;
+  return Boolean(video?.videoId) && !seenIds.includes(video.videoId);
+}
+
+function isPostUnwatched(post, seenIds) {
+  if (post?.unwatched === true) return true;
+  if (post?.unwatched === false) return false;
+  const postKey = getPostSeenId(post);
+  return Boolean(postKey) && !seenIds.includes(postKey);
+}
+
+function selectPersistentLatestContent(videos, posts) {
+  return chooseLatestChannelContent(videos[0] || null, posts[0] || null);
+}
+
+function getChannelId(handle, channels, cache) {
+  return cache[handle]?.channelId || channels.find((ch) => ch.handle === handle)?.channelId || null;
+}
+
+async function updateCachedChannel(handle, updater) {
+  const cache = await getChannelCache();
+  const current = cache[handle];
+  if (!current) return;
+  const next = updater(current);
+  await saveChannelCache({ ...cache, [handle]: next });
 }
 
 async function buildWidgetData(fetchFresh = false) {
@@ -50,12 +102,13 @@ async function buildWidgetData(fetchFresh = false) {
               const local = channelById[feed.channelId];
               const handle = local?.handle;
               if (!handle) continue;
+              const videos = (feed.videos || []).map(normalizeVideo);
               newCache[handle] = {
                 name: feed.meta?.name || local?.name || handle,
                 avatar: feed.meta?.avatarUrl || null,
-                videos: feed.videos || [],
+                videos,
                 posts: feed.posts || [],
-                latestVideo: feed.videos?.[0] || null,
+                latestVideo: videos[0] || null,
                 channelId: feed.channelId,
                 lastChecked: new Date().toISOString(),
               };
@@ -83,18 +136,23 @@ async function buildWidgetData(fetchFresh = false) {
       const seenIds = lastSeen[ch.handle]?.seenIds || [];
 
       // All videos sorted newest-first
-      let allVideos = cached?.videos?.length ? cached.videos : (cached?.latestVideo ? [cached.latestVideo] : []);
-      allVideos = [...allVideos].sort((a, b) => new Date(b.publishedAt || b.published) - new Date(a.publishedAt || a.published));
+      const allVideos = sortVideosNewestFirst(
+        cached?.videos?.length ? cached.videos.map(normalizeVideo) : (cached?.latestVideo ? [normalizeVideo(cached.latestVideo)] : [])
+      );
 
       // All posts sorted newest-first
-      let allPosts = cached?.posts?.length ? cached.posts : [];
-      allPosts = [...allPosts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+      const allPosts = sortPostsNewestFirst((cached?.posts || []).map(normalizePost));
+      const latestVideo = allVideos[0] || null;
+      const persistent = selectPersistentLatestContent(allVideos, allPosts);
 
       // Unseen videos
-      const unseenVideos = allVideos.filter(v => !seenIds.includes(v.videoId));
+      const unseenVideos = allVideos.filter(v => isVideoUnwatched(v, seenIds));
       // Unseen posts (post IDs are namespaced with post: in seenIds,
       // matching the app's convention)
-      const unseenPosts = allPosts.filter(p => !seenIds.includes(`post:${p.activityId}`));
+      const unseenPosts = allPosts.filter((post) => (
+        isPostUnwatched(post, seenIds)
+        && chooseLatestChannelContent(latestVideo, post)?.type === 'post'
+      ));
 
       const unseenCount = unseenVideos.length + unseenPosts.length;
       const hasNew = unseenCount > 0;
@@ -102,37 +160,27 @@ async function buildWidgetData(fetchFresh = false) {
       // Build video rows — show only the latest video (matching the
       // bootstrap behaviour of 1 video per channel). Seen videos
       // are dimmed; only genuinely new uploads appear as "New".
-      const videoRows = allVideos.slice(0, 1).map((v) => {
-        const isSeen = seenIds.includes(v.videoId);
-        return {
-          videoId: v.videoId,
-          title: v.title,
-          thumbnail: v.thumbnail,
-          link: v.link,
-          timeAgo: v.publishedAt ? timeAgo(v.publishedAt) : (v.published ? timeAgo(v.published) : ''),
-          views: v.views || '',
-          seen: isSeen,
-          handle: ch.handle,
-          kind: 'video',
-        };
-      });
+      const videosToShow = unseenVideos.length > 0
+        ? [...unseenVideos].reverse()
+        : (persistent?.type === 'video' ? [persistent.item] : []);
+      const videoRows = videosToShow.map((v) => ({
+        ...v,
+        timeAgo: formatCompactAge(v.published || v.publishedAt),
+        seen: !isVideoUnwatched(v, seenIds),
+        handle: ch.handle,
+      }));
 
       // Build post rows — show only the latest post (if any)
-      const postRows = allPosts.slice(0, 1).map((p) => {
-        const isSeen = seenIds.includes(`post:${p.activityId}`);
-        return {
-          postId: p.activityId,
-          kind: p.kind || 'text',
-          text: p.text || '',
-          thumbnail: p.thumbnail || null,
-          link: p.link || '',
-          publishedAt: p.publishedAt || '',
-          timeAgo: p.publishedAt ? timeAgo(p.publishedAt) : '',
-          seen: isSeen,
-          handle: ch.handle,
-          type: 'post',
-        };
-      });
+      const postsToShow = unseenPosts.length > 0
+        ? unseenPosts
+        : (persistent?.type === 'post' ? [persistent.item] : []);
+      const postRows = postsToShow.map((p) => ({
+        ...p,
+        postId: p.activityId || p.postId,
+        timeAgo: p.publishedAt ? formatCompactAge(p.publishedAt) : (p.publishedText || ''),
+        seen: !isPostUnwatched(p, seenIds),
+        handle: ch.handle,
+      }));
 
       return {
         handle: ch.handle,
@@ -153,17 +201,80 @@ async function buildWidgetData(fetchFresh = false) {
   }
 }
 
-// Helper: mark all videos + posts as seen for a channel
 async function markAllSeen(handle) {
-  const cache = await getChannelCache();
-  const lastSeen = await getLastSeen();
+  const [channels, cache, lastSeen] = await Promise.all([
+    getChannels(),
+    getChannelCache(),
+    getLastSeen(),
+  ]);
   const allVideos = cache[handle]?.videos || (cache[handle]?.latestVideo ? [cache[handle].latestVideo] : []);
   const allPosts = cache[handle]?.posts || [];
-  const videoIds = allVideos.map(v => v.videoId);
-  const postIds = allPosts.map(p => `post:${p.activityId}`);
+  const videoIds = allVideos.map(v => v.videoId).filter(Boolean);
+  const postIds = allPosts.map(getPostSeenId).filter(Boolean);
   const existing = lastSeen[handle]?.seenIds || [];
   lastSeen[handle] = { seenIds: [...new Set([...existing, ...videoIds, ...postIds])] };
   await saveLastSeen(lastSeen);
+  await updateCachedChannel(handle, (current) => ({
+    ...current,
+    videos: (current.videos || []).map((v) => ({ ...v, unwatched: false })),
+    latestVideo: current.latestVideo ? { ...current.latestVideo, unwatched: false } : current.latestVideo,
+    posts: (current.posts || []).map((p) => ({ ...p, unwatched: false })),
+  }));
+
+  const channelId = getChannelId(handle, channels, cache);
+  const deviceId = await getDeviceId();
+  if (deviceId && channelId) {
+    markSeen(deviceId, channelId, [], true).catch(() => {});
+  }
+}
+
+async function markWidgetVideoSeen(handle, videoId) {
+  const [channels, cache, lastSeen] = await Promise.all([
+    getChannels(),
+    getChannelCache(),
+    getLastSeen(),
+  ]);
+  const seenIds = lastSeen[handle]?.seenIds || [];
+  if (!seenIds.includes(videoId)) {
+    lastSeen[handle] = { seenIds: [...seenIds, videoId] };
+    await saveLastSeen(lastSeen);
+  }
+  await updateCachedChannel(handle, (current) => ({
+    ...current,
+    videos: (current.videos || []).map((v) => v.videoId === videoId ? { ...v, unwatched: false } : v),
+    latestVideo: current.latestVideo?.videoId === videoId ? { ...current.latestVideo, unwatched: false } : current.latestVideo,
+  }));
+
+  const channelId = getChannelId(handle, channels, cache);
+  const deviceId = await getDeviceId();
+  if (deviceId && channelId) {
+    markSeen(deviceId, channelId, [videoId]).catch(() => {});
+  }
+}
+
+async function markWidgetPostSeen(handle, postId) {
+  const [channels, cache, lastSeen] = await Promise.all([
+    getChannels(),
+    getChannelCache(),
+    getLastSeen(),
+  ]);
+  const rawPostId = String(postId || '');
+  const postKey = rawPostId.startsWith('post:') ? rawPostId : `post:${rawPostId}`;
+  const seenIds = lastSeen[handle]?.seenIds || [];
+  if (!seenIds.includes(postKey)) {
+    lastSeen[handle] = { seenIds: [...seenIds, postKey] };
+    await saveLastSeen(lastSeen);
+  }
+  await updateCachedChannel(handle, (current) => ({
+    ...current,
+    posts: (current.posts || []).map((p) => getPostSeenId(p) === postKey ? { ...p, unwatched: false } : p),
+  }));
+
+  const channelId = getChannelId(handle, channels, cache);
+  const deviceId = await getDeviceId();
+  if (deviceId && channelId) {
+    markSeen(deviceId, channelId, [postKey]).catch(() => {});
+  }
 }
 
 export async function widgetTaskHandler(props) {
@@ -209,14 +320,12 @@ export async function widgetTaskHandler(props) {
         // Post tap — mark just this post seen, open community tab.
         if (clickData.postId && clickData.handle) {
           try {
-            const lastSeen = await getLastSeen();
-            const seenIds = lastSeen[clickData.handle]?.seenIds || [];
-            const postKey = `post:${clickData.postId}`;
-            if (!seenIds.includes(postKey)) {
-              lastSeen[clickData.handle] = { seenIds: [...seenIds, postKey] };
-              await saveLastSeen(lastSeen);
+            await markWidgetPostSeen(clickData.handle, clickData.postId);
+            if (clickData.link) {
+              await Linking.openURL(clickData.link);
+            } else {
+              await Linking.openURL(`https://www.youtube.com/@${clickData.handle}/community`);
             }
-            await Linking.openURL(`https://www.youtube.com/@${clickData.handle}/community`);
           } catch {}
         }
       } else if (action === 'WIDGET_CLICK') {
@@ -224,12 +333,7 @@ export async function widgetTaskHandler(props) {
         // mark just this video seen, open the video.
         if (clickData.videoId && clickData.handle) {
           try {
-            const lastSeen = await getLastSeen();
-            const seenIds = lastSeen[clickData.handle]?.seenIds || [];
-            if (!seenIds.includes(clickData.videoId)) {
-              lastSeen[clickData.handle] = { seenIds: [...seenIds, clickData.videoId] };
-              await saveLastSeen(lastSeen);
-            }
+            await markWidgetVideoSeen(clickData.handle, clickData.videoId);
             if (clickData.link) await Linking.openURL(clickData.link);
           } catch {}
         }

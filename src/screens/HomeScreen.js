@@ -17,6 +17,15 @@ import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
 import { fetchFeed, markSeen, getDeviceId } from '../utils/api';
+import {
+  chooseLatestChannelContent,
+  formatCompactAge,
+  formatCompactCount,
+  formatViews,
+  getPostSeenId,
+  sortPostsNewestFirst,
+  sortVideosNewestFirst,
+} from '../utils/feedPresentation';
 
 const THUMB_UP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#666666" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
   <path d="M7 22V11" />
@@ -240,47 +249,13 @@ export default function HomeScreen({ navigation }) {
     const cached = cache[handle];
     if (!cached) return [];
     const vids = cached.videos?.length ? cached.videos : (cached.latestVideo ? [cached.latestVideo] : []);
-    return [...vids].sort((a, b) => new Date(b.published) - new Date(a.published));
+    return sortVideosNewestFirst(vids);
   };
 
   const getPosts = (handle) => {
     const cached = cache[handle];
     if (!cached || !cached.posts) return [];
-    return [...cached.posts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-  };
-
-  const getContentTimestampMs = (item, fields) => {
-    for (const field of fields) {
-      const value = item?.[field];
-      if (!value) continue;
-      const timestamp = new Date(value).getTime();
-      if (Number.isFinite(timestamp)) return timestamp;
-    }
-    return null;
-  };
-
-  const chooseLatestChannelContent = (video, post) => {
-    if (!video && !post) return null;
-    if (!video) return post ? { type: 'post', item: post } : null;
-    if (!post) return { type: 'video', item: video };
-
-    const videoTime = getContentTimestampMs(video, ['published', 'publishedAt']);
-    const postTime = getContentTimestampMs(post, ['publishedAt']);
-
-    if (videoTime != null && postTime != null) {
-      return postTime > videoTime
-        ? { type: 'post', item: post }
-        : { type: 'video', item: video };
-    }
-    if (videoTime != null) return { type: 'video', item: video };
-    if (postTime != null) return { type: 'post', item: post };
-    return { type: 'video', item: video };
-  };
-
-  const getPostSeenId = (post) => {
-    if (!post) return null;
-    if (post.id) return post.id;
-    return post.activityId ? `post:${post.activityId}` : null;
+    return sortPostsNewestFirst(cached.posts);
   };
 
   const isPostUnwatched = (post) => post?.unwatched === true;
@@ -532,36 +507,12 @@ export default function HomeScreen({ navigation }) {
   const isNew = (handle) => unseenCount(handle) > 0 || getUnseenPosts(handle).length > 0;
 
   const timeAgo = (dateStr) => {
-    if (!dateStr) return '';
-    const publishedMs = new Date(dateStr).getTime();
-    if (!Number.isFinite(publishedMs)) return '';
-    const diff = Math.max(0, nowMs - publishedMs);
-    const mins = Math.floor(diff / 60000);
-    if (mins < 60) return `${mins}m`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h`;
-    const days = Math.floor(hours / 24);
-    if (days < 7) return `${days}d`;
-    const weeks = Math.floor(days / 7);
-    if (weeks < 52) return `${weeks}w`;
-    return `${Math.floor(days / 365)}y`;
-  };
-
-  const formatViews = (views) => {
-    const n = parseInt(views, 10);
-    if (isNaN(n)) return '';
-    if (n >= 1000000) return `${(n / 1000000).toFixed(1).replace(/\.0$/, '')}M views`;
-    if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K views`;
-    return `${n} views`;
+    return formatCompactAge(dateStr, nowMs);
   };
 
   // For likes/dislikes: just the compact number, no "views" suffix
   const formatCount = (n) => {
-    const num = parseInt(n, 10);
-    if (isNaN(num)) return '';
-    if (num >= 1000000) return `${(num / 1000000).toFixed(1).replace(/\.0$/, '')}M`;
-    if (num >= 1000) return `${(num / 1000).toFixed(1).replace(/\.0$/, '')}K`;
-    return `${num}`;
+    return formatCompactCount(n);
   };
 
   const renderChannel = ({ item }) => {

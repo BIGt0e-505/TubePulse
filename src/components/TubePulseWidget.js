@@ -3,7 +3,11 @@ import {
   FlexWidget,
   TextWidget,
   ImageWidget,
+  SvgWidget,
 } from 'react-native-android-widget';
+import { formatCompactCount, formatViews } from '../utils/feedPresentation';
+
+const THUMB_UP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#666666" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 22V11" /><path d="M3 11h4v11H3z" /><path d="M7 11l4.5-8.5c.6-.1 1.2.1 1.6.5.4.5.5 1.1.4 1.7L12.5 9H20c.8 0 1.5.7 1.5 1.5l-1.5 9c-.1.7-.7 1.2-1.4 1.2H7" /></svg>`;
 
 const COLORS = {
   bg: 'rgba(13, 13, 13, 0.85)',
@@ -18,17 +22,10 @@ const AVATAR_SIZE = 48;
 const THUMB_HEIGHT = 48;
 const THUMB_WIDTH = Math.round(THUMB_HEIGHT * (16 / 9));
 
-function formatViews(views) {
-  const n = parseInt(views, 10);
-  if (isNaN(n) || n === 0) return '';
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1).replace(/\.0$/, '')}M views`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K views`;
-  return `${n} views`;
-}
-
 function VideoRow({ video, seen, avatar, handle, tapAction }) {
   const textColor = seen ? COLORS.textDim : COLORS.text;
   const titleWeight = seen ? 'normal' : 'bold';
+  const likeLabel = formatCompactCount(video.likes || 0);
 
   // When tapAction is 'channel', the video row tap does what a
   // channel tap does: mark all seen + open channel. When 'video'
@@ -119,7 +116,7 @@ function VideoRow({ video, seen, avatar, handle, tapAction }) {
             style={{ fontSize: 12, color: textColor, fontWeight: titleWeight }}
             maxLines={2}
           />
-          {(video.timeAgo || video.views) && (
+          {(video.timeAgo || video.views || likeLabel) && (
             <FlexWidget
               style={{
                 flexDirection: 'row',
@@ -132,6 +129,15 @@ function VideoRow({ video, seen, avatar, handle, tapAction }) {
                   text={video.timeAgo}
                   style={{ fontSize: 10, color: COLORS.textDim }}
                 />
+              ) : null}
+              {likeLabel ? (
+                <FlexWidget style={{ flexDirection: 'row', alignItems: 'center', marginLeft: 8 }}>
+                  <SvgWidget svg={THUMB_UP_SVG} style={{ width: 10, height: 10 }} />
+                  <TextWidget
+                    text={likeLabel}
+                    style={{ fontSize: 10, color: COLORS.textDim, marginLeft: 2 }}
+                  />
+                </FlexWidget>
               ) : null}
               {video.views && video.views !== '0' ? (
                 <FlexWidget
@@ -150,13 +156,26 @@ function VideoRow({ video, seen, avatar, handle, tapAction }) {
           )}
         </FlexWidget>
       </FlexWidget>
+      {!seen ? (
+        <FlexWidget
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 4,
+            backgroundColor: COLORS.accent,
+            marginLeft: 8,
+          }}
+        />
+      ) : null}
     </FlexWidget>
   );
 }
 
-function PostRow({ post, avatar, handle }) {
+function PostRow({ post, avatar, handle, tapAction }) {
   const textColor = post.seen ? COLORS.textDim : COLORS.text;
   const titleWeight = post.seen ? 'normal' : 'bold';
+  const likeLabel = post.likeCount != null ? formatCompactCount(post.likeCount) : null;
+  const viewLabel = post.viewCount != null ? formatViews(post.viewCount) : (post.viewText || null);
 
   let label = 'Posted';
   if (post.kind === 'image') label = 'Posted an image';
@@ -210,11 +229,12 @@ function PostRow({ post, avatar, handle }) {
         )}
       </FlexWidget>
 
-      {/* Post content — tapping always opens community tab + marks post seen.
-          tapAction doesn't change post behaviour (same as the app). */}
+      {/* Post content */}
       <FlexWidget
-        clickAction="POST_CLICK"
-        clickActionData={{ postId: post.postId, handle }}
+        clickAction={tapAction === 'channel' ? 'CHANNEL_MARK_ALL_CLICK' : 'POST_CLICK'}
+        clickActionData={tapAction === 'channel'
+          ? { handle }
+          : { postId: post.postId, handle, link: post.link }}
         style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}
       >
         {post.thumbnail ? (
@@ -236,7 +256,7 @@ function PostRow({ post, avatar, handle }) {
             }}
           >
             <TextWidget
-              text="💬"
+              text="P"
               style={{ fontSize: 20, color: COLORS.textDim }}
             />
           </FlexWidget>
@@ -255,14 +275,46 @@ function PostRow({ post, avatar, handle }) {
               maxLines={2}
             />
           ) : null}
-          {post.timeAgo ? (
-            <TextWidget
-              text={post.timeAgo}
-              style={{ fontSize: 10, color: COLORS.textDim, marginTop: 1 }}
-            />
+          {(post.timeAgo || likeLabel || viewLabel) ? (
+            <FlexWidget style={{ flexDirection: 'row', alignItems: 'center', marginTop: 1 }}>
+              {post.timeAgo ? (
+                <TextWidget
+                  text={post.timeAgo}
+                  style={{ fontSize: 10, color: COLORS.textDim }}
+                />
+              ) : null}
+              {likeLabel ? (
+                <FlexWidget style={{ flexDirection: 'row', alignItems: 'center', marginLeft: 8 }}>
+                  <SvgWidget svg={THUMB_UP_SVG} style={{ width: 10, height: 10 }} />
+                  <TextWidget
+                    text={likeLabel}
+                    style={{ fontSize: 10, color: COLORS.textDim, marginLeft: 2 }}
+                  />
+                </FlexWidget>
+              ) : null}
+              {viewLabel ? (
+                <FlexWidget style={{ flex: 1, alignItems: 'flex-end' }}>
+                  <TextWidget
+                    text={viewLabel}
+                    style={{ fontSize: 10, color: COLORS.textDim, textAlign: 'right' }}
+                  />
+                </FlexWidget>
+              ) : null}
+            </FlexWidget>
           ) : null}
         </FlexWidget>
       </FlexWidget>
+      {!post.seen ? (
+        <FlexWidget
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 4,
+            backgroundColor: COLORS.accent,
+            marginLeft: 8,
+          }}
+        />
+      ) : null}
     </FlexWidget>
   );
 }
@@ -301,7 +353,7 @@ function ChannelSection({ channel }) {
       >
         <FlexWidget style={{ flex: 1 }}>
           <TextWidget
-            text={`@${channel.handle}`}
+            text={channel.name || `@${channel.handle}`}
             style={{
               fontSize: 12,
               color: channel.hasNew ? COLORS.accent : COLORS.textDim,
@@ -329,6 +381,7 @@ function ChannelSection({ channel }) {
               post={item}
               avatar={channel.avatar}
               handle={channel.handle}
+              tapAction={channel.tapAction}
             />
           );
         }
