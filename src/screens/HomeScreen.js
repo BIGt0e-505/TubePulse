@@ -350,7 +350,9 @@ export default function HomeScreen({ navigation }) {
     }
 
     const deviceId = await getDeviceId();
-    markSeen(deviceId, channel.channelId, [], true).catch(() => {});
+    markSeen(deviceId, channel.channelId, [], true).catch((e) => {
+      console.warn('[seen] markSeen clearAll failed for channel', channel.channelId, e?.message || e);
+    });
 
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     try {
@@ -401,7 +403,9 @@ export default function HomeScreen({ navigation }) {
       }
 
       const deviceId = await getDeviceId();
-      markSeen(deviceId, channel.channelId, [], true).catch(() => {});
+      markSeen(deviceId, channel.channelId, [], true).catch((e) => {
+        console.warn('[seen] markSeen clearAll failed for channel', channel.channelId, e?.message || e);
+      });
 
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     } else {
@@ -414,8 +418,22 @@ export default function HomeScreen({ navigation }) {
         await saveLastSeen(updatedLastSeen);
         setLastSeen(updatedLastSeen);
 
+        // Optimistically clear the blue dot in local cache
+        const cached = cacheRef.current[key];
+        if (cached?.videos) {
+          const updatedVideos = cached.videos.map((v) =>
+            v.videoId === video.videoId ? { ...v, unwatched: false } : v
+          );
+          const updatedCache = { ...cacheRef.current, [key]: { ...cached, videos: updatedVideos } };
+          cacheRef.current = updatedCache;
+          setCache(updatedCache);
+          try { await saveChannelCache(updatedCache); } catch {}
+        }
+
         const deviceId = await getDeviceId();
-        markSeen(deviceId, channel.channelId, [video.videoId]).catch(() => {});
+        markSeen(deviceId, channel.channelId, [video.videoId]).catch((e) => {
+          console.warn('[seen] markSeen failed for video', video.videoId, e?.message || e);
+        });
 
         Linking.openURL(video.link);
       }
@@ -445,10 +463,28 @@ export default function HomeScreen({ navigation }) {
       updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
       await saveLastSeen(updatedLastSeen);
       setLastSeen(updatedLastSeen);
-
-      const deviceId = await getDeviceId();
-      markSeen(deviceId, channel.channelId, [video.videoId]).catch(() => {});
     }
+
+    // Optimistically clear the blue dot by updating the local cache's
+    // unwatched flag, mirroring what handlePostTap does for posts.
+    // Without this, getUnseenVideos() still sees the video as unwatched
+    // and the blue dot never disappears until the next /feed refresh.
+    const cached = cacheRef.current[key];
+    if (cached?.videos) {
+      const updatedVideos = cached.videos.map((v) =>
+        v.videoId === video.videoId ? { ...v, unwatched: false } : v
+      );
+      const updatedCache = { ...cacheRef.current, [key]: { ...cached, videos: updatedVideos } };
+      cacheRef.current = updatedCache;
+      setCache(updatedCache);
+      try { await saveChannelCache(updatedCache); } catch {}
+    }
+
+    const deviceId = await getDeviceId();
+    markSeen(deviceId, channel.channelId, [video.videoId]).catch((e) => {
+      console.warn('[seen] markSeen failed for video', video.videoId, e?.message || e);
+    });
+
     Linking.openURL(video.link);
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
@@ -491,7 +527,9 @@ export default function HomeScreen({ navigation }) {
     }
 
     const deviceId = await getDeviceId();
-    markSeen(deviceId, channel.channelId, [postKey]).catch(() => {});
+    markSeen(deviceId, channel.channelId, [postKey]).catch((e) => {
+      console.warn('[seen] markSeen failed for post', postKey, e?.message || e);
+    });
 
     Linking.openURL(post.link);
   };
