@@ -36,6 +36,19 @@
     "react-native-worklets": "0.5.1"
   },
   "license": "MIT",
+  "keywords": [
+    "youtube",
+    "notifications",
+    "android",
+    "react-native",
+    "expo",
+    "firebase",
+    "fcm",
+    "cloudflare-workers",
+    "push-notifications",
+    "community-posts",
+    "self-hosted"
+  ],
   "private": true,
   "devDependencies": {
     "babel-preset-expo": "~54.0.10"
