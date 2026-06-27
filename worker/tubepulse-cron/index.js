@@ -68,6 +68,24 @@ function logCommunityPostDebug(env, message, data = {}) {
 async function getKV(kv, k) { kvOps.reads++; return await kv.get(k, 'json'); }
 async function putKV(kv, k, value) { kvOps.writes++; await kv.put(k, JSON.stringify(value)); }
 async function deleteKV(kv, k) { kvOps.deletes++; await kv.delete(k); }
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(',')}}`;
+}
+function jsonEqual(a, b) {
+  return stableJson(a) === stableJson(b);
+}
+async function putKVIfChanged(kv, k, value, existingValue) {
+  const existing = arguments.length >= 4 ? existingValue : await getKV(kv, k);
+  if (jsonEqual(existing, value)) {
+    kvOps.skippedWrites = (kvOps.skippedWrites || 0) + 1;
+    return false;
+  }
+  await putKV(kv, k, value);
+  return true;
+}
 // Note: kv.list() isn't called anywhere in this worker (the channels:active
 // index replaces it). If it ever is, the counter is here and ready.
 
@@ -833,6 +851,9 @@ function shouldRefreshCachedCommunityPost(latestPost, cachedPosts) {
   if (!cached.publishedAt && latestPost.publishedAt) return true;
   if (!cached.fetchedAt && latestPost.fetchedAt) return true;
   if (!cached.publishedAtSource && latestPost.publishedAtSource) return true;
+  for (const field of ['text', 'thumbnail', 'publishedText', 'likeCount', 'likeText', 'viewCount', 'viewText']) {
+    if ((cached?.[field] ?? null) !== (latestPost?.[field] ?? null)) return true;
+  }
   return false;
 }
 
@@ -1004,9 +1025,9 @@ async function runCommunityPostsCron(env, ctx) {
 
       if (!firstPollAt) {
         const latestPostId = getCommunityPostSeenId(latestPost);
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), latestPost ? [latestPost] : []);
+        await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), latestPost ? [latestPost] : []);
         if (latestPostId) {
-          await putKV(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), [latestPostId]);
+          await putKVIfChanged(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), [latestPostId]);
         }
         await putKV(env.TUBEPULSE_KV, key.firstPollAtPosts(channelId), new Date().toISOString());
         console.log(`[Posts] first run for ${channelId}: seeded ${latestPost ? 'latest post only' : 'no posts'}, no notifications`);
@@ -1036,7 +1057,7 @@ async function runCommunityPostsCron(env, ctx) {
         }
       }
       if (knownChanged) {
-        await putKV(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
+        await putKVIfChanged(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
       }
       if (channelDebug) {
         logCommunityPostDebug(env, 'cached_state', {
@@ -1052,7 +1073,7 @@ async function runCommunityPostsCron(env, ctx) {
 
       if (!latestPost) {
         if (prevRecent.length > 0) {
-          await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), []);
+          await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [], prevRecent);
           const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, cachedPostIds);
           results.staleUnwatchedRemoved += removed;
           console.log(`[Posts] ${channelId}: no latest post found, cleared ${cachedPostIds.size} cached post(s), staleUnwatchedRemoved=${removed}`);
@@ -1071,10 +1092,10 @@ async function runCommunityPostsCron(env, ctx) {
       if (cachedActivityIds.has(latestPost.activityId)) {
         if (latestPostId && !knownPostIds.includes(latestPostId)) {
           knownPostIds = addKnownCommunityPostId(knownPostIds, latestPostId);
-          await putKV(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
+          await putKVIfChanged(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
         }
         if (shouldRefreshCachedCommunityPost(latestPost, prevRecent)) {
-          await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
+          await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost], prevRecent);
           const stalePostIds = new Set([...cachedPostIds].filter((id) => id !== latestPostId));
           const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, stalePostIds);
           results.staleUnwatchedRemoved += removed;
@@ -1101,7 +1122,7 @@ async function runCommunityPostsCron(env, ctx) {
       }
 
       if (latestPostId && knownPostIds.includes(latestPostId)) {
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
+        await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost], prevRecent);
         const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, cachedPostIds);
         results.replacementsSuppressed += 1;
         results.staleUnwatchedRemoved += removed;
@@ -1122,9 +1143,9 @@ async function runCommunityPostsCron(env, ctx) {
       if (newPosts.length > 0) {
         // Store only the changed latest post so old community-post
         // history is not dumped into the app feed.
-        await putKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost]);
+        await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecentPosts(channelId), [latestPost], prevRecent);
         knownPostIds = addKnownCommunityPostId(knownPostIds, latestPostId);
-        await putKV(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
+        await putKVIfChanged(env.TUBEPULSE_KV, key.channelKnownPosts(channelId), knownPostIds);
         const removed = await removeCachedPostIdsFromSubscriberState(env, channelId, cachedPostIds);
         results.staleUnwatchedRemoved += removed;
         results.newPosts += 1;
@@ -1611,7 +1632,7 @@ async function runRssPollCron(env, ctx) {
 
       if (newVideos.length === 0) {
         if (recentChanged) {
-          await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedPrev);
+          await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecent(channelId), refreshedPrev, prevRecent);
         }
         continue;
       }
@@ -1643,7 +1664,7 @@ async function runRssPollCron(env, ctx) {
       });
 
       const updatedRecent = [...enrichedNew, ...refreshedPrev].slice(0, 15);
-      await putKV(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent);
+      await putKVIfChanged(env.TUBEPULSE_KV, key.channelRecent(channelId), updatedRecent, prevRecent);
 
       // 5. Update channel meta (name, lastVideoId) ÔÇö only if changed
       const meta = await getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)) || {};
@@ -1657,7 +1678,7 @@ async function runRssPollCron(env, ctx) {
         metaChanged = true;
       }
       if (metaChanged) {
-        await putKV(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
+        await putKVIfChanged(env.TUBEPULSE_KV, key.channelMeta(channelId), meta);
       }
 
       // 6. Get subscribers
@@ -1709,9 +1730,11 @@ async function runRssPollCron(env, ctx) {
         };
 
         let shouldNotify = true;
+        let stateChanged = false;
         for (const video of newVideos) {
           if (!state.unwatched.includes(video.videoId)) {
             state.unwatched.push(video.videoId);
+            stateChanged = true;
           }
 
           if (video.type === 'live_scheduled') {
@@ -1750,7 +1773,9 @@ async function runRssPollCron(env, ctx) {
         }
 
         // Save updated state
-        await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+        if (stateChanged) {
+          await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+        }
 
         // Send FCM
         const notifyEntries = newVideos.filter((v) => v.type !== 'live_scheduled' && shouldNotify);

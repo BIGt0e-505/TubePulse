@@ -87,6 +87,27 @@ const key = {
 
 async function getKV(kv, k) { return await kv.get(k, 'json'); }
 async function putKV(kv, k, value) { await kv.put(k, JSON.stringify(value)); }
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(',')}}`;
+}
+function jsonEqual(a, b) {
+  return stableJson(a) === stableJson(b);
+}
+async function putKVIfChanged(kv, k, value, existingValue) {
+  const existing = arguments.length >= 4 ? existingValue : await getKV(kv, k);
+  if (jsonEqual(existing, value)) return false;
+  await putKV(kv, k, value);
+  return true;
+}
+async function deleteKVIfExists(kv, k) {
+  const existing = await getKV(kv, k);
+  if (existing === null) return false;
+  await kv.delete(k);
+  return true;
+}
 
 function isCommunityPostsEnabled(env) {
   const value = String(env.TUBEPULSE_ENABLE_COMMUNITY_POSTS || '').trim().toLowerCase();
@@ -816,9 +837,10 @@ async function handleRegister(request, env) {
   //      This is the case that catches the v3.0.18 duplicate-deviceId
   //      race — both old UUIDs have the same FCM token, and we want
   //      to merge them into the new device on upgrade.
+  let lookupDeviceId = null;
   if (fcmToken && fcmToken.length > 0) {
     let migrated = false;
-    const lookupDeviceId = await getKV(env.TUBEPULSE_KV, key.fcmLookup(fcmToken));
+    lookupDeviceId = await getKV(env.TUBEPULSE_KV, key.fcmLookup(fcmToken));
     if (lookupDeviceId && lookupDeviceId !== deviceId) {
       console.log(`[Register] FCM token lookup → ${lookupDeviceId}, migrating to new deviceId ${deviceId}`);
       await migrateDevice(lookupDeviceId, deviceId, env);
@@ -831,18 +853,20 @@ async function handleRegister(request, env) {
     // budget). Necessary because the lookup index can be stale or
     // missing for the rare case where multiple old devices share
     // the same FCM token (e.g. the v3.0.18 duplicate-UUID race).
-    const list = await env.TUBEPULSE_KV.list({ prefix: 'device:' });
-    for (const k of list.keys) {
-      if (migrated && !k.name.endsWith(':profile')) continue; // optimization
-      // We only care about profile keys
-      if (!k.name.endsWith(':profile')) continue;
-      const oldId = k.name.slice('device:'.length, -':profile'.length);
-      if (oldId === deviceId) continue;
-      if (oldId === lookupDeviceId) continue; // already migrated
-      const prof = await getKV(env.TUBEPULSE_KV, key.deviceProfile(oldId));
-      if (prof?.fcmToken === fcmToken) {
-        console.log(`[Register] Found orphan ${oldId} with matching FCM token, migrating`);
-        await migrateDevice(oldId, deviceId, env);
+    if (lookupDeviceId !== deviceId) {
+      const list = await env.TUBEPULSE_KV.list({ prefix: 'device:' });
+      for (const k of list.keys) {
+        if (migrated && !k.name.endsWith(':profile')) continue; // optimization
+        // We only care about profile keys
+        if (!k.name.endsWith(':profile')) continue;
+        const oldId = k.name.slice('device:'.length, -':profile'.length);
+        if (oldId === deviceId) continue;
+        if (oldId === lookupDeviceId) continue; // already migrated
+        const prof = await getKV(env.TUBEPULSE_KV, key.deviceProfile(oldId));
+        if (prof?.fcmToken === fcmToken) {
+          console.log(`[Register] Found orphan ${oldId} with matching FCM token, migrating`);
+          await migrateDevice(oldId, deviceId, env);
+        }
       }
     }
   }
@@ -855,21 +879,34 @@ async function handleRegister(request, env) {
     ? fcmToken
     : (existing?.fcmToken || null);
 
-  const profile = {
+  const baseProfile = {
     fcmToken: effectiveFcmToken,
     platform: platform || existing?.platform || 'android',
     appVersion: appVersion || existing?.appVersion || null,
     createdAt: existing?.createdAt || now,
-    lastSeenAt: now,
+    lastSeenAt: existing?.lastSeenAt || now,
+  };
+  const profileFieldsChanged = !existing
+    || existing.fcmToken !== baseProfile.fcmToken
+    || existing.platform !== baseProfile.platform
+    || existing.appVersion !== baseProfile.appVersion
+    || existing.createdAt !== baseProfile.createdAt;
+  const lastSeenAgeMs = now - (Number(existing?.lastSeenAt) || 0);
+  const shouldRefreshLastSeen = !existing || profileFieldsChanged || lastSeenAgeMs >= 60 * 60 * 1000;
+  const profile = {
+    ...baseProfile,
+    lastSeenAt: shouldRefreshLastSeen ? now : baseProfile.lastSeenAt,
   };
 
-  await putKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId), profile);
+  await putKVIfChanged(env.TUBEPULSE_KV, key.deviceProfile(deviceId), profile, existing);
 
   // Maintain the FCM-token → deviceId index so future migrations can
   // find this install even if the deviceId changes. Only update if we
   // have a real FCM token (the lookup is meaningless for null tokens).
-  if (effectiveFcmToken) {
-    await putKV(env.TUBEPULSE_KV, key.fcmLookup(effectiveFcmToken), deviceId);
+  if (effectiveFcmToken && fcmToken && fcmToken.length > 0) {
+    if (lookupDeviceId !== deviceId) {
+      await putKVIfChanged(env.TUBEPULSE_KV, key.fcmLookup(effectiveFcmToken), deviceId, lookupDeviceId);
+    }
 
     // If the FCM token rotated (we have a new token, the old one still
     // has a lookup pointing to us), clean up the old lookup. Otherwise
@@ -1103,7 +1140,8 @@ async function handleSeen(request, env) {
   if (!channelId) return errorResponse('channelId is required');
   if (!clearAll && !Array.isArray(videoIds)) return errorResponse('Provide videoIds array or clearAll: true');
 
-  const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId)) || {
+  const existingState = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
+  const state = existingState || {
     unwatched: [],
     lastNagAt: null,
     nagCount: 0,
@@ -1116,7 +1154,7 @@ async function handleSeen(request, env) {
     state.unwatched = (state.unwatched || []).filter((id) => !removeSet.has(id));
   }
 
-  await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+  await putKVIfChanged(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state, existingState);
 
   // Note: nag bucket entries are NOT actively cleaned up.
   // When the nag cron fires, it re-checks state and skips already-seen videos.
@@ -1404,8 +1442,7 @@ async function handleSettings(request, env) {
   const { settings } = body;
   if (!settings) return errorResponse('settings is required');
 
-  // Full replacement write
-  await putKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId), settings);
+  await putKVIfChanged(env.TUBEPULSE_KV, key.deviceSettings(deviceId), settings);
   return json({ ok: true });
 }
 
@@ -1425,11 +1462,11 @@ async function handleChannelOverride(request, env) {
 
   // Empty override → delete the key (inherit from device-level settings)
   if (!override || Object.keys(override).length === 0) {
-    await env.TUBEPULSE_KV.delete(overrideKey);
+    await deleteKVIfExists(env.TUBEPULSE_KV, overrideKey);
     return json({ ok: true, deleted: true });
   }
 
-  await putKV(env.TUBEPULSE_KV, overrideKey, override);
+  await putKVIfChanged(env.TUBEPULSE_KV, overrideKey, override);
   return json({ ok: true });
 }
 
