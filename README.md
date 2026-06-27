@@ -10,6 +10,8 @@ TubePulse is a lightweight YouTube tracker for Android that monitors your favour
 ## Current App Line
 The current checked-in app version is `3.3.0`. The v3.1 feature line below remains the latest broad feature summary in these docs; see [STATUS.md](STATUS.md) for current repo status and caveats.
 
+Community posts in v3.3.0 are enabled for active subscribed channels when the global worker feature gate is on. Newly added channels are silently seeded before future community-post notifications, so old posts are not pushed as new.
+
 - **Like & dislike counts in the video card meta row** — shown next to the publish time and view count, so you can see what the community thinks of a video at a glance.
 - **📝 Community posts in the feed** — channel community posts (text, images, polls) are now polled hourly and rendered in the home feed under a "Posts" mini-header. Posts have their own blue dot for unseen items, get marked as seen like videos, and respect the same global + per-channel opt-out settings.
 - **⏰ Prewarn time for scheduled livestreams** — pick how early you want to be notified before a scheduled livestream goes live (15m, 30m, 1h, 2h, 4h, or 1d — default 1h). Per-channel override available. At the moment the livestream actually goes live, the regular new-video notification fires; the prewarn is the heads-up, the regular push is the "this just appeared" notification.

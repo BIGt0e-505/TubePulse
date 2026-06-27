@@ -41,7 +41,7 @@ Last worker deploy recorded: 2026-06-25.
 
 The app release/version is now `3.3.0` with Android `versionCode 330`. Worker deployment is separate from app APK release; community-post rollout required both worker deployment and app release.
 
-Community-post worker/app support exists in the repo, but runtime community-post polling and `/feed` post rows are gated by `TUBEPULSE_ENABLE_COMMUNITY_POSTS`. The gate is disabled by default when the environment variable is missing or any value other than `1`, `true`, or `yes`. Future v2 testing is additionally scoped by `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST`, where missing or blank means no channels are eligible. This keeps current workers deployable without re-enabling community-post polling or serving stale post rows until the contract is deliberately re-enabled for allowlisted channels.
+Community-post worker/app support is enabled only when `TUBEPULSE_ENABLE_COMMUNITY_POSTS` is set to `1`, `true`, or `yes`. When enabled, cron polls active subscribed channels from `channels:active`. `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST` is optional and narrows polling only when non-empty; missing or blank means all active channels are eligible. First-poll seeding remains silent to avoid old-post spam for newly added channels.
 
 ---
 ## Active Components
@@ -101,7 +101,7 @@ Known risks and the intended safer target flow are documented in [RELEASE.md](RE
 ## Current Backend Summary
 
 - Video detection is cron-driven via YouTube RSS polling.
-- YouTube Data API usage is intended for handle/channel resolution and avatar/bootstrap fallback paths. Community-post v2 cron polling now uses the isolated InnerTube latest-post helper, but remains inert unless the global community-post gate is enabled and `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST` contains active channel IDs in the deployed worker environment.
+- YouTube Data API usage is intended for handle/channel resolution and avatar/bootstrap fallback paths. Community-post cron polling uses the isolated InnerTube latest-post helper and remains inert unless the global community-post gate is enabled. When enabled, it polls active subscribed channels; a non-empty allowlist can narrow that set.
 - API and cron workers share the same KV namespace according to their wrangler configs.
 - WebSub code remains present but should be treated as dormant unless live verification proves otherwise.
 - KV schema and helper logic are duplicated between worker files and have known drift; see [worker/CONTRACTS.md](worker/CONTRACTS.md) before changing worker behavior.

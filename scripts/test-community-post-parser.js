@@ -68,7 +68,14 @@ function loadFixture(name) {
     isCommunityPostEligible('UCeG5VyNPnGZq-8JzHJbSB6A', {
       TUBEPULSE_ENABLE_COMMUNITY_POSTS: 'true',
     }),
-    false
+    true
+  );
+  assert.equal(
+    isCommunityPostEligible('UCeG5VyNPnGZq-8JzHJbSB6A', {
+      TUBEPULSE_ENABLE_COMMUNITY_POSTS: 'true',
+      TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST: ' ',
+    }),
+    true
   );
   assert.equal(isCommunityPostEligible('UCmissing', allowlistEnv), false);
 

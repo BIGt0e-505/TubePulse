@@ -31,7 +31,8 @@ export function parseCommunityPostChannelAllowlist(env = {}) {
 
 export function isCommunityPostChannelAllowed(channelId, env = {}) {
   if (!channelId || typeof channelId !== 'string') return false;
-  return parseCommunityPostChannelAllowlist(env).has(channelId);
+  const allowlist = parseCommunityPostChannelAllowlist(env);
+  return allowlist.size === 0 || allowlist.has(channelId);
 }
 
 export function isCommunityPostEligible(channelId, env = {}) {

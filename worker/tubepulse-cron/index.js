@@ -788,8 +788,10 @@ async function runPrewarnCron(env, ctx) {
 // ÔöÇÔöÇÔöÇ Job 2: Nag cycle (every 15 min) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 // ÔöÇÔöÇÔöÇ Community posts cron ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-// Polls YouTube's InnerTube browse Posts tab for allowlisted active
-// channels once per hour. Captures the latest visible community post
+// Polls YouTube's InnerTube browse Posts tab for active channels once
+// per hour. A non-empty allowlist narrows polling for staged rollouts;
+// missing/blank allowlist means all active channels are eligible when
+// the global community-post gate is enabled. Captures the latest visible community post
 // only and notifies subscribers when the latest post ID changes.
 //
 // Community posts are latest-state oriented, not history oriented.
@@ -917,28 +919,28 @@ async function runCommunityPostsCron(env, ctx) {
   }
 
   const allowlist = parseCommunityPostChannelAllowlist(env);
+  const allowlistEnabled = allowlist.size > 0;
   logCommunityPostDebug(env, 'allowlist', {
     allowlistCount: allowlist.size,
-    pilotAllowlisted: allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
+    allowlistEnabled,
+    pilotAllowlisted: !allowlistEnabled || allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
   });
-  if (allowlist.size === 0) {
-    console.log('[Posts] no channels allowlisted by TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST');
-    logCommunityPostDebug(env, 'action', { action: 'allowlist_empty_skip' });
-    return { disabled: false, allowlistEmpty: true, channelsPolled: 0, newPosts: 0, errors: [] };
-  }
 
   const channelsActive = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
-  const channelsToPoll = channelsActive.filter((channelId) => allowlist.has(channelId));
+  const channelsToPoll = allowlistEnabled
+    ? channelsActive.filter((channelId) => allowlist.has(channelId))
+    : channelsActive;
   logCommunityPostDebug(env, 'active_channels', {
     activeChannelCount: channelsActive.length,
     pilotActive: channelsActive.includes(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
-    pilotAllowlisted: allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
+    allowlistEnabled,
+    pilotAllowlisted: !allowlistEnabled || allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
     pilotPolled: channelsToPoll.includes(COMMUNITY_POSTS_DEBUG_CHANNEL_ID),
     channelsToPollCount: channelsToPoll.length,
   });
   if (debugEnabled && !channelsActive.includes(COMMUNITY_POSTS_DEBUG_CHANNEL_ID)) {
     logCommunityPostDebug(env, 'action', { action: 'channel_not_active_skip', channelId: COMMUNITY_POSTS_DEBUG_CHANNEL_ID });
-  } else if (debugEnabled && !allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID)) {
+  } else if (debugEnabled && allowlistEnabled && !allowlist.has(COMMUNITY_POSTS_DEBUG_CHANNEL_ID)) {
     logCommunityPostDebug(env, 'action', { action: 'channel_not_allowlisted_skip', channelId: COMMUNITY_POSTS_DEBUG_CHANNEL_ID });
   }
   const results = { channelsPolled: 0, newPosts: 0, replacementsSuppressed: 0, staleUnwatchedRemoved: 0, errors: [] };
