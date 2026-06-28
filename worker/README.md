@@ -42,7 +42,7 @@ This document describes the TubePulse backend: the two Cloudflare Workers, the C
 | `tubepulse-resolver` | `worker/archive/tubepulse-resolver/` | Historical standalone resolver worker | Archived for reference only; do not deploy unless deliberately restoring historical resolver behaviour. |
 | `TUBEPULSE_KV` | KV namespace `52e77ca9f5f6493e89d2478c8d3055ec` | All current API/cron persistent state | Shared by `tubepulse-api` and `tubepulse-cron` configs. |
 
-> **Verified route:** on 2026-06-25, `GET /` at the app API URL returned `200 OK` with `{"status":"ok","version":"3.0.0","worker":"tubepulse-api","architecture":"channel-first"}`. The health `version` is an API worker label and appears stale or independent from the app release version `3.2.4`. `worker/tubepulse-api/wrangler.toml` has no explicit route setting and still contains a stale/incomplete "No HTTP routes" comment.
+> **Verified route:** on 2026-06-25, `GET /` at the app API URL returned `200 OK` with `{"status":"ok","version":"3.0.0","worker":"tubepulse-api","architecture":"channel-first"}`. The health `version` is an API worker label and appears stale or independent from the app release version `3.3.3`. `worker/tubepulse-api/wrangler.toml` has no explicit route setting and still contains a stale/incomplete "No HTTP routes" comment.
 
 The two workers share the **same KV namespace** so they can read each other's writes. The cron writes `channel:{id}:recent` and `channel:{id}:meta`; the API reads them when serving `/feed`.
 
@@ -75,8 +75,8 @@ The worker has **one** `scheduled()` handler that dispatches to six jobs based o
 | 1 | Upcoming-events drain | every 5 min | `runUpcomingCron` | Reads `upcoming:{bucket}` for the current 5-min window and deletes it. **Drain-only since v3.1** — clears any pre-v3.1 bucket entries so the old "going live in 30 minutes" / "is live now!" pushes cannot fire for events scheduled before the upgrade. No new pushes are written to buckets. |
 | 2 | Prewarn (v3.1) | every 5 min | `runPrewarnCron` | Iterates `upcoming:events:list` and fires a per-device "going live soon" FCM push when each device's prewarn window opens. The prewarn offset is per-device: per-channel override → global setting → default 60 min. Sent state tracked in `upcoming:prewarn:{videoId}:{deviceId}` to prevent double-send. Events pruned 24 h after `scheduledFor`. |
 | 3 | RSS poll | every 5 min | `runRssPollCron` | Reads `channels:active`, fetches the RSS feed for each channel, diffs against `channel:{id}:recent`. New videos → FCM fan-out. **Active new-video detection path** since the 2024 WebSub hub shutdown. |
-| 4 | Community posts (v3.1) | every hour (`mins === 0`) | `runCommunityPostsCron` | Polls YouTube Data API `activities.list` for each channel in `channels:active`. Captures text, image, and poll community posts. First-run guard populates the recent list without firing notifications. Cost: ~1 unit/channel/hour. |
-| 5 | Nag cycle | every 15 min | `runNagCron` | Reads `nag:{bucket}` for the current 15-min window. Re-notifies devices about unwatched videos per their nag settings. Posts do not enter the nag cycle. |
+| 4 | Community posts (v3.1) | every hour (`mins === 0`) | `runCommunityPostsCron` | Polls YouTube InnerTube `youtubei/v1/browse` Posts tab for each channel in `channels:active`. Captures text, image, and poll community posts. First-run guard populates the recent list without firing notifications. Cost: 0 YouTube Data API units (InnerTube is free). When `TUBEPULSE_ENABLE_COMMUNITY_POSTS` is enabled and `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST` is missing/blank, all active channels are polled. A non-empty allowlist narrows polling to listed channels only. |
+| 5 | Nag cycle | every 5 min | `runNagCron` | Timestamp-based nag system. On every 5-min cron tick, iterates all active channels and their subscribers. For each subscriber with unwatched items, checks `state.lastNagAt` against the device's nag interval. If enough time has passed, sends an FCM reminder push and updates `lastNagAt`/`nagCount`. Replaces the old 15-min bucket system (which was broken for sub-15-min intervals). |
 | 6 | Lease renewal | every 6 h | `runLeaseCron` | **Dormant no-op** — Google's PubSubHubbub hub was shut down in 2024. Code path remains for future revival. |
 
 ### 3.1 RSS poll — the active new-video detection path
@@ -112,7 +112,7 @@ For each new video, the cron does the standard fan-out (which is identical to wh
    - Skip if muted via override, or if DND is active and the override doesn't bypass it
    - Sign a JWT using the Firebase service account, exchange for an OAuth token, POST to `fcm.googleapis.com/v1/projects/{projectId}/messages:send`
 3. Update `device:{id}:state:{channelId}` with the new `unwatched` list
-4. Schedule the next nag into the appropriate `nag:{bucket}` entry
+4. Nag scheduling is handled by `runNagCron` in the cron worker (timestamp-based, every 5 min) — the RSS poller no longer pre-schedules nags into buckets.
 
 ---
 
@@ -176,11 +176,11 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 | `device:{deviceId}:settings` | JSON | `{ mode, nagInterval, dndEnabled, dndStart, dndEnd, dndTimezone, dndBypass, tapAction, includeCommunityPosts (v3.1), prewarnMinutes (v3.1), ... }` | API (settings) | Cron (FCM fan-out filter) |
 | `device:{deviceId}:channels` | JSON array | `[channelId, ...]` | API (subscribe, unsubscribe) | API (feed filter) |
 | `device:{deviceId}:override:{channelId}` | JSON | per-channel notification override. May include `mode?`, `nagInterval?`, `dndBypass?`, `muted?`, `includeCommunityPosts?` (**v3.1**, tri-state null/true/false), `prewarnMinutes?` (**v3.1**, tri-state null/number) | API (channel-override) | Cron (FCM fan-out filter) |
-| `device:{deviceId}:state:{channelId}` | JSON | `{ unwatched: [...], lastNagAt, nagCount }` — `unwatched` holds plain videoIds and `post:{activityId}` for community posts (**v3.1** shares the array via `post:` namespace) | Cron (new video, nag fire) | Cron (nag fire, seen cleanup) |
+| `device:{deviceId}:state:{channelId}` | JSON | `{ unwatched: [...], lastNagAt, nagCount }` — `unwatched` holds plain videoIds and `post:{activityId}` for community posts (**v3.1** shares the array via `post:` namespace). `lastNagAt` is a timestamp updated after each successful nag push. `nagCount` tracks the number of reminder nags sent (not counting the initial new-video push). Both are reset to `null`/`0` by `/seen` when `unwatched` becomes empty, so the next unread item starts a fresh nag cadence. | Cron (new video, nag fire) | Cron (nag fire, seen cleanup) |
 | `upcoming:events:list` | JSON array | `[{ channelId, videoId, scheduledFor, addedAt }, ...]` — currently-scheduled live events, pruned 24h after live (**v3.1**, replaces the pre-v3.1 `upcoming:{bucket}` scheme) | Cron (RSS poll) | Cron (prewarn cron) |
 | `upcoming:prewarn:{videoId}:{deviceId}` | number | `prewarnMinutes` value at send-time, sentinel for "prewarn sent for this (event, device)" (**v3.1**) | Cron (prewarn fire) | Cron (prewarn fire) |
 | `upcoming:{bucket}` | JSON array | pre-v3.1 scheduled-livestream entries | (legacy writes only) | Cron (`runUpcomingCron` drain-only) |
-| `nag:{bucket}` | JSON array | pending nag entries (15-min window) | Cron (nag fire, reschedule) | Cron (nag cron) |
+| `nag:{bucket}` | JSON array | **Legacy/unused** — pending nag entries from the old 15-min bucket system. No longer written by any code path. The timestamp-based `runNagCron` replaces this entirely. | (none — legacy) | (none) |
 | `channels:active` | JSON array | `[channelId, ...]` — index of channels with ≥1 subscriber | API (subscribe, unsubscribe) | Cron (RSS poll, community posts) |
 | `handle:{lowercase}` | JSON | `{ channelId, cachedAt }` — 7-day TTL | API (resolve) | API (resolve) |
 | `fcm:lookup:{fcmToken}` | string | `deviceId` — reverse index from FCM token to the device that owns it | API (register) | API (register, migration) |
@@ -190,6 +190,135 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 **`fcm:lookup:*` is the deviceId-migration index.** When the same FCM token registers with a new `deviceId` (e.g. a v3.0.18 UUID-based install upgrades to v3.0.19's Android-ID-based install), the server uses this index to find the old device and migrate its state. See §11.1.
 
 **Key lifecycle (cleanup):** channel and device keys are deleted by two helpers, `cleanupDeadChannel()` and `cleanupDeadDevice()` — see §11. Channel keys (`meta`/`recent`/`websub` + the `channels:active` membership) are deleted when the last subscriber leaves or is detected as dead. Device keys (`profile`/`settings`/`channels`/`state:*`/`override:*`) are deleted only when the FCM token is reported dead. The API cleanup path deletes `fcm:lookup:*`; the cron cleanup path has known drift documented in [CONTRACTS.md](CONTRACTS.md).
+
+---
+
+## 5.1 Nag reminder behaviour
+
+The nag system sends repeat reminder push notifications while items remain unread. It runs on every 5-minute cron tick.
+
+**How it works:**
+
+1. Iterate `channels:active` → `channel:{id}:subscribers` → `device:{id}:state:{channelId}`
+2. For each subscriber with `unwatched.length > 0`, check `now - state.lastNagAt >= intervalMs`
+3. If enough time has passed, send an FCM nag push and update `state.lastNagAt` + `state.nagCount`
+4. If not enough time has passed, skip (no push, no KV write)
+
+**Interval calculation (`getNagIntervalMs`):**
+
+| Mode | Configured interval | Actual interval |
+|---|---|---|
+| Relentless | 5 min | 5 min for first 12 nags (1 hour), then **15 min** (backoff) |
+| Relentless | 15 min | 15 min |
+| Relentless | 30 min | 30 min |
+| Relentless | 60 min | 60 min |
+| Relentless | 120 min | 120 min |
+| Chill | any | 4 hours |
+
+**Backoff rationale:** Relentless 5-minute mode would burn KV writes (12 nags/hour per device/channel) if sustained indefinitely. After the first hour (12 nags), the interval backs off to 15 minutes (4 nags/hour), a 67% reduction.
+
+**nagCount lifecycle:**
+- `nagCount` counts only reminder nags (the initial new-video push does NOT increment it)
+- `nagCount` is incremented in `runNagCron` after each successful FCM delivery
+- `nagCount` and `lastNagAt` are reset to `0`/`null` by `/seen` when `unwatched` becomes empty
+- A new unread item after a full clear starts fresh at `nagCount = 0` (5-min cadence)
+- A new item added while old unread remains does NOT reset `nagCount` (stays in backed-off mode)
+
+**Notification stacking:**
+- Single-video nag: `tag: video-{videoId}` — replaces the original new-video notification in the tray
+- Multi-video nag: `tag: tubepulse-nag-{channelId}` — replaces previous batch nags for that channel
+- Different channels don't collide
+- A dismissed notification **will** reappear on the next nag interval (the FCM tag prevents stacking, not re-delivery)
+
+**Only `/seen` clears unwatched state.** Swiping away an Android tray notification does NOT mark anything seen. Opening settings, changing display mode, refreshing the feed, or app focus does NOT mark anything seen.
+
+### 5.2 `/seen` contract
+
+**Endpoint:** `POST /seen`
+**Auth:** `Authorization: Bearer <deviceId>`
+
+**Request body:**
+```json
+{
+  "channelId": "UCxxxxx",
+  "videoIds": ["videoId1", "post:activityId1"],  // for individual marks
+  "clearAll": true                                // for channel-tap (clears all)
+}
+```
+
+Either `videoIds` (array of seen IDs) or `clearAll: true` is required.
+
+**Seen ID format:**
+- Videos: plain `videoId` string (e.g. `dQw4w9WgXcQ`)
+- Community posts: `post:{activityId}` string (e.g. `post:Ugkx...`)
+
+**Behaviour:**
+1. Reads `device:{deviceId}:state:{channelId}` from KV
+2. Creates a **new** state object (copy, not reference — see aliasing bug below)
+3. Removes seen IDs from `state.unwatched`, or empties it if `clearAll`
+4. When `state.unwatched` becomes empty: resets `state.nagCount = 0` and `state.lastNagAt = null`
+5. Writes via `putKVIfChanged` (only writes if state actually changed)
+6. Returns `{ ok: true, unwatchedCount: N }`
+
+**What `/seen` does NOT do:**
+- Does not delete recent content (videos/posts remain in `channel:{id}:recent`)
+- Does not unsubscribe the device from the channel
+- Does not remove the channel from `channels:active`
+- Does not send any FCM push
+
+**`/seen` is the only backend path that marks content seen.** No other endpoint, cron job, or notification event modifies `unwatched`.
+
+**Aliasing bug (fixed):** The `/seen` handler must create a fresh state object before mutation. The previous bug was: `const state = existingState` (a reference), then `state.unwatched = [...]`, then `putKVIfChanged(kv, key, state, existingState)` — since `state` and `existingState` are the same object, `jsonEqual` returns `true` and the write is silently skipped. The API returns `{ ok: true }` but nothing is persisted. The fix (already deployed): `const state = existingState ? { ...existingState, unwatched: [...] } : { ... }`.
+
+### 5.3 Community post behaviour
+
+**Global gate:** `TUBEPULSE_ENABLE_COMMUNITY_POSTS` (worker env var). Set to `1`, `true`, or `yes` to enable. Missing or any other value = disabled.
+
+**Allowlist:** `TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST` (worker env var, optional). When blank/missing, all channels in `channels:active` are polled. When set to a comma-separated list of channel IDs, only those active channels are polled.
+
+**Polling:** Hourly via InnerTube `youtubei/v1/browse` (not YouTube Data API — 0 quota cost).
+
+**State keys:**
+- `channel:{id}:recent:posts` — display cache (latest post only)
+- `channel:{id}:known:posts` — notification/deletion watermark (up to 20 post IDs)
+- `channel:{id}:firstPollAt:posts` — first-run sentinel
+
+**First-run guard:** The first poll for a channel seeds `recent:posts` with the latest post and sets `firstPollAt:posts`, but sends **no notification**. This prevents spamming users with old posts on first subscribe.
+
+**Detection logic:**
+- Same latest post ID as cached → no-op (or compaction if metadata changed)
+- New latest post ID, **not** in `known:posts` → new post: notify subscribers, add to `known:posts`, update `recent:posts`
+- New latest post ID, **in** `known:posts` → rollback/restoration: suppress notification, update `recent:posts` (a newer post was likely deleted, rolling back to an older known one)
+- No latest post found → clear `recent:posts` and remove stale `post:*` IDs from subscriber `unwatched`
+
+**Community post seen IDs** use the `post:{activityId}` namespace in `device:state.unwatched`, sharing the array with video IDs.
+
+**Community post fields** (from InnerTube): `id` (`post:{postId}`), `activityId`, `postId`, `kind` (text/image/poll), `text`, `thumbnail`, `link`, `publishedText`, `publishedAt` (preserved from cache), `fetchedAt`, `publishedAtSource`, optional `likeCount`/`likeText`, `viewCount`/`viewText`. `likeCount: 0` is a real value; null/missing means unknown.
+
+### 5.4 Notification tag strategy
+
+All FCM pushes include an `android.notification.tag` for tray replacement:
+
+| Push type | Tag | Effect |
+|---|---|---|
+| New video (RSS poll) | `video-{videoId}` | Replaces any existing notification for the same video |
+| Batch new videos | `tubepulse-batch` | Replaces previous batch notifications |
+| Single-video nag | `video-{videoId}` | Replaces the original notification (updates tray) |
+| Multi-video nag | `tubepulse-nag-{channelId}` | Replaces previous batch nags for that channel |
+| Prewarn | `video-{videoId}` | Replaces previous prewarn for the same event |
+| Community post | (no explicit tag — defaults to `tubepulse`) | May stack if multiple posts arrive; acceptable for rare community posts |
+
+Different channels don't collide (channel-specific tags). A dismissed notification **will** reappear on the next nag interval — the tag prevents stacking, not re-delivery.
+
+### 5.5 Worker free-tier cautions
+
+KV writes are the primary budget concern. The free tier allows 1,000 writes/day (Cloudflare plan-dependent).
+
+- Each successful nag writes `device:state` (1 KV write per device/channel per nag)
+- Relentless 5-min with persistent unread items: 12 writes in the first hour, then 4 writes/hour after backoff — a 67% reduction
+- Multiple test devices on 5-min relentless with uncleared items can accumulate writes quickly
+- Monitor at: `https://dash.cloudflare.com/<account_id>/storage/kv`
+- Do not leave several test devices on 5-min relentless indefinitely
 
 ---
 
@@ -203,8 +332,8 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 | `handle:*` cache hit | 0 units | Subsequent lookups for the same handle |
 | Subscribe-time avatar fetch (in `/subscribe-channel`) | 1 unit | Per new channel added (one-time, cached forever in `channel:{id}:meta`) |
 | Cron tick — RSS-based video detection | **0 units** | RSS feed has no API key requirement |
-| Cron tick — community posts (`runCommunityPostsCron`, **v3.1**) | 1 unit / channel / hour | Per active channel, hourly |
-| **Total steady-state (4 channels)** | **~96 units/day** | 4 channels × 1/hour × 24h = 96 units for posts. New-channel adds are one-time, ~2 units each. |
+| Cron tick — community posts (`runCommunityPostsCron`, **v3.1**) | 0 units | InnerTube `youtubei/v1/browse` is free, no YouTube Data API quota cost |
+| **Total steady-state (4 channels)** | **~4 units/day** | 0 for community posts (InnerTube is free) + ~4 for occasional handle resolves. New-channel adds are one-time, ~2 units each. |
 
 ### 6.2 Cloudflare Workers (free tier: 100,000 requests/day, 10ms CPU per invocation)
 
@@ -216,7 +345,7 @@ The WebSub handlers are intact but unused since 2024 (Google's hub was shut down
 ### 6.3 Cloudflare KV (free tier: 100K reads, 1K writes, 1K list, 1GB storage)
 
 **Reads per day (1 user, 4 channels):**
-- Cron: 1 `channels:active` + 4 `channel:{id}:recent` + 1 `upcoming:{bucket}` + 1 `nag:{bucket}` per 5 min = 7 × 288 = **2,016 reads/day**
+- Cron: 1 `channels:active` + 4 `channel:{id}:recent` + 1 `upcoming:{bucket}` per 5 min = 6 × 288 = **1,728 reads/day** (nag cron now iterates channels/subscribers directly, no bucket reads)
 - API (per app open): 4 `channel:{id}:*` reads × 4 channels = 16 reads × 20 opens = **320 reads/day**
 - **Total: ~2,400 reads/day = 2.4% of free tier**
 
