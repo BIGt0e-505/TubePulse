@@ -102,13 +102,33 @@ async function buildWidgetData(fetchFresh = false) {
               const handle = local?.handle;
               if (!handle) continue;
               const videos = (feed.videos || []).map(normalizeVideo);
+              const prevEntry = cache[handle] || {};
+
+              // Preserve last-known-good avatar: if the fresh fetch
+              // returns no avatarUrl, keep the previously cached one.
+              // This prevents partial server responses from wiping
+              // widget images that were displaying fine.
+              const freshAvatar = feed.meta?.avatarUrl || null;
+              const avatar = freshAvatar || prevEntry.avatar || null;
+
+              // Preserve last-known-good thumbnails: merge new videos
+              // with old, keeping old thumbnails when new ones are
+              // missing.
+              const prevVideosById = new Map(
+                (prevEntry.videos || []).map(v => [v.videoId, v])
+              );
+              const mergedVideos = videos.map(v => ({
+                ...v,
+                thumbnail: v.thumbnail || prevVideosById.get(v.videoId)?.thumbnail || null,
+              }));
+
               newCache[handle] = {
-                name: feed.meta?.name || local?.name || handle,
-                avatar: feed.meta?.avatarUrl || null,
-                videos,
-                posts: feed.posts || [],
-                latestVideo: videos[0] || null,
-                channelId: feed.channelId,
+                name: feed.meta?.name || local?.name || prevEntry.name || handle,
+                avatar,
+                videos: mergedVideos,
+                posts: feed.posts || prevEntry.posts || [],
+                latestVideo: mergedVideos[0] || null,
+                channelId: feed.channelId || prevEntry.channelId,
                 lastChecked: new Date().toISOString(),
               };
             }
@@ -193,8 +213,6 @@ async function buildWidgetData(fetchFresh = false) {
         posts: postRows,
       };
     });
-
-    return { channels: widgetChannels };
 
     return { channels: widgetChannels };
   } catch {
@@ -289,15 +307,23 @@ export async function widgetTaskHandler(props) {
 
   switch (props.widgetAction) {
     case 'WIDGET_ADDED': {
-      const data = await buildWidgetData(true);
-      props.renderWidget(<Widget {...data} />);
+      // First add: try cache first, fall back to fresh fetch if empty.
+      const cacheData = await buildWidgetData(false);
+      if (cacheData.channels.length > 0) {
+        props.renderWidget(<Widget {...cacheData} />);
+      } else {
+        const freshData = await buildWidgetData(true);
+        props.renderWidget(<Widget {...freshData} />);
+      }
       return;
     }
     case 'WIDGET_UPDATE':
     case 'WIDGET_RESIZED': {
-      // Always fetch fresh on WIDGET_UPDATE â€” the FCM push told us
-      // something changed, so reading stale cache defeats the purpose.
-      const data = await buildWidgetData(true);
+      // Cache-first: render from local cache immediately. The cache is
+      // kept up-to-date by HomeScreen refresh, FCM background handler,
+      // and ChannelsScreen add/remove. A fresh server fetch is slower
+      // and can time out, leaving the widget blank.
+      const data = await buildWidgetData(false);
       props.renderWidget(<Widget {...data} />);
       return;
     }
@@ -349,5 +375,35 @@ export async function widgetTaskHandler(props) {
     default:
       props.renderWidget(<TubePulseWidget channels={[]} />);
       return;
+  }
+}
+
+/**
+ * Request widget update from app code (HomeScreen, ChannelsScreen, etc).
+ *
+ * This wraps react-native-android-widget's requestWidgetUpdate with
+ * the correct renderWidget callback. Without the callback, the library
+ * finds widget instances but cannot render them — drawWidgetById is
+ * never called and the widget doesn't update.
+ *
+ * @param {string} reason - Brief label for debugging (e.g. 'channel-added')
+ */
+export async function updateWidget(reason = 'app') {
+  try {
+    const { requestWidgetUpdate } = require('react-native-android-widget');
+    const data = await buildWidgetData(false);
+    console.log(`[Widget] updateWidget('${reason}'): ${data.channels.length} channel(s)`);
+    await requestWidgetUpdate({
+      widgetName: 'TubePulseWidget',
+      renderWidget: async () => {
+        return <TubePulseWidget {...data} />;
+      },
+      widgetNotFound: () => {
+        console.log(`[Widget] updateWidget('${reason}'): no widget instances on home screen`);
+      },
+    });
+    console.log(`[Widget] updateWidget('${reason}'): done`);
+  } catch (e) {
+    console.warn(`[Widget] updateWidget('${reason}'): failed`, e?.message || e);
   }
 }

@@ -12,6 +12,25 @@ import { requestPermissionAndGetToken, onTokenRefresh, onForegroundMessage, onNo
 import { registerDevice, markSeen, getDeviceId, subscribeChannel, updateSettings, bootstrapChannel } from './src/utils/api';
 import { setupNotificationChannel } from './src/utils/notifications';
 import { ConfirmHost } from './src/components/Confirm';
+import { updateWidget } from './src/components/widgetTaskHandler';
+
+// Configure expo-notifications to show notifications while the app is
+// in the foreground. Without this, scheduleNotificationAsync calls
+// made from the onForegroundMessage handler will not display a banner/sound.
+// This must be set at the top level, before any component renders.
+try {
+  const Notifications = require('expo-notifications');
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+} catch (e) {
+  console.warn('Failed to set expo-notifications handler:', e);
+}
 
 const Stack = createNativeStackNavigator();
 
@@ -102,10 +121,7 @@ setBackgroundMessageHandler(async (remoteMessage) => {
     // whatever is in the cache and re-render. If the cache is unchanged,
     // the widget still re-renders to a no-op state but at least stays
     // consistent.
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
+    try { await updateWidget('bg-push'); } catch {}
   } catch (e) {
     console.warn('Background push handler failed:', e);
   }
@@ -295,8 +311,43 @@ export default function App() {
     });
 
     // Handle foreground messages
+    // When the app is in the foreground, FCM does NOT automatically show
+    // a system notification. We must explicitly display one using
+    // expo-notifications' scheduleNotificationAsync.
     const foregroundUnsubscribe = onForegroundMessage(async (remoteMessage) => {
-      console.log('Foreground push:', remoteMessage?.data?.videoId);
+      console.log('Foreground push:', remoteMessage?.data?.videoId || remoteMessage?.data?.activityId);
+      try {
+        const Notifications = require('expo-notifications');
+        const data = remoteMessage?.data || {};
+        const title = remoteMessage?.notification?.title || 'TubePulse';
+        const body = remoteMessage?.notification?.body || '';
+        // Use the same channel as the FCM payload for consistency.
+        // Nag/reminder pushes and new-content pushes both use 'new-videos'.
+        const channelId = data.type === 'nag' ? 'new-videos' : 'new-videos';
+        // Build a stable notification identifier to avoid duplicates
+        // if the same push is somehow received twice.
+        const notifId = data.videoId
+          ? `fg-video-${data.videoId}`
+          : data.activityId
+            ? `fg-post-${data.activityId}`
+            : `fg-${remoteMessage?.messageId || Date.now()}`;
+        await Notifications.scheduleNotificationAsync({
+          identifier: notifId,
+          content: {
+            title,
+            body,
+            data,
+            sound: 'default',
+          },
+          trigger: {
+            channelId,
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: 1,
+          },
+        });
+      } catch (e) {
+        console.warn('Foreground notification display failed:', e);
+      }
     });
 
     // Handle notification tap (app opened from notification)
@@ -428,11 +479,7 @@ export default function App() {
           }
         }
 
-        // Update widget
-        try {
-          const { requestWidgetUpdate } = require('react-native-android-widget');
-          await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-        } catch {}
+        try { await updateWidget('notif-tap'); } catch {}
       } catch (e) {
         console.warn('Notification tap error:', e);
       }

@@ -26,6 +26,7 @@ import {
   sortPostsNewestFirst,
   sortVideosNewestFirst,
 } from '../utils/feedPresentation';
+import { updateWidget } from '../components/widgetTaskHandler';
 
 const THUMB_UP_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#666666" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
   <path d="M7 22V11" />
@@ -223,10 +224,7 @@ export default function HomeScreen({ navigation }) {
     }
     setRefreshing(false);
 
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
+    try { await updateWidget('home-refresh'); } catch {}
   }, []); // stable: no deps, uses cacheRef
 
   const autoFetch = useCallback(async () => {
@@ -277,10 +275,7 @@ export default function HomeScreen({ navigation }) {
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         refresh();
-        try {
-          const { requestWidgetUpdate } = require('react-native-android-widget');
-          requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-        } catch {}
+        try { updateWidget('app-active'); } catch {}
       }
     });
 
@@ -477,12 +472,7 @@ export default function HomeScreen({ navigation }) {
     // app backgrounds and refresh() fires on return.
     await markAllSeen({ handle: channel.handle, channelId: channel.channelId });
 
-    // Update widget BEFORE opening YouTube so the widget reflects the
-    // seen state change by the time the app backgrounds.
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
+    try { await updateWidget('channel-open'); } catch {}
 
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
   };
@@ -498,11 +488,7 @@ export default function HomeScreen({ navigation }) {
       }
     }
 
-    // Update widget BEFORE opening external link
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
+    try { await updateWidget('handle-tap'); } catch {}
 
     if (settings.tapAction === 'channel') {
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
@@ -521,12 +507,7 @@ export default function HomeScreen({ navigation }) {
 
     await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: video, type: 'video' });
 
-    // Update widget BEFORE opening YouTube so the widget reflects the
-    // seen state change by the time the app backgrounds.
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
+    try { await updateWidget('video-tap'); } catch {}
 
     Linking.openURL(video.link);
   };
@@ -543,12 +524,7 @@ export default function HomeScreen({ navigation }) {
 
     await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: post, type: 'post' });
 
-    // Update widget BEFORE opening YouTube so the widget reflects the
-    // seen state change by the time the app backgrounds.
-    try {
-      const { requestWidgetUpdate } = require('react-native-android-widget');
-      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-    } catch {}
+    try { await updateWidget('post-tap'); } catch {}
 
     Linking.openURL(post.link);
   };

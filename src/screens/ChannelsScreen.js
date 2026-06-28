@@ -27,6 +27,7 @@ import { resolveHandle, subscribeChannel, unsubscribeChannel, registerDevice, ge
 import { getFCMToken } from '../utils/fcm';
 import TimeSpinner from '../components/TimeSpinner';
 import { confirm } from '../components/Confirm';
+import { updateWidget } from '../components/widgetTaskHandler';
 
 // Default per-channel settings (mirrors global defaults)
 const DEFAULT_CHANNEL_NOTIF = {
@@ -255,11 +256,14 @@ export default function ChannelsScreen() {
         console.warn('Bootstrap fetch failed:', e);
       }
 
-      // Update widget
-      try {
-        const { requestWidgetUpdate } = require('react-native-android-widget');
-        await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
-      } catch {}
+      // Update widget after bootstrap completes so the cache has
+      // avatar + latest video + thumbnail data ready for the widget.
+      try { await updateWidget('channel-added'); } catch {}
+
+      // Schedule a second widget update after 3 seconds to catch
+      // any server-side data that arrived slightly after bootstrap
+      // (e.g. the cron may have populated channel:recent in between).
+      setTimeout(() => { try { updateWidget('channel-added-delayed'); } catch {} }, 3000);
 
     } catch (err) {
       setAddError(`Something went wrong. Check your connection and try again.`);
@@ -281,6 +285,25 @@ export default function ChannelsScreen() {
       await saveChannels(updated);
       setChannels(updated);
 
+      // Clean up cache entry for the removed channel so the widget
+      // and HomeScreen don't keep showing stale data.
+      try {
+        const cache = await getChannelCache();
+        if (cache[handle]) {
+          delete cache[handle];
+          await saveChannelCache(cache);
+          setCache({ ...cache });
+        }
+        // Clean up lastSeen entry too
+        const lastSeen = await getLastSeen();
+        if (lastSeen[handle]) {
+          delete lastSeen[handle];
+          await saveLastSeen(lastSeen);
+        }
+      } catch (e) {
+        console.warn('Failed to clean up cache for removed channel:', e);
+      }
+
       // Unsubscribe from server
       try {
         const deviceId = await getDeviceId();
@@ -290,6 +313,9 @@ export default function ChannelsScreen() {
       } catch (e) {
         console.warn('Failed to unsubscribe from server:', e);
       }
+
+      // Update widget after channel removal
+      try { await updateWidget('channel-added'); } catch {}
     });
   };
 
