@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { Linking } from 'react-native';
 import { TubePulseWidget } from './TubePulseWidget';
 import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
@@ -10,7 +10,6 @@ import {
   sortPostsNewestFirst,
   sortVideosNewestFirst,
 } from '../utils/feedPresentation';
-
 const nameToWidget = {
   TubePulseWidget: TubePulseWidget,
 };
@@ -126,7 +125,7 @@ async function buildWidgetData(fetchFresh = false) {
           }
         }
       } catch {
-        // Network failed — fall through to whatever cache we have
+        // Network failed â€” fall through to whatever cache we have
       }
     }
 
@@ -157,7 +156,7 @@ async function buildWidgetData(fetchFresh = false) {
       const unseenCount = unseenVideos.length + unseenPosts.length;
       const hasNew = unseenCount > 0;
 
-      // Build video rows — show only the latest video (matching the
+      // Build video rows â€” show only the latest video (matching the
       // bootstrap behaviour of 1 video per channel). Seen videos
       // are dimmed; only genuinely new uploads appear as "New".
       const videosToShow = unseenVideos.length > 0
@@ -170,7 +169,7 @@ async function buildWidgetData(fetchFresh = false) {
         handle: ch.handle,
       }));
 
-      // Build post rows — show only the latest post (if any)
+      // Build post rows â€” show only the latest post (if any)
       const postsToShow = unseenPosts.length > 0
         ? unseenPosts
         : (persistent?.type === 'post' ? [persistent.item] : []);
@@ -194,6 +193,8 @@ async function buildWidgetData(fetchFresh = false) {
         posts: postRows,
       };
     });
+
+    return { channels: widgetChannels };
 
     return { channels: widgetChannels };
   } catch {
@@ -294,7 +295,7 @@ export async function widgetTaskHandler(props) {
     }
     case 'WIDGET_UPDATE':
     case 'WIDGET_RESIZED': {
-      // Always fetch fresh on WIDGET_UPDATE — the FCM push told us
+      // Always fetch fresh on WIDGET_UPDATE â€” the FCM push told us
       // something changed, so reading stale cache defeats the purpose.
       const data = await buildWidgetData(true);
       props.renderWidget(<Widget {...data} />);
@@ -317,7 +318,7 @@ export async function widgetTaskHandler(props) {
           } catch {}
         }
       } else if (action === 'POST_CLICK') {
-        // Post tap — mark just this post seen, open community tab.
+        // Post tap â€” mark just this post seen, open community tab.
         if (clickData.postId && clickData.handle) {
           try {
             await markWidgetPostSeen(clickData.handle, clickData.postId);

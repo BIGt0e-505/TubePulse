@@ -92,8 +92,8 @@ android {
         applicationId 'com.tubepulse.app'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 337
-        versionName "3.3.3"
+        versionCode 341
+        versionName "3.3.4-dev-nag2"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }

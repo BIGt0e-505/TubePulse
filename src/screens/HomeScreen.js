@@ -477,30 +477,39 @@ export default function HomeScreen({ navigation }) {
     // app backgrounds and refresh() fires on return.
     await markAllSeen({ handle: channel.handle, channelId: channel.channelId });
 
-    Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
+    // Update widget BEFORE opening YouTube so the widget reflects the
+    // seen state change by the time the app backgrounds.
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
+
+    Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
   };
 
   const handleTap = async (channel) => {
 
     if (settings.tapAction === 'channel') {
       await markAllSeen({ handle: channel.handle, channelId: channel.channelId });
-      Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     } else {
       const video = getCurrentVideo(channel.handle);
       if (video) {
         await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: video, type: 'video' });
-        Linking.openURL(video.link);
       }
     }
 
+    // Update widget BEFORE opening external link
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
+
+    if (settings.tapAction === 'channel') {
+      Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
+    } else {
+      const video = getCurrentVideo(channel.handle);
+      if (video) Linking.openURL(video.link);
+    }
   };
 
   const handleVideoTap = async (channel, video) => {
@@ -512,11 +521,14 @@ export default function HomeScreen({ navigation }) {
 
     await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: video, type: 'video' });
 
-    Linking.openURL(video.link);
+    // Update widget BEFORE opening YouTube so the widget reflects the
+    // seen state change by the time the app backgrounds.
     try {
       const { requestWidgetUpdate } = require('react-native-android-widget');
       await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
     } catch {}
+
+    Linking.openURL(video.link);
   };
 
   const handlePostTap = async (channel, post) => {
@@ -530,6 +542,13 @@ export default function HomeScreen({ navigation }) {
     if (!postKey) return;
 
     await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: post, type: 'post' });
+
+    // Update widget BEFORE opening YouTube so the widget reflects the
+    // seen state change by the time the app backgrounds.
+    try {
+      const { requestWidgetUpdate } = require('react-native-android-widget');
+      await requestWidgetUpdate({ widgetName: 'TubePulseWidget' });
+    } catch {}
 
     Linking.openURL(post.link);
   };

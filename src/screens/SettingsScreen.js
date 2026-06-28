@@ -76,27 +76,40 @@ export default function SettingsScreen() {
       </View>
       <Text style={styles.guidance}>
         {mode === 'chill'
-          ? 'Chill: notify once, then nudge every 4 hours until you watch it.'
+          ? 'Chill: notify once, then remind roughly every 4 hours until you watch it.'
           : "Relentless: remind you every nag interval until you've watched it."}
       </Text>
 
       {/* Nag Interval */}
-      <Text style={styles.sectionTitle}>Nag interval</Text>
-      <View style={styles.optionGroup}>
+      <Text style={[styles.sectionTitle, mode === 'chill' && styles.sectionTitleDisabled]}>Nag interval</Text>
+      <View style={styles.optionGroup} pointerEvents={mode === 'chill' ? 'none' : 'auto'}>
         {NAG_INTERVALS.map(({ label, value }) => (
           <TouchableOpacity
             key={value}
-            style={[styles.option, settings.nagInterval === value && styles.optionActive]}
+            style={[
+              styles.option,
+              settings.nagInterval === value && styles.optionActive,
+              mode === 'chill' && styles.optionDisabled,
+            ]}
             onPress={() => updateSetting('nagInterval', value)}
+            disabled={mode === 'chill'}
           >
-            <Text style={[styles.optionText, settings.nagInterval === value && styles.optionTextActive]}>
+            <Text style={[
+              styles.optionText,
+              settings.nagInterval === value && styles.optionTextActive,
+              mode === 'chill' && styles.optionTextDisabled,
+            ]}>
               {label}
             </Text>
           </TouchableOpacity>
         ))}
       </View>
       <Text style={styles.guidance}>
-        Minimum time between notifications for the same unwatched video.
+        {mode === 'chill'
+          ? 'Chill mode reminds roughly every 4 hours. Nag interval only applies to Relentless mode.'
+          : settings.nagInterval === 5
+            ? '5-minute reminders run for the first hour, then back off to 15 minutes.'
+            : 'Relentless mode repeats reminders using the selected interval while items remain unread.'}
       </Text>
 
       {/* Do Not Disturb */}
@@ -221,6 +234,15 @@ const styles = StyleSheet.create({
   },
   sectionTitleFirst: {
     marginTop: 4,
+  },
+  sectionTitleDisabled: {
+    opacity: 0.4,
+  },
+  optionDisabled: {
+    opacity: 0.35,
+  },
+  optionTextDisabled: {
+    opacity: 0.5,
   },
   optionGroup: {
     flexDirection: 'row',
