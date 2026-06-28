@@ -1738,6 +1738,13 @@ async function handleWebSubPush(request, env, ctx) {
 
         const result = await sendFCMPush(accessToken, projectId, fcmToken, notifPayload);
 
+        if (result.sent) {
+          // Initialise the nag clock so runNagCron doesn't immediately
+          // re-notify on the next 5-min tick.
+          state.lastNagAt = Date.now();
+          await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+        }
+
         if (result.deadToken) {
           // FCM has confirmed the device is gone (UNREGISTERED). Run the
           // full cleanup: remove from every channel's subscribers, clean

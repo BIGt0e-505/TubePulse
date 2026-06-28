@@ -1242,6 +1242,11 @@ async function runCommunityPostsCron(env, ctx) {
               const sendResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
               if (sendResult.sent) {
                 notifStats.fcmSent++;
+                // Initialise the nag clock so runNagCron doesn't immediately
+                // re-notify on the next 5-min tick. The initial push counts as
+                // the start of the reminder cycle, not as a nag.
+                state.lastNagAt = Date.now();
+                await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
               } else {
                 notifStats.fcmFailed++;
                 notifStats.fcmFailureSummary = sendResult.status
@@ -1415,30 +1420,72 @@ async function runNagCron(env, ctx) {
 
       const stillUnwatched = state.unwatched;
 
+      // Classify unread items: posts use "post:" prefix, everything else is a video
+      const postIds = stillUnwatched.filter((id) => id.startsWith('post:'));
+      const videoIds = stillUnwatched.filter((id) => !id.startsWith('post:'));
+      const hasPosts = postIds.length > 0;
+      const hasVideos = videoIds.length > 0;
+
+      // Look up post data from cached community posts
+      const recentPosts = await getKV(env.TUBEPULSE_KV, key.channelRecentPosts(channelId)) || [];
+
       let notifPayload;
       if (stillUnwatched.length === 1) {
-        const videoId = stillUnwatched[0];
-        const video = recent?.find((v) => v.videoId === videoId);
-        notifPayload = {
-          title: `${channelName} - reminder`,
-          body: video?.title || 'Unwatched video',
-          data: {
-            videoId,
-            channelId,
-            channelName,
-            videoLink: video?.link || `https://www.youtube.com/watch?v=${videoId}`,
-            type: 'nag',
-          },
-          tag: `video-${videoId}`,
-        };
+        const itemId = stillUnwatched[0];
+        if (itemId.startsWith('post:')) {
+          // Single community post nag
+          const activityId = itemId.slice(5);
+          const post = recentPosts.find((p) => p.activityId === activityId);
+          const postLabel = post?.kind === 'poll' ? 'poll'
+            : post?.kind === 'image' ? 'image post'
+            : 'community post';
+          notifPayload = {
+            title: `${channelName} - reminder`,
+            body: post?.text?.slice(0, 100) || `Unread ${postLabel}`,
+            data: {
+              type: 'nag',
+              channelId,
+              channelName,
+              activityId,
+              postKind: post?.kind || '',
+              postLink: `https://www.youtube.com/channel/${channelId}/community`,
+            },
+            tag: `tubepulse-nag-${channelId}`,
+          };
+        } else {
+          // Single video nag
+          const video = recent?.find((v) => v.videoId === itemId);
+          notifPayload = {
+            title: `${channelName} - reminder`,
+            body: video?.title || 'Unwatched video',
+            data: {
+              videoId: itemId,
+              channelId,
+              channelName,
+              videoLink: video?.link || `https://www.youtube.com/watch?v=${itemId}`,
+              type: 'nag',
+            },
+            tag: `video-${itemId}`,
+          };
+        }
       } else {
+        // Multi-item nag — choose wording based on content mix
+        let body;
+        if (hasPosts && hasVideos) {
+          body = `You have ${videoIds.length} unwatched video${videoIds.length > 1 ? 's' : ''} and ${postIds.length} unread community post${postIds.length > 1 ? 's' : ''}`;
+        } else if (hasPosts) {
+          body = `You have ${postIds.length} unread community post${postIds.length > 1 ? 's' : ''}`;
+        } else {
+          body = 'You have videos waiting';
+        }
         notifPayload = {
-          title: `${channelName} - ${stillUnwatched.length} unwatched`,
-          body: 'You have videos waiting',
+          title: `${channelName} - ${stillUnwatched.length} unread`,
+          body,
           data: {
             type: 'batch',
             count: String(stillUnwatched.length),
             channelId,
+            channelName,
           },
           tag: `tubepulse-nag-${channelId}`,
         };
@@ -1827,6 +1874,13 @@ async function runRssPollCron(env, ctx) {
           const pushResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
           if (pushResult.deadToken) {
             deadDevices.push(deviceId);
+          }
+          if (pushResult.sent) {
+            // Initialise the nag clock so runNagCron doesn't immediately
+            // re-notify on the next 5-min tick. The initial push counts as
+            // the start of the reminder cycle, not as a nag.
+            state.lastNagAt = Date.now();
+            await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
           }
         }
 
