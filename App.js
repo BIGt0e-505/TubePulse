@@ -321,19 +321,38 @@ export default function App() {
         const data = remoteMessage?.data || {};
         const title = remoteMessage?.notification?.title || 'TubePulse';
         const body = remoteMessage?.notification?.body || '';
-        // Use the same channel as the FCM payload for consistency.
-        // Nag/reminder pushes and new-content pushes both use 'new-videos'.
-        const channelId = data.type === 'nag' ? 'new-videos' : 'new-videos';
+        const channelId = 'new-videos';
         // Use the notificationTag from the FCM payload if provided.
-        // This aligns foreground local notifications with background FCM
-        // notifications so they replace each other instead of stacking.
-        const notifId = data.notificationTag
-          ? `fg-${data.notificationTag}`
-          : data.videoId
-            ? `fg-video-${data.videoId}`
-            : data.activityId
-              ? `fg-post-${data.activityId}`
-              : `fg-${remoteMessage?.messageId || Date.now()}`;
+        const notifTag = data.notificationTag
+          || (data.videoId ? `video-${data.videoId}` : null)
+          || (data.activityId ? `post-${data.activityId}` : null)
+          || null;
+        const notifId = notifTag ? `fg-${notifTag}` : `fg-${remoteMessage?.messageId || Date.now()}`;
+
+        // Dismiss any already-delivered TubePulse notifications for the
+        // same item before scheduling the replacement. Without this,
+        // each foreground reminder creates a new row in the notification
+        // shade because scheduleNotificationAsync's identifier only
+        // dedupes pending (not yet delivered) notifications.
+        try {
+          const presented = await Notifications.getPresentedNotificationsAsync();
+          for (const n of presented) {
+            const nData = n?.request?.content?.data || {};
+            const nTag = nData.notificationTag
+              || (nData.videoId ? `video-${nData.videoId}` : null)
+              || (nData.activityId ? `post-${nData.activityId}` : null)
+              || null;
+            // Dismiss if same item tag, or if both are TubePulse
+            // notifications with the same channelId (catches batch/nag
+            // replacements for the same channel).
+            if (nTag && notifTag && nTag === notifTag) {
+              await Notifications.dismissNotificationAsync(n.request.identifier);
+            }
+          }
+        } catch (e) {
+          // Non-critical — continue with scheduling
+        }
+
         await Notifications.scheduleNotificationAsync({
           identifier: notifId,
           content: {
