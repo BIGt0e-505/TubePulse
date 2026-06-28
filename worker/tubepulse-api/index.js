@@ -1141,11 +1141,13 @@ async function handleSeen(request, env) {
   if (!clearAll && !Array.isArray(videoIds)) return errorResponse('Provide videoIds array or clearAll: true');
 
   const existingState = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
-  const state = existingState || {
-    unwatched: [],
-    lastNagAt: null,
-    nagCount: 0,
-  };
+  // IMPORTANT: create a NEW object, not a reference to existingState.
+  // putKVIfChanged compares state vs existingState — if they're the same
+  // object reference, jsonEqual returns true and the write is silently
+  // skipped, even though we mutated state.unwatched in-place.
+  const state = existingState
+    ? { ...existingState, unwatched: [...(existingState.unwatched || [])] }
+    : { unwatched: [], lastNagAt: null, nagCount: 0 };
 
   if (clearAll) {
     state.unwatched = [];

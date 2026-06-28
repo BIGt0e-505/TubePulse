@@ -51,6 +51,11 @@ export default function HomeScreen({ navigation }) {
   // (depending on `cache` directly caused an infinite re-render loop
   //  because setCache -> new refresh -> new useEffect -> new autoFetch -> new setCache)
   const cacheRef = useRef({});
+  // Track IDs that were recently marked seen locally, so that refresh()
+  // (fired by AppState 'active' or useFocusEffect when returning from
+  // YouTube) doesn't overwrite the optimistic clear before markSeen
+  // has been processed server-side.
+  const recentlySeenRef = useRef(new Set());
 
   const loadData = useCallback(async () => {
     const [ch, s, ls, ca] = await Promise.all([
@@ -69,6 +74,14 @@ export default function HomeScreen({ navigation }) {
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
+    // Snapshot the recentlySeenRef at the start of this refresh cycle.
+    // At the end of refresh, we clear recentlySeenRef for any IDs where
+    // the server confirmed unwatched:false — those are persisted and no
+    // longer need the race guard. IDs where the server still says
+    // unwatched:true (markSeen still in-flight) are kept for the next
+    // cycle. This prevents recentlySeenRef from accumulating stale IDs
+    // that suppress blue dots on unrelated refreshes (e.g. mode switch).
+    const seenSnapshot = new Set(recentlySeenRef.current);
     try {
       const deviceId = await getDeviceId();
       if (deviceId) {
@@ -97,7 +110,13 @@ export default function HomeScreen({ navigation }) {
               thumbnail: v.thumbnail,
               link: v.link,
               type: v.type,
-              unwatched: v.unwatched,
+              // Race guard: if this ID was recently marked seen locally
+              // (tap in this session), keep it seen even if the server
+              // still reports unwatched (markSeen may still be in-flight).
+              // The snapshot is cleared at the end of refresh for IDs the
+              // server confirms as seen, so this only affects the immediate
+              // post-tap refresh cycle.
+              unwatched: seenSnapshot.has(v.videoId) ? false : v.unwatched,
               views: v.views || existingByVideoId.get(v.videoId)?.views || '0',
               likes: v.likes ?? existingByVideoId.get(v.videoId)?.likes ?? 0,
               dislikes: v.dislikes ?? existingByVideoId.get(v.videoId)?.dislikes ?? 0,
@@ -105,7 +124,11 @@ export default function HomeScreen({ navigation }) {
 
             // Posts come from the server already filtered by the global +
             // per-channel override. Empty array when disabled or absent.
-            const posts = serverChannel.posts || [];
+            // Override unwatched for recently-seen posts (race guard).
+            const posts = (serverChannel.posts || []).map((p) => ({
+              ...p,
+              unwatched: seenSnapshot.has(getPostSeenId(p)) ? false : p.unwatched,
+            }));
 
             // Use the ref so this callback stays stable across renders
             const existingEntry = cacheRef.current[handle] || {};
@@ -146,12 +169,15 @@ export default function HomeScreen({ navigation }) {
             const seenIds = new Set(lastSeen[handle].seenIds || []);
 
             // Videos/posts NOT in unwatched are seen.
-            for (const v of (serverChannel.videos || [])) {
+            // Use the already-guarded `videos`/`posts` arrays (which had
+            // the seenSnapshot guard applied) so lastSeen stays consistent
+            // with what the UI shows.
+            for (const v of videos) {
               if (!v.unwatched && v.videoId) {
                 seenIds.add(v.videoId);
               }
             }
-            for (const p of (serverChannel.posts || [])) {
+            for (const p of posts) {
               if (!p.unwatched && p.activityId) {
                 seenIds.add(`post:${p.activityId}`);
               }
@@ -160,6 +186,29 @@ export default function HomeScreen({ navigation }) {
           }
           await saveLastSeen(lastSeen);
           setLastSeen(lastSeen);
+
+          // Prune recentlySeenRef: remove IDs the server now confirms as
+          // seen (unwatched:false). Keep IDs where the server still says
+          // unwatched:true — markSeen may still be in-flight.
+          // This prevents stale entries from suppressing blue dots on
+          // unrelated refreshes (e.g. returning from settings after a
+          // mode switch).
+          let prunedCount = 0;
+          for (const serverChannel of result.channels) {
+            for (const v of (serverChannel.videos || [])) {
+              if (!v.unwatched && seenSnapshot.has(v.videoId)) {
+                recentlySeenRef.current.delete(v.videoId);
+                prunedCount++;
+              }
+            }
+            for (const p of (serverChannel.posts || [])) {
+              const pid = getPostSeenId(p);
+              if (!p.unwatched && pid && seenSnapshot.has(pid)) {
+                recentlySeenRef.current.delete(pid);
+                prunedCount++;
+              }
+            }
+          }
         }
       } else {
         const ca = await getChannelCache();
@@ -305,43 +354,106 @@ export default function HomeScreen({ navigation }) {
     return persistent?.type === 'video' ? persistent.item : null;
   };
 
-  const handleChannelOpen = async (channel) => {
-    const key = channel.handle;
-    const updatedLastSeen = { ...lastSeen };
-    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
-    const allIds = getVideos(key).map(v => v.videoId);
-    const allPostIds = getPosts(key).map(getPostSeenId).filter(Boolean);
-    const existing = updatedLastSeen[key].seenIds || [];
-    updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds, ...allPostIds])] };
-    await saveLastSeen(updatedLastSeen);
-    setLastSeen(updatedLastSeen);
+  // Central helper: mark a single item seen locally + remotely.
+  // Used by all tap paths (video mode, channel mode, post tap).
+  // - Computes the canonical seen ID
+  // - Adds to recentlySeenRef so refresh() doesn't reintroduce it
+  // - Optimistically updates local cache (cacheRef + setCache + saveChannelCache)
+  // - Awaits markSeen before returning (so caller can open URL after server confirms)
+  const markItemSeen = async ({ handle, channelId, item, type }) => {
+    const seenId = type === 'post' ? getPostSeenId(item) : item?.videoId;
+    if (!seenId) return;
 
-    // Server clear-all also wipes post entries (they share the
-    // deviceState.unwatched list), so update the local cache to keep
-    // the UI consistent before the next /feed refresh.
-    const cached = cacheRef.current[key];
+    // 1. Add to recentlySeenRef (guard against refresh overwrite)
+    recentlySeenRef.current.add(seenId);
+
+    // 2. Update lastSeen
+    const ls = await getLastSeen();
+    if (!ls[handle]) ls[handle] = { seenIds: [] };
+    if (!ls[handle].seenIds.includes(seenId)) {
+      ls[handle] = { seenIds: [...ls[handle].seenIds, seenId] };
+      await saveLastSeen(ls);
+      setLastSeen(ls);
+    }
+
+    // 3. Optimistically update local cache
+    const cached = cacheRef.current[handle];
     if (cached) {
-      const updatedCache = { ...cacheRef.current, [key]: { ...cached } };
-      let changed = false;
+      let updatedCache = { ...cacheRef.current, [handle]: { ...cached } };
+      if (type === 'post' && cached.posts) {
+        updatedCache[handle] = {
+          ...updatedCache[handle],
+          posts: cached.posts.map((p) =>
+            p.activityId === item.activityId ? { ...p, unwatched: false } : p
+          ),
+        };
+      } else if (cached.videos) {
+        updatedCache[handle] = {
+          ...updatedCache[handle],
+          videos: cached.videos.map((v) =>
+            v.videoId === seenId ? { ...v, unwatched: false } : v
+          ),
+        };
+      }
+      cacheRef.current = updatedCache;
+      setCache(updatedCache);
+      try { await saveChannelCache(updatedCache); } catch {}
+    }
 
-      // Mark all videos as watched
+    // 4. Await markSeen on the server
+    const deviceId = await getDeviceId();
+    try {
+      await markSeen(deviceId, channelId, [seenId]);
+    } catch (e) {
+      console.warn('[seen] markSeen threw', seenId, e?.message || e);
+    }
+  };
+
+  // Central helper: mark ALL items for a channel as seen (clearAll).
+  // Used by channel-mode taps where we wipe everything and open the channel page.
+  const markAllSeen = async ({ handle, channelId }) => {
+
+    // Add all current video/post IDs to recentlySeenRef
+    const allVideos = getVideos(handle);
+    const allPosts = getPosts(handle);
+    for (const v of allVideos) {
+      if (v.videoId) recentlySeenRef.current.add(v.videoId);
+    }
+    for (const p of allPosts) {
+      const pid = getPostSeenId(p);
+      if (pid) recentlySeenRef.current.add(pid);
+    }
+
+    // Update lastSeen
+    const ls = await getLastSeen();
+    if (!ls[handle]) ls[handle] = { seenIds: [] };
+    const allIds = [
+      ...allVideos.map(v => v.videoId).filter(Boolean),
+      ...allPosts.map(getPostSeenId).filter(Boolean),
+    ];
+    ls[handle] = { seenIds: [...new Set([...(ls[handle].seenIds || []), ...allIds])] };
+    await saveLastSeen(ls);
+    setLastSeen(ls);
+
+    // Optimistically clear local cache
+    const cached = cacheRef.current[handle];
+    if (cached) {
+      let updatedCache = { ...cacheRef.current, [handle]: { ...cached } };
+      let changed = false;
       if (cached.videos?.some((v) => v.unwatched)) {
-        updatedCache[key] = {
-          ...updatedCache[key],
+        updatedCache[handle] = {
+          ...updatedCache[handle],
           videos: cached.videos.map((v) => ({ ...v, unwatched: false })),
         };
         changed = true;
       }
-
-      // Mark all posts as watched
       if (cached.posts?.some(isPostUnwatched)) {
-        updatedCache[key] = {
-          ...updatedCache[key],
+        updatedCache[handle] = {
+          ...updatedCache[handle],
           posts: cached.posts.map((p) => ({ ...p, unwatched: false })),
         };
         changed = true;
       }
-
       if (changed) {
         cacheRef.current = updatedCache;
         setCache(updatedCache);
@@ -349,10 +461,21 @@ export default function HomeScreen({ navigation }) {
       }
     }
 
+    // Await markSeen clearAll on server
     const deviceId = await getDeviceId();
-    markSeen(deviceId, channel.channelId, [], true).catch((e) => {
-      console.warn('[seen] markSeen clearAll failed for channel', channel.channelId, e?.message || e);
-    });
+    try {
+      await markSeen(deviceId, channelId, [], true);
+    } catch (e) {
+      console.warn('[seen] markSeen clearAll threw', channelId, e?.message || e);
+    }
+  };
+
+  const handleChannelOpen = async (channel) => {
+
+    // Mark all items seen (local + server) BEFORE opening YouTube.
+    // Awaiting ensures the server has processed clearAll before the
+    // app backgrounds and refresh() fires on return.
+    await markAllSeen({ handle: channel.handle, channelId: channel.channelId });
 
     Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     try {
@@ -362,79 +485,14 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleTap = async (channel) => {
-    const key = channel.handle;
-    const updatedLastSeen = { ...lastSeen };
-    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
 
     if (settings.tapAction === 'channel') {
-      const allIds = getVideos(key).map(v => v.videoId);
-      const allPostIds = getPosts(key).map(getPostSeenId).filter(Boolean);
-      const existing = updatedLastSeen[key].seenIds || [];
-      updatedLastSeen[key] = { seenIds: [...new Set([...existing, ...allIds, ...allPostIds])] };
-      await saveLastSeen(updatedLastSeen);
-      setLastSeen(updatedLastSeen);
-
-      // Server clear-all wipes both video and post entries. Mirror that locally.
-      const cached = cacheRef.current[key];
-      if (cached) {
-        const updatedCache = { ...cacheRef.current, [key]: { ...cached } };
-        let changed = false;
-
-        if (cached.videos?.some((v) => v.unwatched)) {
-          updatedCache[key] = {
-            ...updatedCache[key],
-            videos: cached.videos.map((v) => ({ ...v, unwatched: false })),
-          };
-          changed = true;
-        }
-        if (cached.posts?.some(isPostUnwatched)) {
-          updatedCache[key] = {
-            ...updatedCache[key],
-            posts: cached.posts.map((p) => ({ ...p, unwatched: false })),
-          };
-          changed = true;
-        }
-
-        if (changed) {
-          cacheRef.current = updatedCache;
-          setCache(updatedCache);
-          try { await saveChannelCache(updatedCache); } catch {}
-        }
-      }
-
-      const deviceId = await getDeviceId();
-      markSeen(deviceId, channel.channelId, [], true).catch((e) => {
-        console.warn('[seen] markSeen clearAll failed for channel', channel.channelId, e?.message || e);
-      });
-
+      await markAllSeen({ handle: channel.handle, channelId: channel.channelId });
       Linking.openURL(`https://www.youtube.com/@${channel.handle}`);
     } else {
-      const video = getCurrentVideo(key);
+      const video = getCurrentVideo(channel.handle);
       if (video) {
-        const seenIds = updatedLastSeen[key].seenIds || [];
-        if (!seenIds.includes(video.videoId)) {
-          updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
-        }
-        await saveLastSeen(updatedLastSeen);
-        setLastSeen(updatedLastSeen);
-
-        // Optimistically clear the blue dot in local cache
-        const cached = cacheRef.current[key];
-        if (cached?.videos) {
-          const updatedVideos = cached.videos.map((v) =>
-            v.videoId === video.videoId ? { ...v, unwatched: false } : v
-          );
-          const updatedCache = { ...cacheRef.current, [key]: { ...cached, videos: updatedVideos } };
-          cacheRef.current = updatedCache;
-          setCache(updatedCache);
-          try { await saveChannelCache(updatedCache); } catch {}
-        }
-
-        const deviceId = await getDeviceId();
-        markSeen(deviceId, channel.channelId, [video.videoId]).catch((e) => {
-          console.warn('[seen] markSeen failed for video', video.videoId, e?.message || e);
-        });
-
+        await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: video, type: 'video' });
         Linking.openURL(video.link);
       }
     }
@@ -446,44 +504,13 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleVideoTap = async (channel, video) => {
-    // When tapAction is 'channel', tapping a video row does the
-    // same as tapping the avatar/channel name: mark all seen +
-    // open the channel page. This makes the setting consistent
-    // across notifications, widget, and app feed.
+
     if (settings.tapAction === 'channel') {
       handleChannelOpen(channel);
       return;
     }
 
-    const key = channel.handle;
-    const updatedLastSeen = { ...lastSeen };
-    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
-    const seenIds = updatedLastSeen[key].seenIds || [];
-    if (!seenIds.includes(video.videoId)) {
-      updatedLastSeen[key] = { seenIds: [...seenIds, video.videoId] };
-      await saveLastSeen(updatedLastSeen);
-      setLastSeen(updatedLastSeen);
-    }
-
-    // Optimistically clear the blue dot by updating the local cache's
-    // unwatched flag, mirroring what handlePostTap does for posts.
-    // Without this, getUnseenVideos() still sees the video as unwatched
-    // and the blue dot never disappears until the next /feed refresh.
-    const cached = cacheRef.current[key];
-    if (cached?.videos) {
-      const updatedVideos = cached.videos.map((v) =>
-        v.videoId === video.videoId ? { ...v, unwatched: false } : v
-      );
-      const updatedCache = { ...cacheRef.current, [key]: { ...cached, videos: updatedVideos } };
-      cacheRef.current = updatedCache;
-      setCache(updatedCache);
-      try { await saveChannelCache(updatedCache); } catch {}
-    }
-
-    const deviceId = await getDeviceId();
-    markSeen(deviceId, channel.channelId, [video.videoId]).catch((e) => {
-      console.warn('[seen] markSeen failed for video', video.videoId, e?.message || e);
-    });
+    await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: video, type: 'video' });
 
     Linking.openURL(video.link);
     try {
@@ -493,43 +520,16 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handlePostTap = async (channel, post) => {
-    // When tapAction is 'channel', tapping a post does the same as
-    // tapping a video: mark all seen + open the channel page.
+    const postKey = getPostSeenId(post);
+
     if (settings.tapAction === 'channel') {
       handleChannelOpen(channel);
       return;
     }
 
-    // Default: mark this post as seen server-side and open it.
-    const key = channel.handle;
-    const postKey = getPostSeenId(post);
     if (!postKey) return;
-    const updatedLastSeen = { ...lastSeen };
-    if (!updatedLastSeen[key]) updatedLastSeen[key] = { seenIds: [] };
-    const seenIds = updatedLastSeen[key].seenIds || [];
-    if (!seenIds.includes(postKey)) {
-      updatedLastSeen[key] = { seenIds: [...seenIds, postKey] };
-      await saveLastSeen(updatedLastSeen);
-      setLastSeen(updatedLastSeen);
-    }
 
-    const cached = cacheRef.current[key];
-    if (cached?.posts) {
-      const updatedPosts = cached.posts.map((p) =>
-        p.activityId === post.activityId ? { ...p, unwatched: false } : p
-      );
-      const updatedCache = { ...cacheRef.current, [key]: { ...cached, posts: updatedPosts } };
-      cacheRef.current = updatedCache;
-      setCache(updatedCache);
-      try {
-        await saveChannelCache(updatedCache);
-      } catch {}
-    }
-
-    const deviceId = await getDeviceId();
-    markSeen(deviceId, channel.channelId, [postKey]).catch((e) => {
-      console.warn('[seen] markSeen failed for post', postKey, e?.message || e);
-    });
+    await markItemSeen({ handle: channel.handle, channelId: channel.channelId, item: post, type: 'post' });
 
     Linking.openURL(post.link);
   };
