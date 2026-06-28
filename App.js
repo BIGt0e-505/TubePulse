@@ -324,13 +324,16 @@ export default function App() {
         // Use the same channel as the FCM payload for consistency.
         // Nag/reminder pushes and new-content pushes both use 'new-videos'.
         const channelId = data.type === 'nag' ? 'new-videos' : 'new-videos';
-        // Build a stable notification identifier to avoid duplicates
-        // if the same push is somehow received twice.
-        const notifId = data.videoId
-          ? `fg-video-${data.videoId}`
-          : data.activityId
-            ? `fg-post-${data.activityId}`
-            : `fg-${remoteMessage?.messageId || Date.now()}`;
+        // Use the notificationTag from the FCM payload if provided.
+        // This aligns foreground local notifications with background FCM
+        // notifications so they replace each other instead of stacking.
+        const notifId = data.notificationTag
+          ? `fg-${data.notificationTag}`
+          : data.videoId
+            ? `fg-video-${data.videoId}`
+            : data.activityId
+              ? `fg-post-${data.activityId}`
+              : `fg-${remoteMessage?.messageId || Date.now()}`;
         await Notifications.scheduleNotificationAsync({
           identifier: notifId,
           content: {

@@ -1227,7 +1227,9 @@ async function runCommunityPostsCron(env, ctx) {
                 channelId,
                 activityId: post.activityId,
                 postKind: post.kind,
+                notificationTag: `post-${post.activityId}`,
               },
+              tag: `post-${post.activityId}`,
               token: profile.fcmToken,
             };
 
@@ -1412,9 +1414,19 @@ async function runNagCron(env, ctx) {
       // Timestamp-based interval check with backoff for relentless 5-min.
       // Relentless 5-min: 5-min for first hour (12 nags), then 15-min.
       // All other modes: use configured interval as-is.
+      //
+      // Tick alignment: Cloudflare cron fires roughly every 5 minutes
+      // but not exactly on the boundary. If lastNagAt was set at 19:07:02
+      // and the next cron fires at 19:11:58, the raw diff is 4m56s < 5m
+      // and the nag would skip, turning 5m into 10m. To fix this, we
+      // quantise lastNagAt to the 5-minute tick boundary before comparing.
+      // This means a nag sent during the 19:05-19:10 tick is treated as
+      // having been sent at 19:05, so the 19:10 tick sees 5m exactly.
+      const TICK_MS = 5 * 60 * 1000;
       const intervalMs = getNagIntervalMs(effective, state);
       const lastNagAt = state.lastNagAt || 0;
-      if (lastNagAt > 0 && (now - lastNagAt) < intervalMs) continue;
+      const lastNagTick = lastNagAt > 0 ? Math.floor(lastNagAt / TICK_MS) * TICK_MS : 0;
+      if (lastNagTick > 0 && (now - lastNagTick) < intervalMs) continue;
 
       if (!await ensureFcmAccess()) continue;
 
@@ -1449,8 +1461,9 @@ async function runNagCron(env, ctx) {
               activityId,
               postKind: post?.kind || '',
               postLink: `https://www.youtube.com/channel/${channelId}/community`,
+              notificationTag: `post-${activityId}`,
             },
-            tag: `tubepulse-nag-${channelId}`,
+            tag: `post-${activityId}`,
           };
         } else {
           // Single video nag
@@ -1464,6 +1477,7 @@ async function runNagCron(env, ctx) {
               channelName,
               videoLink: video?.link || `https://www.youtube.com/watch?v=${itemId}`,
               type: 'nag',
+              notificationTag: `video-${itemId}`,
             },
             tag: `video-${itemId}`,
           };
