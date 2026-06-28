@@ -1605,7 +1605,8 @@ async function handleWebSubPush(request, env, ctx) {
     const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
     const projectId = sa.project_id;
 
-    // Step 4: For each subscriber, send notification + update state + schedule nag
+    // Step 4: For each subscriber, send notification + update state.
+    // Nag scheduling is handled by the cron worker's runNagCron (timestamp-based).
     for (const deviceId of subs) {
       // Read profile + settings + override
       const [deviceProfile, deviceSettings, deviceOverride] = await Promise.all([
@@ -1740,26 +1741,7 @@ async function handleWebSubPush(request, env, ctx) {
         }
       }
 
-      // Schedule nag for unwatched videos
-      if (state.unwatched.length > 0 && shouldNotify) {
-        const nagIntervalMs = effective.nagInterval * 60 * 1000;
-        const nextNagTime = effective.mode === 'chill'
-          ? Date.now() + 4 * 60 * 60 * 1000  // 4 hours
-          : Date.now() + nagIntervalMs;
 
-        const bucket = nagBucket(nextNagTime);
-        const bucketData = await getKV(env.TUBEPULSE_KV, key.nag(bucket)) || [];
-        // Avoid duplicate entries
-        const exists = bucketData.some((e) => e.deviceId === deviceId && e.channelId === channelId);
-        if (!exists) {
-          bucketData.push({
-            deviceId,
-            channelId,
-            videoIds: [...state.unwatched],
-          });
-          await putKV(env.TUBEPULSE_KV, key.nag(bucket), bucketData);
-        }
-      }
     }
     } catch (err) {
       console.error('[WebSub] waitUntil CRASHED:', err && err.stack || err);

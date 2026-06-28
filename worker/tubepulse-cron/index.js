@@ -3,7 +3,7 @@
  *
  * Three scheduled jobs:
  *   - Every 5 min: Upcoming events (check time buckets for scheduled livestreams)
- *   - Every 15 min: Nag cycle (check nag buckets, re-notify unwatched videos)
+ *   - Every 5 min: Nag cycle (timestamp-based, re-notify unwatched videos)
  *   - Every 6h on the hour: Lease renewal (renew WebSub subscriptions expiring within 24h)
  *
  * Architecture: time-bucket driven. No KV.list() calls anywhere.
@@ -1300,157 +1300,152 @@ async function runCommunityPostsCron(env, ctx) {
 }
 
 async function runNagCron(env, ctx) {
-  const bucket = currentNagBucket();
-  const entries = await getKV(env.TUBEPULSE_KV, key.nag(bucket));
+  // Timestamp-based nag system (replaces the 15-min bucket system).
+  //
+  // The bucket system had two fatal bugs:
+  // 1. nagBucket() rounds to 15-min boundaries, so a 5-min nag interval
+  //    scheduled at :06+5=:11 rounded back to :00 - a bucket already
+  //    processed and deleted.
+  // 2. runNagCron only ran when mins%15===0, but the cron trigger fires
+  //    every 5 min. A 5-min nag interval was impossible.
+  //
+  // The new approach: on every cron tick (every 5 min), iterate all
+  // active channels and their subscribers. For each subscriber with
+  // unwatched items, check if enough time has passed since lastNagAt
+  // (using the device's nagInterval for relentless mode, or 4h for
+  // chill mode). If yes, send a nag push and update lastNagAt.
+  //
+  // This uses the existing state.lastNagAt field and eliminates all
+  // bucket KV reads/writes.
 
-  if (!entries || entries.length === 0) {
-    console.log(`[Nag] No nags at ${bucket}`);
-    return { fired: 0 };
+  const active = await getKV(env.TUBEPULSE_KV, key.channelsActive()) || [];
+  if (active.length === 0) {
+    console.log('[Nag] No active channels');
+    return { fired: 0, checked: 0 };
   }
 
-  console.log(`[Nag] ${entries.length} nag(s) at ${bucket}`);
+  const now = Date.now();
+  let accessToken = null;
+  let projectId = null;
+  const ensureFcmAccess = async () => {
+    if (accessToken && projectId) return true;
+    try {
+      accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
+      const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+      projectId = sa.project_id;
+      return true;
+    } catch (err) {
+      console.error('[Nag] FCM token error:', err);
+      return false;
+    }
+  };
 
-  let accessToken;
-  try {
-    accessToken = await getGoogleAccessToken(env.FIREBASE_SERVICE_ACCOUNT);
-  } catch (err) {
-    console.error('[Nag] FCM token error:', err);
-    return { fired: 0 };
-  }
-
-  const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
-  const projectId = sa.project_id;
   let fired = 0;
+  let checked = 0;
   const deadTokens = [];
 
-  for (const entry of entries) {
-    const { deviceId, channelId, videoIds: scheduledVideoIds } = entry;
+  for (const channelId of active) {
+    const subs = await getKV(env.TUBEPULSE_KV, key.channelSubs(channelId)) || [];
+    if (subs.length === 0) continue;
 
-    // Re-check state - videos may have been marked seen since bucket was written
-    const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
-    const stillUnwatched = scheduledVideoIds.filter(
-      (id) => state?.unwatched?.includes(id)
-    );
-
-    if (stillUnwatched.length === 0) {
-      continue; // All seen - skip
-    }
-
-    // Read device profile + settings + override
-    const [profile, settings, override] = await Promise.all([
-      getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId)),
-      getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)),
-      getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId)),
-    ]);
-
-    if (!profile?.fcmToken) continue;
-
-    const effective = {
-      mode: override?.mode || settings?.mode || 'chill',
-      nagInterval: override?.nagInterval || settings?.nagInterval || 15,
-      dndEnabled: settings?.dndEnabled || false,
-      dndStart: settings?.dndStart || '22:00',
-      dndEnd: settings?.dndEnd || '07:00',
-      dndTimezone: settings?.dndTimezone || 'UTC',
-      dndBypass: override?.dndBypass || false,
-      muted: override?.muted || false,
-      tapAction: settings?.tapAction || 'video',
-    };
-
-    if (effective.muted) continue;
-
-    // DND check
-    const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
-    if (dndActive && !effective.dndBypass) {
-      // Re-schedule nag for next bucket after DND ends
-      // (approximation: just try again in 15 min)
-      const nextBucket = nagBucket(Date.now() + 15 * 60 * 1000);
-      const nextData = await getKV(env.TUBEPULSE_KV, key.nag(nextBucket)) || [];
-      const exists = nextData.some((e) => e.deviceId === deviceId && e.channelId === channelId);
-      if (!exists) {
-        nextData.push({ deviceId, channelId, videoIds: stillUnwatched });
-        await putKV(env.TUBEPULSE_KV, key.nag(nextBucket), nextData);
-      }
-      continue;
-    }
-
-    // Get channel info for notification text
     const [meta, recent] = await Promise.all([
       getKV(env.TUBEPULSE_KV, key.channelMeta(channelId)),
       getKV(env.TUBEPULSE_KV, key.channelRecent(channelId)),
     ]);
-
     const channelName = meta?.name || channelId;
 
-    // Build notification
-    let notifPayload;
-    if (stillUnwatched.length === 1) {
-      const videoId = stillUnwatched[0];
-      const video = recent?.find((v) => v.videoId === videoId);
-      notifPayload = {
-        title: `${channelName} - reminder`,
-        body: video?.title || 'Unwatched video',
-        data: {
-          videoId,
-          channelId,
-          channelName,
-          videoLink: video?.link || `https://www.youtube.com/watch?v=${videoId}`,
-          type: 'nag',
-        },
-        tag: `video-${videoId}`,
+    for (const deviceId of subs) {
+      checked++;
+      const state = await getKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId));
+      if (!state?.unwatched || state.unwatched.length === 0) continue;
+
+      const [profile, settings, override] = await Promise.all([
+        getKV(env.TUBEPULSE_KV, key.deviceProfile(deviceId)),
+        getKV(env.TUBEPULSE_KV, key.deviceSettings(deviceId)),
+        getKV(env.TUBEPULSE_KV, key.deviceOverride(deviceId, channelId)),
+      ]);
+
+      if (!profile?.fcmToken) continue;
+
+      const effective = {
+        mode: override?.mode || settings?.mode || 'chill',
+        nagInterval: override?.nagInterval || settings?.nagInterval || 15,
+        dndEnabled: settings?.dndEnabled || false,
+        dndStart: settings?.dndStart || '22:00',
+        dndEnd: settings?.dndEnd || '07:00',
+        dndTimezone: settings?.dndTimezone || 'UTC',
+        dndBypass: override?.dndBypass || false,
+        muted: override?.muted || false,
       };
-    } else {
-      notifPayload = {
-        title: `${channelName} - ${stillUnwatched.length} unwatched`,
-        body: 'You have videos waiting',
-        data: {
-          type: 'batch',
-          count: String(stillUnwatched.length),
-          channelId,
-        },
-        tag: 'tubepulse-batch',
-      };
-    }
 
-    const result = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+      if (effective.muted) continue;
 
-    if (result.sent) {
-      fired++;
-      // Update state
-      state.lastNagAt = Date.now();
-      state.nagCount = (state.nagCount || 0) + 1;
-      await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+      const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
+      if (dndActive && !effective.dndBypass) continue;
 
-      // Schedule next nag
-      const nagIntervalMs = effective.nagInterval * 60 * 1000;
-      const nextNagTime = effective.mode === 'chill'
-        ? Date.now() + 4 * 60 * 60 * 1000
-        : Date.now() + nagIntervalMs;
+      // Timestamp-based interval check (replaces bucket system)
+      const intervalMs = effective.mode === 'chill'
+        ? 4 * 60 * 60 * 1000
+        : effective.nagInterval * 60 * 1000;
+      const lastNagAt = state.lastNagAt || 0;
+      if (lastNagAt > 0 && (now - lastNagAt) < intervalMs) continue;
 
-      const nb = nagBucket(nextNagTime);
-      const nextBucketData = await getKV(env.TUBEPULSE_KV, key.nag(nb)) || [];
-      const exists = nextBucketData.some((e) => e.deviceId === deviceId && e.channelId === channelId);
-      if (!exists) {
-        nextBucketData.push({ deviceId, channelId, videoIds: stillUnwatched });
-        await putKV(env.TUBEPULSE_KV, key.nag(nb), nextBucketData);
+      if (!await ensureFcmAccess()) continue;
+
+      const stillUnwatched = state.unwatched;
+
+      let notifPayload;
+      if (stillUnwatched.length === 1) {
+        const videoId = stillUnwatched[0];
+        const video = recent?.find((v) => v.videoId === videoId);
+        notifPayload = {
+          title: `${channelName} - reminder`,
+          body: video?.title || 'Unwatched video',
+          data: {
+            videoId,
+            channelId,
+            channelName,
+            videoLink: video?.link || `https://www.youtube.com/watch?v=${videoId}`,
+            type: 'nag',
+          },
+          tag: `video-${videoId}`,
+        };
+      } else {
+        notifPayload = {
+          title: `${channelName} - ${stillUnwatched.length} unwatched`,
+          body: 'You have videos waiting',
+          data: {
+            type: 'batch',
+            count: String(stillUnwatched.length),
+            channelId,
+          },
+          tag: `tubepulse-nag-${channelId}`,
+        };
       }
-    } else if (result.deadToken) {
-      deadTokens.push(deviceId);
+
+      try {
+        const result = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
+        if (result.sent) {
+          fired++;
+          state.lastNagAt = now;
+          state.nagCount = (state.nagCount || 0) + 1;
+          await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+        } else if (result.deadToken) {
+          deadTokens.push(deviceId);
+        }
+      } catch (err) {
+        console.error(`[Nag] FCM push failed for ${deviceId}:`, err?.message || err);
+      }
     }
   }
 
-  // Clean up dead tokens ÔÇö full device cleanup so the KV state stays
-  // consistent (don't leave orphaned profile/settings/state/override keys
-  // for devices the FCM server has confirmed are gone).
-  for (const deviceId of deadTokens) {
+  for (const deviceId of [...new Set(deadTokens)]) {
     console.log(`[Nag] Pruning dead device: ${deviceId}`);
     ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
   }
 
-  // Clear the processed bucket
-  await env.TUBEPULSE_KV.delete(key.nag(bucket));
-
-  return { fired };
+  console.log(`[Nag] Checked ${checked} subscriber(s), fired ${fired} nag(s)`);
+  return { fired, checked };
 }
 
 // ÔöÇÔöÇÔöÇ Job 2.5: YouTube RSS polling (every 5 min) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
@@ -1814,20 +1809,7 @@ async function runRssPollCron(env, ctx) {
           }
         }
 
-        // Schedule nag
-        if (state.unwatched.length > 0 && shouldNotify) {
-          const nagIntervalMs = effective.nagInterval * 60 * 1000;
-          const nextNagTime = effective.mode === 'chill'
-            ? Date.now() + 4 * 60 * 60 * 1000
-            : Date.now() + nagIntervalMs;
-          const bucket = nagBucket(nextNagTime);
-          const bucketData = await getKV(env.TUBEPULSE_KV, key.nag(bucket)) || [];
-          const exists = bucketData.some((e) => e.deviceId === deviceId && e.channelId === channelId);
-          if (!exists) {
-            bucketData.push({ deviceId, channelId, videoIds: [...state.unwatched] });
-            await putKV(env.TUBEPULSE_KV, key.nag(bucket), bucketData);
-          }
-        }
+
       }
 
       // Clean up any dead devices we collected during this channel's
@@ -1893,8 +1875,8 @@ export default {
       results.rss = await runRssPollCron(env, ctx);
     }
 
-    // Nag cycle: every 15 minutes (minute % 15 === 0)
-    if (mins % 15 === 0) {
+    // Nag cycle: every 5 minutes (matches cron trigger)
+    if (mins % 5 === 0) {
       results.nag = await runNagCron(env, ctx);
     }
 
