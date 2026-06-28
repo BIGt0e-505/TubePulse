@@ -1299,6 +1299,27 @@ async function runCommunityPostsCron(env, ctx) {
   return results;
 }
 
+// Nag interval helper with backoff for Relentless 5-minute mode.
+// Relentless 5m: 5-min for first hour (12 nags), then backs off to 15-min.
+// All other relentless intervals and chill mode use their configured value.
+// nagCount is reset to 0 by /seen when unwatched becomes empty, so a new
+// unread item starts fresh at 5-min cadence.
+const RELENTLESS_5M_BACKOFF_THRESHOLD = 12; // 12 × 5min = 1 hour
+
+function getNagIntervalMs(effective, state) {
+  const mode = effective.mode || 'chill';
+  if (mode === 'chill') {
+    return 4 * 60 * 60 * 1000; // 4 hours
+  }
+  const configuredMinutes = Number(effective.nagInterval || 15);
+  if (mode === 'relentless' && configuredMinutes === 5) {
+    const nagCount = Number(state?.nagCount || 0);
+    const activeMinutes = nagCount < RELENTLESS_5M_BACKOFF_THRESHOLD ? 5 : 15;
+    return activeMinutes * 60 * 1000;
+  }
+  return configuredMinutes * 60 * 1000;
+}
+
 async function runNagCron(env, ctx) {
   // Timestamp-based nag system (replaces the 15-min bucket system).
   //
@@ -1383,10 +1404,10 @@ async function runNagCron(env, ctx) {
       const dndActive = effective.dndEnabled && isDndActive(effective.dndStart, effective.dndEnd, effective.dndTimezone);
       if (dndActive && !effective.dndBypass) continue;
 
-      // Timestamp-based interval check (replaces bucket system)
-      const intervalMs = effective.mode === 'chill'
-        ? 4 * 60 * 60 * 1000
-        : effective.nagInterval * 60 * 1000;
+      // Timestamp-based interval check with backoff for relentless 5-min.
+      // Relentless 5-min: 5-min for first hour (12 nags), then 15-min.
+      // All other modes: use configured interval as-is.
+      const intervalMs = getNagIntervalMs(effective, state);
       const lastNagAt = state.lastNagAt || 0;
       if (lastNagAt > 0 && (now - lastNagAt) < intervalMs) continue;
 

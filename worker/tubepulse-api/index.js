@@ -1156,10 +1156,18 @@ async function handleSeen(request, env) {
     state.unwatched = (state.unwatched || []).filter((id) => !removeSet.has(id));
   }
 
+  // Reset nag counters when all items are seen, so the next unread item
+  // starts fresh nag cadence (e.g. 5-min relentless resets to 5-min, not
+  // backed-off 15-min from stale nagCount).
+  if (state.unwatched.length === 0) {
+    state.nagCount = 0;
+    state.lastNagAt = null;
+  }
+
   await putKVIfChanged(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state, existingState);
 
-  // Note: nag bucket entries are NOT actively cleaned up.
-  // When the nag cron fires, it re-checks state and skips already-seen videos.
+  // Nag counters are reset when unwatched becomes empty, so the next
+  // unread item starts a fresh nag cadence.
 
   return json({ ok: true, unwatchedCount: state.unwatched.length });
 }
