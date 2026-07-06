@@ -13,8 +13,11 @@ crons = ["* * * * *"]
 [observability]
 enabled = true
 
+[vars]
+TUBEPULSE_ENABLE_COMMUNITY_POSTS = "true"
+
 # Secrets (set via wrangler secret put):
 # - FIREBASE_SERVICE_ACCOUNT
-# - TUBEPULSE_ENABLE_COMMUNITY_POSTS
-# - TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST
-# - TUBEPULSE_DEBUG_COMMUNITY_POSTS (optional)
+# Optional vars (set via [vars] or wrangler secret put):
+# - TUBEPULSE_COMMUNITY_POST_CHANNEL_ALLOWLIST (comma-separated channel IDs)
+# - TUBEPULSE_DEBUG_COMMUNITY_POSTS ("true" to enable debug logging)
