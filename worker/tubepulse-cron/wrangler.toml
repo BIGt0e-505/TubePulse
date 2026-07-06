@@ -7,8 +7,11 @@ account_id = "77bb7769185bbfeb53feef16b9f72803"
 binding = "TUBEPULSE_KV"
 id = "52e77ca9f5f6493e89d2478c8d3055ec"
 
+# Explicitly empty — removes the old */5 cron trigger on deploy.
+# The old all-in-one combined job is retired. Work is now split
+# across tubepulse-rss-0/1/2, tubepulse-posts, tubepulse-aux.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = []
 
 [observability]
 enabled = true

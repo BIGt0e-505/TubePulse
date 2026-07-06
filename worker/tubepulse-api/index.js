@@ -83,6 +83,11 @@ const key = {
   // detection in this worker; the cron's runPrewarnCron reads it and
   // prunes events past their scheduledFor + 24h.
   upcomingEvents:   ()          => `upcoming:events:list`,
+  // nag:active — array of "deviceId|channelId" entries tracking which
+  // device+channel pairs have unwatched items and need nag processing.
+  nagActive:         ()          => `nag:active`,
+  // Per-user prewarn tracking.
+  prewarnSent:       (videoId, deviceId) => `upcoming:prewarn:${videoId}:${deviceId}`,
 };
 
 async function getKV(kv, k) { return await kv.get(k, 'json'); }
@@ -1169,6 +1174,16 @@ async function handleSeen(request, env) {
   // Nag counters are reset when unwatched becomes empty, so the next
   // unread item starts a fresh nag cadence.
 
+  // Remove from nag:active when unwatched becomes empty
+  if (state.unwatched.length === 0) {
+    const nagActive = await getKV(env.TUBEPULSE_KV, key.nagActive()) || [];
+    const entry = `${deviceId}|${channelId}`;
+    const filtered = nagActive.filter((e) => e !== entry);
+    if (filtered.length !== nagActive.length) {
+      await putKV(env.TUBEPULSE_KV, key.nagActive(), filtered);
+    }
+  }
+
   return json({ ok: true, unwatchedCount: state.unwatched.length });
 }
 
@@ -1699,6 +1714,16 @@ async function handleWebSubPush(request, env, ctx) {
 
       // Save updated state
       await putKV(env.TUBEPULSE_KV, key.deviceState(deviceId, channelId), state);
+
+      // Add to nag:active when unwatched items are added
+      if (state.unwatched.length > 0) {
+        const nagActive = await getKV(env.TUBEPULSE_KV, key.nagActive()) || [];
+        const entry = `${deviceId}|${channelId}`;
+        if (!nagActive.includes(entry)) {
+          nagActive.push(entry);
+          await putKV(env.TUBEPULSE_KV, key.nagActive(), nagActive);
+        }
+      }
 
       // Send FCM notification for non-scheduled, non-DND-blocked new videos
       const notifyEntries = newEntries.filter((e) =>

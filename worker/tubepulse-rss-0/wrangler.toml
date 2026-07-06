@@ -1,0 +1,19 @@
+name = "tubepulse-rss-0"
+main = "index.js"
+compatibility_date = "2025-04-01"
+account_id = "77bb7769185bbfeb53feef16b9f72803"
+
+[[kv_namespaces]]
+binding = "TUBEPULSE_KV"
+id = "52e77ca9f5f6493e89d2478c8d3055ec"
+
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+
+# Hardcoded shard index for this worker instance
+[vars]
+RSS_SHARD_INDEX = "0"
+RSS_MAX_SHARDS = "3"
