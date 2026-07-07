@@ -52,6 +52,38 @@ async function pollSingleRssChannel(env, ctx, channelId) {
 
   // Read existing recent list
   const prevRecent = await getKV(kv, key.channelRecent(channelId)) || [];
+
+  // First-run guard: if prevRecent is empty but the channel already has
+  // subscribers (i.e. it's not a brand-new channel), seed the recent list
+  // from the RSS feed WITHOUT notifying. This prevents a cascade where
+  // every video in the RSS feed is treated as new and marked unread.
+  // Mirrors the firstPollAt guard used for community posts.
+  if (prevRecent.length === 0) {
+    const subs = await getKV(kv, key.channelSubs(channelId)) || [];
+    if (subs.length > 0) {
+      const seededRecent = uploads.slice(0, 15).map((v) => ({
+        videoId: v.videoId,
+        title: v.title,
+        publishedAt: v.published,
+        thumbnail: v.thumbnail,
+        type: classifyVideo(v),
+        link: v.link,
+        views: v.views || '0',
+        likes: v.likes != null ? String(v.likes) : '0',
+        dislikes: v.dislikes != null ? String(v.dislikes) : '0',
+        viewsLastCheckedHour: Math.floor(Date.now() / 3600000),
+      }));
+      await putKV(kv, key.channelRecent(channelId), seededRecent);
+      console.log(`[RSS] ${channelId}: first-run seed (existing channel, ${subs.length} subscribers) — seeded ${seededRecent.length} videos, no notifications`);
+      // Update meta too
+      const meta = await getKV(kv, key.channelMeta(channelId)) || {};
+      if (!meta.name && feed.channelName) { meta.name = feed.channelName; }
+      if (seededRecent.length > 0) { meta.lastVideoId = seededRecent[0].videoId; }
+      await putKVIfChanged(kv, key.channelMeta(channelId), meta);
+      return;
+    }
+  }
+
   const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
   const newVideos = uploads.filter((v) => !prevVideoIds.has(v.videoId));
 
