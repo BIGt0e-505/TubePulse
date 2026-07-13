@@ -4,7 +4,7 @@ import {
   Platform, Switch, ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { COLORS, DEFAULT_SETTINGS, NAG_INTERVALS, PREWARN_OPTIONS } from '../utils/constants';
+import { COLORS, DEFAULT_SETTINGS, NAG_INTERVALS, PREWARN_OPTIONS, VIDEOS_PER_CHANNEL_OPTIONS } from '../utils/constants';
 import TimeSpinner from '../components/TimeSpinner';
 import { getSettings, saveSettings } from '../utils/storage';
 import { updateSettings, getDeviceId } from '../utils/api';
@@ -182,6 +182,26 @@ export default function SettingsScreen() {
           thumbColor={settings.includeCommunityPosts ? COLORS.bg : COLORS.textDim}
         />
       </View>
+
+      {/* HomeScreen display settings */}
+      <Text style={styles.sectionTitle}>Home screen</Text>
+      <Text style={styles.dndLabel} numberOfLines={1}>Videos shown per channel</Text>
+      <View style={styles.optionGroupNarrow}>
+        {VIDEOS_PER_CHANNEL_OPTIONS.map(({ label, value }) => (
+          <TouchableOpacity
+            key={value}
+            style={[styles.optionNarrow, settings.latestVideosPerChannel === value && styles.optionActive]}
+            onPress={() => updateSetting('latestVideosPerChannel', value)}
+          >
+            <Text style={[styles.optionText, settings.latestVideosPerChannel === value && styles.optionTextActive]}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <Text style={styles.guidance}>
+        Controls how many recent videos appear for each channel on the Home screen.
+      </Text>
 
       {/* Per-channel notification settings */}
       <Text style={styles.sectionTitle}>Per-channel notifications</Text>

@@ -15,7 +15,7 @@ import { SvgXml } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '../utils/constants';
-import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache } from '../utils/storage';
+import { getChannels, getSettings, getLastSeen, saveLastSeen, getChannelCache, saveChannelCache, getChannelDisplaySettings } from '../utils/storage';
 import { fetchFeed, markSeen, getDeviceId } from '../utils/api';
 import {
   chooseLatestChannelContent,
@@ -45,6 +45,7 @@ export default function HomeScreen({ navigation }) {
   const [cache, setCache] = useState({});
   const [lastSeen, setLastSeen] = useState({});
   const [settings, setSettings] = useState({ tapAction: 'video' });
+  const [channelDisplaySettings, setChannelDisplaySettings] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [nowMs, setNowMs] = useState(Date.now());
@@ -59,17 +60,19 @@ export default function HomeScreen({ navigation }) {
   const recentlySeenRef = useRef(new Set());
 
   const loadData = useCallback(async () => {
-    const [ch, s, ls, ca] = await Promise.all([
+    const [ch, s, ls, ca, cds] = await Promise.all([
       getChannels(),
       getSettings(),
       getLastSeen(),
       getChannelCache(),
+      getChannelDisplaySettings(),
     ]);
     cacheRef.current = ca || {};
     setChannels(ch);
     setSettings(s);
     setLastSeen(ls);
     setCache(ca);
+    setChannelDisplaySettings(cds || {});
     setLoading(false);
   }, []);
 
@@ -244,17 +247,19 @@ export default function HomeScreen({ navigation }) {
       }
     }
     // Init has written cache data — re-read everything before refreshing
-    const [freshChannels, freshCache, freshLastSeen, freshSettings] = await Promise.all([
+    const [freshChannels, freshCache, freshLastSeen, freshSettings, freshDisplaySettings] = await Promise.all([
       getChannels(),
       getChannelCache(),
       getLastSeen(),
       getSettings(),
+      getChannelDisplaySettings(),
     ]);
     cacheRef.current = freshCache || {};
     setChannels(freshChannels);
     setCache(freshCache);
     setLastSeen(freshLastSeen);
     setSettings(freshSettings);
+    setChannelDisplaySettings(freshDisplaySettings || {});
     setLoading(false);
 
     // Now refresh from server (supplements local cache with live data)
@@ -306,6 +311,12 @@ export default function HomeScreen({ navigation }) {
 
   const selectPersistentLatestContent = (handle) => {
     return chooseLatestChannelContent(getVideos(handle)[0] || null, getPosts(handle)[0] || null);
+  };
+
+  const getEffectiveVideoCount = (handle) => {
+    const override = channelDisplaySettings[handle]?.latestVideosPerChannel;
+    if (override != null) return override;
+    return settings.latestVideosPerChannel || 1;
   };
 
   const getVisiblePosts = (handle) => {
@@ -552,11 +563,17 @@ export default function HomeScreen({ navigation }) {
     const cached = cache[item.handle];
     const hasNew = isNew(item.handle);
     const displayName = cached?.name || item.name || item.handle;
-    const unseenVids = getUnseenVideos(item.handle);
+    const effectiveCount = getEffectiveVideoCount(item.handle);
+    const allVideos = getVideos(item.handle);
     const persistent = selectPersistentLatestContent(item.handle);
-    const videosToShow = unseenVids.length > 0
-      ? [...unseenVids].reverse()
-      : (persistent?.type === 'video' ? [persistent.item] : []);
+
+    // Show the N latest videos, newest-first. Seen/unseen state does
+    // not affect ordering — blue dots are applied independently per video.
+    const videosToShow = allVideos.slice(0, effectiveCount);
+    // Fallback: if no videos in cache, use persistent latest (preserves old behaviour)
+    if (videosToShow.length === 0 && persistent?.type === 'video') {
+      videosToShow = [persistent.item];
+    }
     const posts = getVisiblePosts(item.handle);
 
     return (

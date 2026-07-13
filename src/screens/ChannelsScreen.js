@@ -15,13 +15,14 @@ import {
 } from 'react-native';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 import { useFocusEffect } from '@react-navigation/native';
-import { COLORS, PREWARN_OPTIONS } from '../utils/constants';
+import { COLORS, PREWARN_OPTIONS, VIDEOS_PER_CHANNEL_OPTIONS } from '../utils/constants';
 import {
   getChannels, saveChannels,
   getChannelCache, saveChannelCache,
   getLastSeen, saveLastSeen,
   getSettings,
   getChannelNotifSettings, saveChannelNotifSettings,
+  getChannelDisplaySettings, saveChannelDisplaySettings,
 } from '../utils/storage';
 import { resolveHandle, subscribeChannel, unsubscribeChannel, registerDevice, getDeviceId, setChannelOverride, bootstrapChannel } from '../utils/api';
 import { getFCMToken } from '../utils/fcm';
@@ -40,6 +41,9 @@ const DEFAULT_CHANNEL_NOTIF = {
   // Tri-state for prewarn: null = inherit from global prewarnMinutes,
   // number = override (one of PREWARN_OPTIONS values).
   prewarnMinutes: null,
+  // Tri-state for videos shown: null = inherit from global latestVideosPerChannel,
+  // number = override (1, 2, or 3).
+  latestVideosPerChannel: null,
 };
 
 export default function ChannelsScreen() {
@@ -52,15 +56,17 @@ export default function ChannelsScreen() {
   const [channelNotifSettings, setChannelNotifSettings] = useState({});
   const [editingChannel, setEditingChannel] = useState(null); // handle of channel being edited
   const [editingNotif, setEditingNotif] = useState(DEFAULT_CHANNEL_NOTIF);
+  const [channelDisplaySettings, setChannelDisplaySettings] = useState({});
 
   useFocusEffect(
     useCallback(() => {
-      Promise.all([getChannels(), getChannelCache(), getSettings(), getChannelNotifSettings()]).then(
-        ([chs, ca, settings, notifSettings]) => {
+      Promise.all([getChannels(), getChannelCache(), getSettings(), getChannelNotifSettings(), getChannelDisplaySettings()]).then(
+        ([chs, ca, settings, notifSettings, displaySettings]) => {
           setChannels(chs);
           setCache(ca);
           setPerChannelEnabled(settings.perChannelNotifications || false);
           setChannelNotifSettings(notifSettings);
+          setChannelDisplaySettings(displaySettings);
         }
       );
     }, [])
@@ -68,24 +74,43 @@ export default function ChannelsScreen() {
 
   const openChannelNotifSettings = (handle) => {
     const existing = channelNotifSettings[handle] || DEFAULT_CHANNEL_NOTIF;
-    setEditingNotif({ ...DEFAULT_CHANNEL_NOTIF, ...existing });
+    const existingDisplay = channelDisplaySettings[handle] || {};
+    setEditingNotif({
+      ...DEFAULT_CHANNEL_NOTIF,
+      ...existing,
+      latestVideosPerChannel: existingDisplay.latestVideosPerChannel ?? null,
+    });
     setEditingChannel(handle);
   };
 
   const saveChannelNotif = async () => {
-    const updated = { ...channelNotifSettings, [editingChannel]: editingNotif };
-    setChannelNotifSettings(updated);
-    await saveChannelNotifSettings(updated);
+    // Split display fields from notification fields — they're stored in separate keys.
+    const { latestVideosPerChannel: _displayField, ...notifOnly } = editingNotif;
 
-    // Sync override with server. Strip null fields (the tri-state
+    // Save notification settings
+    const updatedNotif = { ...channelNotifSettings, [editingChannel]: notifOnly };
+    setChannelNotifSettings(updatedNotif);
+    await saveChannelNotifSettings(updatedNotif);
+
+    // Save display settings (only if overridden)
+    const updatedDisplay = { ...channelDisplaySettings };
+    if (editingNotif.latestVideosPerChannel !== null) {
+      updatedDisplay[editingChannel] = { latestVideosPerChannel: editingNotif.latestVideosPerChannel };
+    } else {
+      delete updatedDisplay[editingChannel];
+    }
+    setChannelDisplaySettings(updatedDisplay);
+    await saveChannelDisplaySettings(updatedDisplay);
+
+    // Sync notification override with server. Strip null fields (the tri-state
     // "inherit" sentinel) so the override only carries fields the user
-    // has actually set.
+    // has actually set. Display settings are local-only (not synced to server).
     try {
       const deviceId = await getDeviceId();
       const ch = channels.find((c) => c.handle === editingChannel);
       if (ch?.channelId) {
         const overridePayload = Object.fromEntries(
-          Object.entries(editingNotif).filter(([, v]) => v !== null)
+          Object.entries(notifOnly).filter(([, v]) => v !== null)
         );
         await setChannelOverride(deviceId, ch.channelId, overridePayload);
       }
@@ -101,6 +126,12 @@ export default function ChannelsScreen() {
     delete updated[editingChannel];
     setChannelNotifSettings(updated);
     await saveChannelNotifSettings(updated);
+
+    // Also reset display settings for this channel
+    const updatedDisplay = { ...channelDisplaySettings };
+    delete updatedDisplay[editingChannel];
+    setChannelDisplaySettings(updatedDisplay);
+    await saveChannelDisplaySettings(updatedDisplay);
 
     // Delete override on server (empty override = inherit from device settings)
     try {
@@ -328,7 +359,7 @@ export default function ChannelsScreen() {
   const renderItem = ({ item, drag, isActive }) => {
     const cached = cache[item.handle];
     const displayName = cached?.name || item.name || item.handle;
-    const hasOverride = perChannelEnabled && !!channelNotifSettings[item.handle];
+    const hasOverride = perChannelEnabled && (!!channelNotifSettings[item.handle] || !!channelDisplaySettings[item.handle]);
 
     return (
       <ScaleDecorator>
@@ -512,7 +543,32 @@ export default function ChannelsScreen() {
               How early to be notified before a scheduled livestream. Off: use the global setting.
             </Text>
 
-            {channelNotifSettings[editingChannel] && (
+            {/* Videos shown per channel � display setting (local-only, not synced to server) */}
+            <Text style={styles.modalLabel}>Videos shown</Text>
+            <View style={styles.optionGroup}>
+              {[
+                { value: null, label: 'Global' },
+                ...VIDEOS_PER_CHANNEL_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
+              ].map(({ value, label }) => {
+                const isActive = editingNotif.latestVideosPerChannel === value;
+                return (
+                  <TouchableOpacity
+                    key={String(value)}
+                    style={[styles.option, isActive && styles.optionActive]}
+                    onPress={() => setEditingNotif(n => ({ ...n, latestVideosPerChannel: value }))}
+                  >
+                    <Text style={[styles.optionText, isActive && styles.optionTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={styles.modalHint}>
+              How many recent videos to show for this channel on the Home screen. Global: use the Settings default.
+            </Text>
+
+            {(channelNotifSettings[editingChannel] || channelDisplaySettings[editingChannel]) && (
               <TouchableOpacity style={styles.modalReset} onPress={resetChannelNotif}>
                 <Text style={styles.modalResetText}>Reset to global defaults</Text>
               </TouchableOpacity>

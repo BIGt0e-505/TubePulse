@@ -88,6 +88,17 @@ export async function saveChannelNotifSettings(settings) {
   await AsyncStorage.setItem(STORAGE_KEYS.CHANNEL_NOTIF_SETTINGS, JSON.stringify(settings));
 }
 
+// Per-channel display settings
+// Shape: { [handle]: { latestVideosPerChannel } }  — null/undefined means inherit global
+export async function getChannelDisplaySettings() {
+  const data = await AsyncStorage.getItem(STORAGE_KEYS.CHANNEL_DISPLAY_SETTINGS);
+  return data ? JSON.parse(data) : {};
+}
+
+export async function saveChannelDisplaySettings(settings) {
+  await AsyncStorage.setItem(STORAGE_KEYS.CHANNEL_DISPLAY_SETTINGS, JSON.stringify(settings));
+}
+
 export async function getLastReconcileAt() {
   const data = await AsyncStorage.getItem(STORAGE_KEYS.LAST_RECONCILE_AT);
   return data ? parseInt(data, 10) : 0;

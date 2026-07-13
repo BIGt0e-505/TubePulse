@@ -19,6 +19,7 @@ export const STORAGE_KEYS = {
   CHANNEL_CACHE: 'tubepulse_channel_cache',
   GENTLE_NOTIF_STATE: 'tubepulse_gentle_notif_state',
   CHANNEL_NOTIF_SETTINGS: 'tubepulse_channel_notif_settings',
+  CHANNEL_DISPLAY_SETTINGS: 'tubepulse_channel_display_settings',
   LAST_RECONCILE_AT: 'tubepulse_last_reconcile_at',
 };
 
@@ -41,7 +42,14 @@ export const DEFAULT_SETTINGS = {
   perChannelNotifications: false,  // enable per-channel notification overrides
   dndTimezone: 'UTC',              // IANA tz string; overridden at runtime via Intl.DateTimeFormat
   prewarnMinutes: 60,              // minutes before a scheduled livestream to fire a prewarn push (15, 30, 60, 120, 240, 1440)
+  latestVideosPerChannel: 1,      // how many recent videos to show per channel on HomeScreen (1, 2, or 3)
 };
+
+export const VIDEOS_PER_CHANNEL_OPTIONS = [
+  { value: 1, label: '1' },
+  { value: 2, label: '2' },
+  { value: 3, label: '3' },
+];
 
 export const PREWARN_OPTIONS = [
   { value: 15,   label: '15m' },
