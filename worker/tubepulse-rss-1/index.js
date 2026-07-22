@@ -6,6 +6,8 @@ import {
   fetchChannelRSS, classifyVideo, isDndActive,
   getCachedFcmAccessToken, sendFCMPush, cleanupDeadDevice,
   addToNagActive,
+  seedKnownVideosFromRss, classifyRssVideosForNotification,
+  updateKnownVideosAfterPoll,
 } from '../tubepulse-cron/shared.mjs';
 
 const RSS_MAX_SHARDS = 3;
@@ -34,6 +36,8 @@ export default {
 
 async function pollSingleRssChannel(env, ctx, channelId) {
   const kv = env.TUBEPULSE_KV;
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
 
   const feed = await fetchChannelRSS(channelId);
   if (!feed || feed.entries.length === 0) return;
@@ -50,42 +54,49 @@ async function pollSingleRssChannel(env, ctx, channelId) {
     dislikes: e.dislikes,
   }));
 
-  // Read existing recent list
+  // Read display cache and durable known/watermark state.
   const prevRecent = await getKV(kv, key.channelRecent(channelId)) || [];
+  let known = await getKV(kv, key.channelKnownVideos(channelId));
 
-  // First-run guard: if prevRecent is empty but the channel already has
-  // subscribers (i.e. it's not a brand-new channel), seed the recent list
-  // from the RSS feed WITHOUT notifying. This prevents a cascade where
-  // every video in the RSS feed is treated as new and marked unread.
-  // Mirrors the firstPollAt guard used for community posts.
-  if (prevRecent.length === 0) {
+  // First-run guard: if known:videos is missing, seed it from the current
+  // RSS feed and seed the display cache. Never notify on first seed.
+  if (!known || !known.highWatermarkAt) {
+    const seededKnown = seedKnownVideosFromRss(known, uploads, nowIso);
+    await putKV(kv, key.channelKnownVideos(channelId), seededKnown);
+
     const subs = await getKV(kv, key.channelSubs(channelId)) || [];
-    if (subs.length > 0) {
-      const seededRecent = uploads.slice(0, 15).map((v) => ({
-        videoId: v.videoId,
-        title: v.title,
-        publishedAt: v.published,
-        thumbnail: v.thumbnail,
-        type: classifyVideo(v),
-        link: v.link,
-        views: v.views || '0',
-        likes: v.likes != null ? String(v.likes) : '0',
-        dislikes: v.dislikes != null ? String(v.dislikes) : '0',
-        viewsLastCheckedHour: Math.floor(Date.now() / 3600000),
-      }));
-      await putKV(kv, key.channelRecent(channelId), seededRecent);
-      console.log(`[RSS] ${channelId}: first-run seed (existing channel, ${subs.length} subscribers) — seeded ${seededRecent.length} videos, no notifications`);
-      // Update meta too
-      const meta = await getKV(kv, key.channelMeta(channelId)) || {};
-      if (!meta.name && feed.channelName) { meta.name = feed.channelName; }
-      if (seededRecent.length > 0) { meta.lastVideoId = seededRecent[0].videoId; }
-      await putKVIfChanged(kv, key.channelMeta(channelId), meta);
-      return;
+    const seededRecent = uploads.slice(0, 15).map((v) => ({
+      videoId: v.videoId,
+      title: v.title,
+      publishedAt: v.published,
+      thumbnail: v.thumbnail,
+      type: classifyVideo(v),
+      link: v.link,
+      views: v.views || '0',
+      likes: v.likes != null ? String(v.likes) : '0',
+      dislikes: v.dislikes != null ? String(v.dislikes) : '0',
+      viewsLastCheckedHour: Math.floor(now / 3600000),
+    }));
+    await putKVIfChanged(kv, key.channelRecent(channelId), seededRecent, prevRecent);
+
+    const meta = await getKV(kv, key.channelMeta(channelId)) || {};
+    let metaChanged = false;
+    if (!meta.name && feed.channelName) { meta.name = feed.channelName; metaChanged = true; }
+    if (seededRecent.length > 0 && meta.lastVideoId !== seededRecent[0].videoId) {
+      meta.lastVideoId = seededRecent[0].videoId;
+      metaChanged = true;
     }
+    if (metaChanged) await putKVIfChanged(kv, key.channelMeta(channelId), meta);
+
+    console.log(`[RSS] ${channelId}: first-run seed — ${seededKnown.ids.length} known IDs, highWatermarkAt=${seededKnown.highWatermarkAt}, subs=${subs.length}, no notifications`);
+    return;
   }
 
-  const prevVideoIds = new Set(prevRecent.map((v) => v.videoId));
-  const newVideos = uploads.filter((v) => !prevVideoIds.has(v.videoId));
+  // Classify videos using durable watermark: notify only unknown videos
+  // strictly newer than the high-watermark timestamp.
+  const classified = classifyRssVideosForNotification(known, uploads);
+  const newVideos = classified.filter((v) => v.isNew);
+  const suppressed = classified.filter((v) => !v.isNew);
 
   // Hourly view-count refresh for latest video
   const rssByVideoId = new Map(uploads.map((u) => [u.videoId, u]));
@@ -115,7 +126,7 @@ async function pollSingleRssChannel(env, ctx, channelId) {
 
   const latest = prevRecent[0];
   const latestFromRss = latest && rssByVideoId.get(latest.videoId);
-  const currentHour = Math.floor(Date.now() / 3600000);
+  const currentHour = Math.floor(now / 3600000);
 
   if (latest && latestFromRss) {
     const oldViews = parseInt(latest.views || '0', 10);
@@ -152,15 +163,9 @@ async function pollSingleRssChannel(env, ctx, channelId) {
     }
   }
 
-  if (newVideos.length === 0) {
-    if (recentChanged) {
-      await putKVIfChanged(kv, key.channelRecent(channelId), refreshedPrev, prevRecent);
-    }
-    return;
-  }
-
-  // Build updated recent list with new videos
-  const enrichedNew = newVideos.map((v) => {
+  // Build updated display recent list: always reflect current RSS feed order.
+  // Suppressed videos (old/deletion-exposed) still appear in display cache.
+  const rssRecentVideos = uploads.slice(0, 15).map((v) => {
     const rss = rssByVideoId.get(v.videoId) || v;
     return {
       videoId: v.videoId,
@@ -175,8 +180,36 @@ async function pollSingleRssChannel(env, ctx, channelId) {
     };
   });
 
-  const updatedRecent = [...enrichedNew, ...refreshedPrev].slice(0, 15);
-  await putKVIfChanged(kv, key.channelRecent(channelId), updatedRecent, prevRecent);
+  // Preserve hourly view/like refresh fields from refreshedPrev when present.
+  const refreshedPrevMap = new Map(refreshedPrev.map((v) => [v.videoId, v]));
+  const mergedRecent = rssRecentVideos.map((v) => {
+    const prev = refreshedPrevMap.get(v.videoId);
+    if (!prev) return v;
+    return {
+      ...v,
+      viewsLastCheckedHour: prev.viewsLastCheckedHour !== undefined ? prev.viewsLastCheckedHour : v.viewsLastCheckedHour,
+      likesLastCheckedHour: prev.likesLastCheckedHour !== undefined ? prev.likesLastCheckedHour : v.likesLastCheckedHour,
+    };
+  });
+
+  if (!recentChanged && !jsonEqualish(prevRecent, mergedRecent)) {
+    recentChanged = true;
+  }
+  if (recentChanged) {
+    await putKVIfChanged(kv, key.channelRecent(channelId), mergedRecent, prevRecent);
+  }
+
+  // Update known/watermark state after every poll.
+  const updatedKnown = updateKnownVideosAfterPoll(known, uploads, newVideos, nowIso);
+  await putKVIfChanged(kv, key.channelKnownVideos(channelId), updatedKnown, known);
+
+  if (suppressed.length > 0) {
+    console.log(`[RSS] ${channelId}: suppressed ${suppressed.length} videos (known or below watermark)`);
+  }
+
+  if (newVideos.length === 0) return;
+
+  console.log(`[RSS] ${channelId}: ${newVideos.length} genuinely new videos above watermark`);
 
   // Update channel meta
   const meta = await getKV(kv, key.channelMeta(channelId)) || {};
@@ -228,19 +261,19 @@ async function pollSingleRssChannel(env, ctx, channelId) {
 
     let shouldNotify = true;
     let stateChanged = false;
+    let hadUnwatchedBefore = (state.unwatched || []).length > 0;
 
     for (const video of newVideos) {
       if (!state.unwatched.includes(video.videoId)) {
         state.unwatched.push(video.videoId);
         stateChanged = true;
-        addToNagActive(env, deviceId, channelId);
       }
 
       if (video.type === 'live_scheduled') {
         const publishedTime = new Date(video.publishedAt).getTime();
         const events = await getKV(kv, key.upcomingEvents()) || [];
         if (!events.some((e) => e.videoId === video.videoId)) {
-          events.push({ channelId, videoId: video.videoId, scheduledFor: publishedTime, addedAt: Date.now() });
+          events.push({ channelId, videoId: video.videoId, scheduledFor: publishedTime, addedAt: now });
           await putKV(kv, key.upcomingEvents(), events);
         }
         continue;
@@ -250,6 +283,12 @@ async function pollSingleRssChannel(env, ctx, channelId) {
       const isLivestream = video.type === 'live';
       const bypassesDnd = effective.dndBypass || isLivestream;
       if (dndActive && !bypassesDnd) shouldNotify = false;
+    }
+
+    // Add to nag:active only when genuine unread items were added and
+    // unwatched transitioned from empty to non-empty.
+    if (stateChanged && !hadUnwatchedBefore && (state.unwatched || []).length > 0) {
+      addToNagActive(env, deviceId, channelId);
     }
 
     if (stateChanged) {
@@ -280,7 +319,7 @@ async function pollSingleRssChannel(env, ctx, channelId) {
       const pushResult = await sendFCMPush(accessToken, projectId, profile.fcmToken, notifPayload);
       if (pushResult.deadToken) deadDevices.push(deviceId);
       if (pushResult.sent) {
-        state.lastNagAt = Date.now();
+        state.lastNagAt = now;
         await putKV(kv, key.deviceState(deviceId, channelId), state);
       }
     }
@@ -289,5 +328,13 @@ async function pollSingleRssChannel(env, ctx, channelId) {
   for (const deviceId of [...new Set(deadDevices)]) {
     console.log(`[RSS] Pruning dead device: ${deviceId}`);
     ctx.waitUntil(cleanupDeadDevice(deviceId, env, 'fcm_unregistered'));
+  }
+}
+
+function jsonEqualish(a, b) {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
   }
 }

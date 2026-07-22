@@ -12,6 +12,7 @@ export const key = {
   channelRecentPosts: (channelId) => `channel:${channelId}:recent:posts`,
   firstPollAtPosts:   (channelId) => `channel:${channelId}:firstPollAt:posts`,
   channelKnownPosts:  (channelId) => `channel:${channelId}:known:posts`,
+  channelKnownVideos: (channelId) => `channel:${channelId}:known:videos`,
   deviceProfile:      (deviceId)  => `device:${deviceId}:profile`,
   deviceSettings:     (deviceId)  => `device:${deviceId}:settings`,
   deviceChannels:     (deviceId)  => `device:${deviceId}:channels`,
@@ -32,6 +33,7 @@ export const key = {
 // ─── Constants ──────────────────────────────────────────────────────────
 
 export const KNOWN_COMMUNITY_POST_LIMIT = 20;
+export const KNOWN_VIDEO_LIMIT = 500;
 export const RELENTLESS_5M_BACKOFF_THRESHOLD = 12; // 12 × 5min = 1 hour
 const FCM_TOKEN_CACHE_TTL_MS = 50 * 60 * 1000; // 50 minutes (access tokens last 60min)
 const FCM_TOKEN_CACHE_MARGIN_MS = 5 * 60 * 1000; // refresh 5min before expiry
@@ -390,6 +392,107 @@ export async function removeFromNagActive(env, deviceId, channelId) {
   if (filtered.length !== active.length) {
     await putKV(kv, key.nagActive(), filtered);
   }
+}
+
+// ─── RSS known-video watermark helpers ──────────────────────────────────
+//
+// Separate notification memory from display cache. `channel:{id}:recent`
+// shows the latest RSS entries; `channel:{id}:known:videos` remembers which
+// IDs have been seen and the high-watermark publishedAt. A video is only
+// notified if its ID is unknown AND its publishedAt is strictly greater
+// than the channel's high-watermark. This prevents old videos exposed by
+// deletions from re-notifying.
+
+export function createEmptyKnownVideos(seedTimestamp) {
+  return {
+    ids: [],
+    highWatermarkAt: null,
+    highWatermarkIds: [],
+    seededAt: seedTimestamp || new Date().toISOString(),
+    updatedAt: seedTimestamp || new Date().toISOString(),
+  };
+}
+
+export function seedKnownVideosFromRss(known, rssVideos, nowIso) {
+  if (!known) known = createEmptyKnownVideos(nowIso);
+  const timestamp = nowIso || new Date().toISOString();
+  const ids = rssVideos.map((v) => v.videoId).filter(Boolean);
+  const highWatermarkAt = ids.length > 0 ? maxPublishedAt(rssVideos) : known.highWatermarkAt;
+  const highWatermarkIds = ids.length > 0 ? idsAtPublishedAt(rssVideos, highWatermarkAt) : known.highWatermarkIds;
+  return {
+    ids: boundKnownVideoIds(ids),
+    highWatermarkAt,
+    highWatermarkIds,
+    seededAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+export function classifyRssVideosForNotification(known, rssVideos) {
+  if (!known || !known.highWatermarkAt) {
+    return rssVideos.map((v) => ({ ...v, isNew: false, reason: 'no-watermark' }));
+  }
+  const knownIds = new Set(known.ids || []);
+  const watermark = known.highWatermarkAt;
+  return rssVideos.map((v) => {
+    const published = v.published || v.publishedAt;
+    if (!published) return { ...v, isNew: false, reason: 'missing-published' };
+    if (knownIds.has(v.videoId)) return { ...v, isNew: false, reason: 'known-id' };
+    if (new Date(published).getTime() <= new Date(watermark).getTime()) {
+      return { ...v, isNew: false, reason: 'at-or-below-watermark' };
+    }
+    return { ...v, isNew: true, reason: 'above-watermark' };
+  });
+}
+
+export function updateKnownVideosAfterPoll(known, rssVideos, notifiedVideos, nowIso) {
+  const timestamp = nowIso || new Date().toISOString();
+  const incomingIds = rssVideos.map((v) => v.videoId).filter(Boolean);
+  const mergedIds = boundKnownVideoIds([...new Set([...incomingIds, ...(known?.ids || [])])]);
+
+  let highWatermarkAt = known?.highWatermarkAt || null;
+  let highWatermarkIds = known?.highWatermarkIds || [];
+  const candidates = [...(notifiedVideos || []), ...rssVideos];
+  const maxTs = maxPublishedAt(candidates);
+  if (maxTs && (!highWatermarkAt || new Date(maxTs).getTime() > new Date(highWatermarkAt).getTime())) {
+    highWatermarkAt = maxTs;
+    highWatermarkIds = idsAtPublishedAt(candidates, maxTs);
+  }
+
+  return {
+    ids: mergedIds,
+    highWatermarkAt,
+    highWatermarkIds,
+    seededAt: known?.seededAt || timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+export function boundKnownVideoIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  const unique = [...new Set(ids.filter((id) => typeof id === 'string' && id.length > 0))];
+  return unique.slice(0, KNOWN_VIDEO_LIMIT);
+}
+
+function maxPublishedAt(videos) {
+  let max = null;
+  for (const v of videos || []) {
+    const ts = v.published || v.publishedAt;
+    if (!ts) continue;
+    if (!max || new Date(ts).getTime() > new Date(max).getTime()) max = ts;
+  }
+  return max;
+}
+
+function idsAtPublishedAt(videos, targetTs) {
+  if (!targetTs) return [];
+  const targetTime = new Date(targetTs).getTime();
+  const ids = [];
+  for (const v of videos || []) {
+    const ts = v.published || v.publishedAt;
+    if (ts && new Date(ts).getTime() === targetTime) ids.push(v.videoId);
+  }
+  return [...new Set(ids)];
 }
 
 // ─── Community post helpers ─────────────────────────────────────────────
