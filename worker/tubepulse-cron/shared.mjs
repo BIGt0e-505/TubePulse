@@ -419,13 +419,15 @@ export function seedKnownVideosFromRss(known, rssVideos, nowIso) {
   const ids = rssVideos.map((v) => v.videoId).filter(Boolean);
   const highWatermarkAt = ids.length > 0 ? maxPublishedAt(rssVideos) : known.highWatermarkAt;
   const highWatermarkIds = ids.length > 0 ? idsAtPublishedAt(rssVideos, highWatermarkAt) : known.highWatermarkIds;
-  return {
+  const nextKnown = {
     ids: boundKnownVideoIds(ids),
     highWatermarkAt,
     highWatermarkIds,
-    seededAt: timestamp,
+    seededAt: known?.seededAt || timestamp,
     updatedAt: timestamp,
   };
+  // Seeding always counts as a semantic change (missing state is being seeded).
+  return { nextKnown, changed: true };
 }
 
 export function classifyRssVideosForNotification(known, rssVideos) {
@@ -459,13 +461,25 @@ export function updateKnownVideosAfterPoll(known, rssVideos, notifiedVideos, now
     highWatermarkIds = idsAtPublishedAt(candidates, maxTs);
   }
 
-  return {
+  const nextKnown = {
     ids: mergedIds,
     highWatermarkAt,
     highWatermarkIds,
     seededAt: known?.seededAt || timestamp,
-    updatedAt: timestamp,
+    updatedAt: known?.updatedAt || timestamp,
   };
+
+  const changed =
+    !known ||
+    !jsonEqual(known.ids || [], nextKnown.ids) ||
+    known.highWatermarkAt !== nextKnown.highWatermarkAt ||
+    !jsonEqual(known.highWatermarkIds || [], nextKnown.highWatermarkIds);
+
+  if (changed) {
+    nextKnown.updatedAt = timestamp;
+  }
+
+  return { nextKnown, changed };
 }
 
 export function boundKnownVideoIds(ids) {

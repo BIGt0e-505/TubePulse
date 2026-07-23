@@ -61,7 +61,8 @@ async function pollSingleRssChannel(env, ctx, channelId) {
   // First-run guard: if known:videos is missing, seed it from the current
   // RSS feed and seed the display cache. Never notify on first seed.
   if (!known || !known.highWatermarkAt) {
-    const seededKnown = seedKnownVideosFromRss(known, uploads, nowIso);
+    const seedResult = seedKnownVideosFromRss(known, uploads, nowIso);
+    const seededKnown = seedResult.nextKnown;
     await putKV(kv, key.channelKnownVideos(channelId), seededKnown);
 
     const subs = await getKV(kv, key.channelSubs(channelId)) || [];
@@ -148,9 +149,6 @@ async function pollSingleRssChannel(env, ctx, channelId) {
     if (viewsChanged) {
       refreshedPrev[0] = { ...latest, views: String(newViews), viewsLastCheckedHour: currentHour };
       recentChanged = true;
-    } else if (latest.viewsLastCheckedHour === undefined) {
-      refreshedPrev[0] = { ...latest, viewsLastCheckedHour: currentHour };
-      recentChanged = true;
     }
     if (likesChanged) {
       refreshedPrev[0] = {
@@ -199,9 +197,11 @@ async function pollSingleRssChannel(env, ctx, channelId) {
     await putKVIfChanged(kv, key.channelRecent(channelId), mergedRecent, prevRecent);
   }
 
-  // Update known/watermark state after every poll.
-  const updatedKnown = updateKnownVideosAfterPoll(known, uploads, newVideos, nowIso);
-  await putKVIfChanged(kv, key.channelKnownVideos(channelId), updatedKnown, known);
+  // Update known/watermark state after every poll — write only on semantic change.
+  const knownResult = updateKnownVideosAfterPoll(known, uploads, newVideos, nowIso);
+  if (knownResult.changed) {
+    await putKV(kv, key.channelKnownVideos(channelId), knownResult.nextKnown);
+  }
 
   if (suppressed.length > 0) {
     console.log(`[RSS] ${channelId}: suppressed ${suppressed.length} videos (known or below watermark)`);
