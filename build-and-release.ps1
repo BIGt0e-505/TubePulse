@@ -141,7 +141,7 @@ function Assert-NoUntrackedFiles {
         exit 1
     }
 
-    $untracked = @($status | Where-Object { $_ -like '?? *' } | ForEach-Object { $_.Substring(3) })
+    $untracked = @($status | Where-Object { $_.StartsWith('?? ') } | ForEach-Object { $_.Substring(3) })
     if ($untracked.Count -eq 0) { return }
 
     Write-Host ""
@@ -164,7 +164,7 @@ function Assert-OnlyReleaseVersionChanges {
 
     $unexpected = @()
     foreach ($line in $status) {
-        if ($line -like '?? *') { continue }
+        if ($line.StartsWith('?? ')) { continue }
         if ($line.Length -lt 4) { continue }
 
         $state = $line.Substring(0, 2)
