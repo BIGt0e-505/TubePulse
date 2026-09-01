@@ -68,3 +68,7 @@ GoogleService-Info.plist
 # Aider
 .aider*
 .cmdline-tools/
+
+# KV dumps and other root-level text files
+/*.txt
+patches/

@@ -138,7 +138,7 @@ export default function HomeScreen({ navigation }) {
             const existingEntry = cacheRef.current[handle] || {};
             const localVideos = existingEntry.videos || [];
             // Use server data when available, preserve local-only channels
-            const mergedVideos = videos.length >= localVideos.length ? videos : localVideos;
+            const mergedVideos = videos.length > 0 ? videos : localVideos;
 
             newCache[handle] = {
               name: serverChannel.meta?.name || existingEntry.name,
